@@ -330,13 +330,13 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "num_gpu",
   "mixture_enable",
   "mixture_num_experts",
-  "mixture_r_min",
+  "mixture_balance_factor",
   "mixture_gate_iters_per_round",
   "mixture_init",
   "mixture_e_step_alpha",
   "mixture_e_step_loss",
   "mixture_r_smoothing",
-  "mixture_r_ema_lambda",
+  "mixture_smoothing_lambda",
   "mixture_predict_output",
   "mixture_gate_max_depth",
   "mixture_gate_num_leaves",
@@ -693,8 +693,9 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetInt(params, "mixture_num_experts", &mixture_num_experts);
   CHECK_GE(mixture_num_experts, 2);
 
-  GetDouble(params, "mixture_r_min", &mixture_r_min);
-  CHECK_GT(mixture_r_min, 0.0);
+  GetInt(params, "mixture_balance_factor", &mixture_balance_factor);
+  CHECK_GE(mixture_balance_factor, 2);
+  CHECK_LE(mixture_balance_factor, 10);
 
   GetInt(params, "mixture_gate_iters_per_round", &mixture_gate_iters_per_round);
   CHECK_GE(mixture_gate_iters_per_round, 1);
@@ -708,9 +709,9 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
 
   GetString(params, "mixture_r_smoothing", &mixture_r_smoothing);
 
-  GetDouble(params, "mixture_r_ema_lambda", &mixture_r_ema_lambda);
-  CHECK_GE(mixture_r_ema_lambda, 0.0);
-  CHECK_LE(mixture_r_ema_lambda, 1.0);
+  GetDouble(params, "mixture_smoothing_lambda", &mixture_smoothing_lambda);
+  CHECK_GE(mixture_smoothing_lambda, 0.0);
+  CHECK_LE(mixture_smoothing_lambda, 1.0);
 
   GetString(params, "mixture_predict_output", &mixture_predict_output);
 
@@ -846,13 +847,13 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[num_gpu: " << num_gpu << "]\n";
   str_buf << "[mixture_enable: " << mixture_enable << "]\n";
   str_buf << "[mixture_num_experts: " << mixture_num_experts << "]\n";
-  str_buf << "[mixture_r_min: " << mixture_r_min << "]\n";
+  str_buf << "[mixture_balance_factor: " << mixture_balance_factor << "]\n";
   str_buf << "[mixture_gate_iters_per_round: " << mixture_gate_iters_per_round << "]\n";
   str_buf << "[mixture_init: " << mixture_init << "]\n";
   str_buf << "[mixture_e_step_alpha: " << mixture_e_step_alpha << "]\n";
   str_buf << "[mixture_e_step_loss: " << mixture_e_step_loss << "]\n";
   str_buf << "[mixture_r_smoothing: " << mixture_r_smoothing << "]\n";
-  str_buf << "[mixture_r_ema_lambda: " << mixture_r_ema_lambda << "]\n";
+  str_buf << "[mixture_smoothing_lambda: " << mixture_smoothing_lambda << "]\n";
   str_buf << "[mixture_predict_output: " << mixture_predict_output << "]\n";
   str_buf << "[mixture_gate_max_depth: " << mixture_gate_max_depth << "]\n";
   str_buf << "[mixture_gate_num_leaves: " << mixture_gate_num_leaves << "]\n";
@@ -1005,13 +1006,13 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"num_gpu", {}},
     {"mixture_enable", {}},
     {"mixture_num_experts", {}},
-    {"mixture_r_min", {}},
+    {"mixture_balance_factor", {}},
     {"mixture_gate_iters_per_round", {}},
     {"mixture_init", {}},
     {"mixture_e_step_alpha", {}},
     {"mixture_e_step_loss", {}},
     {"mixture_r_smoothing", {}},
-    {"mixture_r_ema_lambda", {}},
+    {"mixture_smoothing_lambda", {}},
     {"mixture_predict_output", {}},
     {"mixture_gate_max_depth", {}},
     {"mixture_gate_num_leaves", {}},
@@ -1164,13 +1165,13 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"num_gpu", "int"},
     {"mixture_enable", "bool"},
     {"mixture_num_experts", "int"},
-    {"mixture_r_min", "double"},
+    {"mixture_balance_factor", "int"},
     {"mixture_gate_iters_per_round", "int"},
     {"mixture_init", "string"},
     {"mixture_e_step_alpha", "double"},
     {"mixture_e_step_loss", "string"},
     {"mixture_r_smoothing", "string"},
-    {"mixture_r_ema_lambda", "double"},
+    {"mixture_smoothing_lambda", "double"},
     {"mixture_predict_output", "string"},
     {"mixture_gate_max_depth", "int"},
     {"mixture_gate_num_leaves", "int"},

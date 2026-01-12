@@ -1153,10 +1153,13 @@ struct Config {
   // desc = each expert is a separate GBDT that specializes in different regimes
   int mixture_num_experts = 4;
 
-  // check = >0.0
-  // desc = minimum responsibility value for each expert (prevents expert collapse)
-  // desc = responsibilities are clipped to this minimum value and renormalized
-  double mixture_r_min = 1e-3;
+  // check = >=2
+  // check = <=10
+  // desc = load balancing factor for Loss-Free Load Balancing
+  // desc = minimum expert usage threshold is calculated as 1 / (mixture_balance_factor * num_experts)
+  // desc = lower values enforce more balanced usage, higher values allow more imbalance
+  // desc = e.g., factor=10 with 2 experts allows up to 95:5 imbalance
+  int mixture_balance_factor = 10;
 
   // check = >=1
   // desc = number of gate training iterations per boosting round
@@ -1186,18 +1189,20 @@ struct Config {
   std::string mixture_e_step_loss = "auto";
 
   // type = enum
-  // options = none, ema
+  // options = none, ema, markov, momentum
   // desc = time-series smoothing method for responsibilities
   // desc = ``none``: no smoothing
   // desc = ``ema``: exponential moving average (assumes row order is time order)
+  // desc = ``markov``: use previous gate probabilities for blending
+  // desc = ``momentum``: EMA with trend (considers direction of regime changes)
   std::string mixture_r_smoothing = "none";
 
   // check = >=0.0
   // check = <=1.0
-  // desc = EMA decay factor for responsibility smoothing
+  // desc = smoothing coefficient for responsibility/gate smoothing (used by EMA, Markov modes)
   // desc = r[i] = (1-lambda)*r[i] + lambda*r[i-1]
   // desc = 0 means no smoothing, 1 means complete carry-forward
-  double mixture_r_ema_lambda = 0.0;
+  double mixture_smoothing_lambda = 0.0;
 
   // check = >=0
   // desc = number of warmup iterations before E-step begins

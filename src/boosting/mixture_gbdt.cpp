@@ -34,7 +34,9 @@ MixtureGBDT::MixtureGBDT()
       num_data_(0),
       iter_(0),
       max_feature_idx_(0),
-      label_idx_(0) {
+      label_idx_(0),
+      use_markov_(false),
+      use_momentum_(false) {
 }
 
 MixtureGBDT::~MixtureGBDT() {
@@ -105,11 +107,22 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
     Log::Debug("MixtureGBDT::Init - expert %d initialized", k);
   }
 
+  // Check smoothing modes
+  use_markov_ = (config_->mixture_r_smoothing == "markov");
+  use_momentum_ = (config_->mixture_r_smoothing == "momentum");
+
   // Initialize gate
-  // Note: Gate uses pseudo-labels, so we pass nullptr for objective
   Log::Debug("MixtureGBDT::Init - creating gate");
   gate_.reset(new GBDT());
   Log::Debug("MixtureGBDT::Init - initializing gate");
+
+  if (use_markov_) {
+    Log::Info("MixtureGBDT: Markov mode enabled (lambda=%.2f)",
+              config_->mixture_smoothing_lambda);
+  } else if (use_momentum_) {
+    Log::Info("MixtureGBDT: Momentum mode enabled (lambda=%.2f)",
+              config_->mixture_smoothing_lambda);
+  }
   gate_->Init(gate_config_.get(), train_data_, nullptr, {});
   Log::Debug("MixtureGBDT::Init - gate initialized");
 
@@ -122,10 +135,21 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   gradients_.resize(num_data_);
   hessians_.resize(num_data_);
 
+  // Initialize Markov-specific buffers
+  if (use_markov_) {
+    prev_gate_proba_.resize(nk);
+    const double uniform_prob = 1.0 / num_experts_;
+    std::fill(prev_gate_proba_.begin(), prev_gate_proba_.end(), uniform_prob);
+  }
+
+  // Initialize expert bias for loss-free load balancing
+  expert_bias_.resize(num_experts_, 0.0);
+
   // Initialize responsibilities
   InitResponsibilities();
 
-  Log::Info("MixtureGBDT: Initialization complete");
+  Log::Info("MixtureGBDT: Initialization complete (smoothing=%s)",
+            config_->mixture_r_smoothing.c_str());
 }
 
 void MixtureGBDT::InitResponsibilities() {
@@ -261,18 +285,53 @@ void MixtureGBDT::Forward() {
   int64_t out_len;
   gate_->GetPredictAt(0, gate_raw.data(), &out_len);
 
-  // Apply softmax per sample
+  // Apply softmax per sample with expert bias for load balancing
   // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
   // gate_proba_ is in sample-major order: gate_proba_[i * num_experts_ + k]
+  // expert_bias_ is added to encourage balanced expert usage (Loss-Free Balancing)
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    // Copy to sample-major order for this sample
+    // Copy to sample-major order for this sample, adding expert bias
     std::vector<double> scores(num_experts_);
     for (int k = 0; k < num_experts_; ++k) {
-      scores[k] = gate_raw[k * num_data_ + i];  // class-major indexing
+      scores[k] = gate_raw[k * num_data_ + i] + expert_bias_[k];  // Add bias for load balancing
     }
     Softmax(scores.data(), num_experts_,
             gate_proba_.data() + i * num_experts_);
+  }
+
+  // Markov mode: blend gate_proba with prev_gate_proba
+  // This makes regime transitions smoother and dependent on previous state
+  if (use_markov_) {
+    const double lambda = config_->mixture_smoothing_lambda;
+    if (lambda > 0.0) {
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        double sum = 0.0;
+        for (int k = 0; k < num_experts_; ++k) {
+          size_t idx = i * num_experts_ + k;
+          // Blend: new_proba = (1-lambda) * current + lambda * prev
+          gate_proba_[idx] = (1.0 - lambda) * gate_proba_[idx] +
+                             lambda * prev_gate_proba_[idx];
+          sum += gate_proba_[idx];
+        }
+        // Renormalize (should be close to 1 already, but for numerical stability)
+        for (int k = 0; k < num_experts_; ++k) {
+          gate_proba_[i * num_experts_ + k] /= sum;
+        }
+      }
+    }
+
+    // Update prev_gate_proba with current values (for next iteration)
+    // Using row-wise copy: prev[i] = current[i-1] for time series
+    // First row keeps its initial/previous value
+    for (data_size_t i = num_data_ - 1; i > 0; --i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        prev_gate_proba_[i * num_experts_ + k] = gate_proba_[(i - 1) * num_experts_ + k];
+      }
+    }
+    // First row: use current gate_proba (no previous available in this batch)
+    // This maintains consistency for the first sample
   }
 
   // Compute combined prediction: yhat[i] = sum_k gate_proba[i,k] * expert_pred[i,k]
@@ -289,7 +348,6 @@ void MixtureGBDT::Forward() {
 void MixtureGBDT::EStep() {
   const label_t* labels = train_data_->metadata().label();
   const double alpha = config_->mixture_e_step_alpha;
-  const double r_min = config_->mixture_r_min;
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
@@ -305,48 +363,118 @@ void MixtureGBDT::EStep() {
     }
 
     // Apply softmax to get responsibilities
+    // Note: No hard clipping here. Collapse prevention is handled by
+    // Loss-Free Load Balancing (UpdateExpertBias) which adjusts gate bias.
     Softmax(scores.data(), num_experts_, responsibilities_.data() + i * num_experts_);
-
-    // Clip to r_min and renormalize
-    double sum = 0.0;
-    for (int k = 0; k < num_experts_; ++k) {
-      size_t idx = i * num_experts_ + k;
-      if (responsibilities_[idx] < r_min) {
-        responsibilities_[idx] = r_min;
-      }
-      sum += responsibilities_[idx];
-    }
-    for (int k = 0; k < num_experts_; ++k) {
-      responsibilities_[i * num_experts_ + k] /= sum;
-    }
   }
 }
 
 void MixtureGBDT::SmoothResponsibilities() {
-  if (config_->mixture_r_smoothing != "ema") {
-    return;
-  }
-
-  const double lambda = config_->mixture_r_ema_lambda;
+  const double lambda = config_->mixture_smoothing_lambda;
   if (lambda <= 0.0) {
     return;
   }
 
-  // Apply EMA in row order (assumed to be time order)
-  // r[i] = (1-lambda)*r[i] + lambda*r[i-1]
-  for (data_size_t i = 1; i < num_data_; ++i) {
-    double sum = 0.0;
-    for (int k = 0; k < num_experts_; ++k) {
-      size_t idx = i * num_experts_ + k;
-      size_t prev_idx = (i - 1) * num_experts_ + k;
-      responsibilities_[idx] = (1.0 - lambda) * responsibilities_[idx] +
-                               lambda * responsibilities_[prev_idx];
-      sum += responsibilities_[idx];
+  if (config_->mixture_r_smoothing == "ema") {
+    // Apply EMA in row order (assumed to be time order)
+    // r[i] = (1-lambda)*r[i] + lambda*r[i-1]
+    for (data_size_t i = 1; i < num_data_; ++i) {
+      double sum = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        size_t idx = i * num_experts_ + k;
+        size_t prev_idx = (i - 1) * num_experts_ + k;
+        responsibilities_[idx] = (1.0 - lambda) * responsibilities_[idx] +
+                                 lambda * responsibilities_[prev_idx];
+        sum += responsibilities_[idx];
+      }
+      // Renormalize
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] /= sum;
+      }
     }
-    // Renormalize
-    for (int k = 0; k < num_experts_; ++k) {
-      responsibilities_[i * num_experts_ + k] /= sum;
+  } else if (config_->mixture_r_smoothing == "momentum") {
+    // Momentum smoothing: EMA with trend (direction of change)
+    // extrapolated[i] = r[i-1] + lambda * (r[i-1] - r[i-2])
+    // r_smooth[i] = (1-lambda)*r[i] + lambda*extrapolated[i]
+    // This captures "inertia" - if regime is trending in a direction, continue that trend
+
+    for (data_size_t i = 1; i < num_data_; ++i) {
+      double sum = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        size_t idx = i * num_experts_ + k;
+        size_t prev_idx = (i - 1) * num_experts_ + k;
+
+        double extrapolated;
+        if (i >= 2) {
+          // Use trend from previous samples
+          size_t prev2_idx = (i - 2) * num_experts_ + k;
+          double trend = responsibilities_[prev_idx] - responsibilities_[prev2_idx];
+          extrapolated = responsibilities_[prev_idx] + lambda * trend;
+        } else {
+          // Not enough history, just use previous value
+          extrapolated = responsibilities_[prev_idx];
+        }
+
+        // Blend current with extrapolated
+        responsibilities_[idx] = (1.0 - lambda) * responsibilities_[idx] +
+                                 lambda * extrapolated;
+        // Clip to valid range
+        if (responsibilities_[idx] < 0.0) responsibilities_[idx] = 0.0;
+        if (responsibilities_[idx] > 1.0) responsibilities_[idx] = 1.0;
+        sum += responsibilities_[idx];
+      }
+      // Renormalize
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] /= (sum + kMixtureEpsilon);
+      }
     }
+  }
+}
+
+void MixtureGBDT::UpdateExpertBias() {
+  // Loss-Free Load Balancing: adjust expert bias when usage falls below threshold
+  // Reference: "Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts" (2024)
+  //
+  // Modified for regime-switching: only intervene when an expert's usage
+  // falls below the minimum threshold, allowing natural imbalanced distributions.
+  //
+  // min_usage = 1 / (balance_factor * K)
+  // e.g., factor=10, K=2 -> min_usage = 5%, allows 95:5 imbalance
+
+  const double min_usage = 1.0 / (config_->mixture_balance_factor * num_experts_);
+  const double bias_update_rate = 0.1;  // η: how quickly to adjust bias
+
+  // Compute actual load per expert (mean responsibility)
+  std::vector<double> actual_load(num_experts_, 0.0);
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    for (int k = 0; k < num_experts_; ++k) {
+      actual_load[k] += responsibilities_[i * num_experts_ + k];
+    }
+  }
+  for (int k = 0; k < num_experts_; ++k) {
+    actual_load[k] /= num_data_;  // Normalize to [0, 1]
+  }
+
+  // Update bias: only increase for underloaded experts (below threshold)
+  // Do NOT decrease for overloaded - allow natural imbalance
+  for (int k = 0; k < num_experts_; ++k) {
+    if (actual_load[k] < min_usage) {
+      double load_diff = min_usage - actual_load[k];
+      expert_bias_[k] += bias_update_rate * load_diff;
+    }
+    // Note: We don't decrease bias for overloaded experts
+    // This allows the model to learn naturally imbalanced regime distributions
+  }
+
+  // Log for debugging (only occasionally to avoid spam)
+  if (iter_ % 10 == 0) {
+    std::string load_str = "";
+    for (int k = 0; k < num_experts_; ++k) {
+      load_str += std::to_string(actual_load[k]).substr(0, 5) + " ";
+    }
+    Log::Debug("MixtureGBDT: Expert loads = [%s], bias = [%.3f, %.3f, ...]",
+               load_str.c_str(), expert_bias_[0],
+               num_experts_ > 1 ? expert_bias_[1] : 0.0);
   }
 }
 
@@ -463,8 +591,12 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   const int warmup_iters = config_->mixture_warmup_iters;
   if (iter_ >= warmup_iters) {
     EStep();
+
     // Apply time-series smoothing if enabled
     SmoothResponsibilities();
+
+    // Update expert bias for loss-free load balancing
+    UpdateExpertBias();
   }
 
   // M-step: update experts
@@ -522,16 +654,16 @@ const double* MixtureGBDT::GetTrainingScore(int64_t* out_len) {
 }
 
 std::vector<double> MixtureGBDT::GetEvalAt(int data_idx) const {
-  // TODO: Implement proper evaluation
-  std::vector<double> result;
-  return result;
+  (void)data_idx;
+  Log::Fatal("MixtureGBDT::GetEvalAt is not implemented");
+  return {};
 }
 
 int64_t MixtureGBDT::GetNumPredictAt(int data_idx) const {
   if (data_idx == 0) {
     return num_data_;
   }
-  // TODO: Handle validation data
+  Log::Fatal("MixtureGBDT: Validation data is not supported");
   return 0;
 }
 
@@ -658,33 +790,105 @@ void MixtureGBDT::PredictExpertPred(const double* features, double* output) cons
   }
 }
 
+void MixtureGBDT::PredictWithPrevProba(const double* features, const double* prev_proba,
+                                        double* output) const {
+  // Create a no-op early stop instance
+  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
+      "none", PredictionEarlyStopConfig());
+  const PredictionEarlyStopInstance* early_stop_ptr = &no_early_stop;
+
+  // Get expert predictions
+  std::vector<double> expert_preds(num_experts_);
+  for (int k = 0; k < num_experts_; ++k) {
+    experts_[k]->Predict(features, &expert_preds[k], early_stop_ptr);
+  }
+
+  // Get current gate probabilities
+  std::vector<double> gate_raw(num_experts_);
+  gate_->PredictRaw(features, gate_raw.data(), early_stop_ptr);
+
+  std::vector<double> gate_prob(num_experts_);
+  Softmax(gate_raw.data(), num_experts_, gate_prob.data());
+
+  // Blend with prev_proba if provided and in Markov mode
+  if (use_markov_ && prev_proba != nullptr) {
+    const double lambda = config_->mixture_smoothing_lambda;
+    if (lambda > 0.0) {
+      double sum = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        gate_prob[k] = (1.0 - lambda) * gate_prob[k] + lambda * prev_proba[k];
+        sum += gate_prob[k];
+      }
+      // Renormalize
+      for (int k = 0; k < num_experts_; ++k) {
+        gate_prob[k] /= sum;
+      }
+    }
+  }
+
+  // Compute weighted sum
+  double sum = 0.0;
+  for (int k = 0; k < num_experts_; ++k) {
+    sum += gate_prob[k] * expert_preds[k];
+  }
+  *output = sum;
+}
+
+void MixtureGBDT::PredictRegimeProbaWithPrevProba(const double* features, const double* prev_proba,
+                                                   double* output) const {
+  // Create a no-op early stop instance
+  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
+      "none", PredictionEarlyStopConfig());
+
+  // Get current gate probabilities
+  std::vector<double> gate_raw(num_experts_);
+  gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
+  Softmax(gate_raw.data(), num_experts_, output);
+
+  // Blend with prev_proba if provided and in Markov mode
+  if (use_markov_ && prev_proba != nullptr) {
+    const double lambda = config_->mixture_smoothing_lambda;
+    if (lambda > 0.0) {
+      double sum = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        output[k] = (1.0 - lambda) * output[k] + lambda * prev_proba[k];
+        sum += output[k];
+      }
+      // Renormalize
+      for (int k = 0; k < num_experts_; ++k) {
+        output[k] /= sum;
+      }
+    }
+  }
+}
+
 void MixtureGBDT::PredictLeafIndex(const double* features, double* output) const {
-  // Return leaf indices from all experts and gate
-  // TODO: Implement properly
   (void)features;
   (void)output;
+  Log::Fatal("MixtureGBDT::PredictLeafIndex is not implemented");
 }
 
 void MixtureGBDT::PredictLeafIndexByMap(const std::unordered_map<int, double>& features,
                                         double* output) const {
   (void)features;
   (void)output;
+  Log::Fatal("MixtureGBDT::PredictLeafIndexByMap is not implemented");
 }
 
 void MixtureGBDT::PredictContrib(const double* features, double* output) const {
-  // TODO: Implement SHAP for mixture model
   (void)features;
   (void)output;
+  Log::Fatal("MixtureGBDT::PredictContrib (SHAP) is not implemented");
 }
 
 void MixtureGBDT::PredictContribByMap(const std::unordered_map<int, double>& features,
                                        std::vector<std::unordered_map<int, double>>* output) const {
   (void)features;
   (void)output;
+  Log::Fatal("MixtureGBDT::PredictContribByMap is not implemented");
 }
 
 void MixtureGBDT::MergeFrom(const Boosting* other) {
-  // TODO: Implement merge
   (void)other;
   Log::Fatal("MixtureGBDT::MergeFrom is not implemented");
 }
@@ -717,6 +921,9 @@ void MixtureGBDT::ResetTrainingData(const Dataset* train_data,
   gradients_.resize(num_data_);
   hessians_.resize(num_data_);
 
+  // Reset expert bias for loss-free load balancing
+  std::fill(expert_bias_.begin(), expert_bias_.end(), 0.0);
+
   InitResponsibilities();
 }
 
@@ -730,9 +937,9 @@ void MixtureGBDT::ResetConfig(const Config* config) {
 
 void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
                                   const std::vector<const Metric*>& valid_metrics) {
-  // TODO: Implement validation
   (void)valid_data;
   (void)valid_metrics;
+  Log::Fatal("MixtureGBDT::AddValidDataset is not implemented");
 }
 
 void MixtureGBDT::RefitTree(const int* tree_leaf_prediction, const size_t nrow, const size_t ncol) {
@@ -747,7 +954,7 @@ std::string MixtureGBDT::DumpModel(int start_iteration, int num_iteration,
   (void)start_iteration;
   (void)num_iteration;
   (void)feature_importance_type;
-  // TODO: Implement JSON dump
+  Log::Fatal("MixtureGBDT::DumpModel is not implemented");
   return "{}";
 }
 
@@ -789,7 +996,7 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   ss << "mixture_e_step_alpha=" << config_->mixture_e_step_alpha << "\n";
   ss << "mixture_e_step_loss=" << e_step_loss_type_ << "\n";
   ss << "mixture_r_smoothing=" << config_->mixture_r_smoothing << "\n";
-  ss << "mixture_r_ema_lambda=" << config_->mixture_r_ema_lambda << "\n";
+  ss << "mixture_smoothing_lambda=" << config_->mixture_smoothing_lambda << "\n";
   ss << "\n";
 
   // Gate model
@@ -1012,17 +1219,17 @@ void MixtureGBDT::InitPredict(int start_iteration, int num_iteration, bool is_pr
 }
 
 double MixtureGBDT::GetLeafValue(int tree_idx, int leaf_idx) const {
-  // Determine which model and which tree
-  // TODO: Implement properly
   (void)tree_idx;
   (void)leaf_idx;
-  return 0.0;
+  Log::Fatal("MixtureGBDT::GetLeafValue is not implemented for mixture models");
+  return 0.0;  // Unreachable, but needed for compiler
 }
 
 void MixtureGBDT::SetLeafValue(int tree_idx, int leaf_idx, double val) {
   (void)tree_idx;
   (void)leaf_idx;
   (void)val;
+  Log::Fatal("MixtureGBDT::SetLeafValue is not implemented for mixture models");
 }
 
 std::string MixtureGBDT::GetLoadedParam() const {
