@@ -28,7 +28,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install build dependencies
-        run: pip install build
+        run: pip install build setuptools-scm
 
       - name: Build sdist
         run: python -m build --sdist
@@ -39,20 +39,12 @@ jobs:
         with:
           name: sdist
           path: python-package/dist/*.tar.gz
+          if-no-files-found: warn
 
   build-wheels-linux:
-    name: Build wheels (Linux ${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x86_64
-            container: quay.io/pypa/manylinux_2_28_x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-            container: quay.io/pypa/manylinux_2_28_aarch64
-    container: ${{ matrix.container }}
+    name: Build wheels (Linux x86_64)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -62,7 +54,7 @@ jobs:
 
       - name: Build wheel
         run: |
-          /opt/python/cp311-cp311/bin/pip install build scikit-build-core cmake ninja
+          /opt/python/cp311-cp311/bin/pip install build scikit-build-core cmake ninja setuptools-scm
           /opt/python/cp311-cp311/bin/python -m build --wheel
         working-directory: python-package
 
@@ -74,19 +66,13 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-linux-${{ matrix.arch }}
+          name: wheel-linux-x86_64
           path: repaired/*.whl
+          if-no-files-found: warn
 
   build-wheels-macos:
-    name: Build wheels (macOS ${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: macos-13
-            arch: x86_64
-          - os: macos-14
-            arch: arm64
+    name: Build wheels (macOS arm64)
+    runs-on: macos-14
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -102,7 +88,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install libomp cmake
-          pip install build scikit-build-core ninja
+          pip install build scikit-build-core ninja setuptools-scm
 
       - name: Build wheel
         run: python -m build --wheel
@@ -113,8 +99,9 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-macos-${{ matrix.arch }}
+          name: wheel-macos-arm64
           path: python-package/dist/*.whl
+          if-no-files-found: warn
 
   build-wheels-windows:
     name: Build wheels (Windows x86_64)
@@ -132,7 +119,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install build scikit-build-core cmake ninja
+        run: pip install build scikit-build-core cmake ninja setuptools-scm
 
       - name: Build wheel
         run: python -m build --wheel
@@ -143,6 +130,7 @@ jobs:
         with:
           name: wheel-windows-x86_64
           path: python-package/dist/*.whl
+          if-no-files-found: warn
 
   create-release:
     name: Create GitHub Release
