@@ -23,7 +23,7 @@ dependencies = [
     "scipy"
 ]
 description = "LightGBM-MoE: A regime-switching / mixture-of-experts extension of LightGBM"
-license = {file = "LICENSE"}
+license = {text = "MIT"}
 maintainers = [
   {name = "Yu Shi", email = "yushi@microsoft.com"}
 ]
