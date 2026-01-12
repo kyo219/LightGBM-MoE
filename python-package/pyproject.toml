@@ -83,6 +83,7 @@ strict-config = false
 minimum-version = "build-system.requires"
 
 [tool.scikit-build.cmake]
+source-dir = ".."
 version = "CMakeLists.txt"
 build-type = "Release"
 
