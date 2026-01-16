@@ -1218,10 +1218,10 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_gate_num_leaves", "int"},
     {"mixture_gate_learning_rate", "double"},
     {"mixture_gate_lambda_l2", "double"},
-    {"mixture_expert_max_depths", "string"},
-    {"mixture_expert_num_leaves", "string"},
-    {"mixture_expert_min_data_in_leaf", "string"},
-    {"mixture_expert_min_gain_to_split", "string"},
+    {"mixture_expert_max_depths", "vector<int>"},
+    {"mixture_expert_num_leaves", "vector<int>"},
+    {"mixture_expert_min_data_in_leaf", "vector<int>"},
+    {"mixture_expert_min_gain_to_split", "vector<double>"},
   });
   return map;
 }

@@ -1512,6 +1512,44 @@ Mixture-of-Experts Parameters
 
    -  L2 regularization for gate GBDT
 
+-  ``mixture_expert_max_depths`` :raw-html:`<a id="mixture_expert_max_depths" title="Permalink to this parameter" href="#mixture_expert_max_depths">&#x1F517;&#xFE0E;</a>`, default = ``""``, type = int
+
+   -  per-expert max_depth values (comma-separated list)
+
+   -  if empty, all experts use the global max_depth setting
+
+   -  if provided, must have exactly mixture_num_experts values
+
+   -  example: "3,5,7" for 3 experts with different depths
+
+-  ``mixture_expert_num_leaves`` :raw-html:`<a id="mixture_expert_num_leaves" title="Permalink to this parameter" href="#mixture_expert_num_leaves">&#x1F517;&#xFE0E;</a>`, default = ``""``, type = int
+
+   -  per-expert num_leaves values (comma-separated list)
+
+   -  if empty, all experts use the global num_leaves setting
+
+   -  if provided, must have exactly mixture_num_experts values
+
+-  ``mixture_expert_min_data_in_leaf`` :raw-html:`<a id="mixture_expert_min_data_in_leaf" title="Permalink to this parameter" href="#mixture_expert_min_data_in_leaf">&#x1F517;&#xFE0E;</a>`, default = ``""``, type = int
+
+   -  per-expert min_data_in_leaf values (comma-separated list)
+
+   -  if empty, all experts use the global min_data_in_leaf setting
+
+   -  if provided, must have exactly mixture_num_experts values
+
+   -  example: "20,5,1" for coarse-to-fine experts
+
+-  ``mixture_expert_min_gain_to_split`` :raw-html:`<a id="mixture_expert_min_gain_to_split" title="Permalink to this parameter" href="#mixture_expert_min_gain_to_split">&#x1F517;&#xFE0E;</a>`, default = ``""``, type = double
+
+   -  per-expert min_gain_to_split values (comma-separated list)
+
+   -  if empty, all experts use the global min_gain_to_split setting
+
+   -  if provided, must have exactly mixture_num_experts values
+
+   -  example: "0.1,0.01,0.0" for conservative-to-aggressive experts
+
 .. end params list
 
 Others
