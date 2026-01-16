@@ -335,6 +335,7 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_init",
   "mixture_e_step_alpha",
   "mixture_e_step_loss",
+  "mixture_e_step_mode",
   "mixture_r_smoothing",
   "mixture_smoothing_lambda",
   "mixture_warmup_iters",
@@ -708,6 +709,8 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
 
   GetString(params, "mixture_e_step_loss", &mixture_e_step_loss);
 
+  GetString(params, "mixture_e_step_mode", &mixture_e_step_mode);
+
   GetString(params, "mixture_r_smoothing", &mixture_r_smoothing);
 
   GetDouble(params, "mixture_smoothing_lambda", &mixture_smoothing_lambda);
@@ -856,6 +859,7 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_init: " << mixture_init << "]\n";
   str_buf << "[mixture_e_step_alpha: " << mixture_e_step_alpha << "]\n";
   str_buf << "[mixture_e_step_loss: " << mixture_e_step_loss << "]\n";
+  str_buf << "[mixture_e_step_mode: " << mixture_e_step_mode << "]\n";
   str_buf << "[mixture_r_smoothing: " << mixture_r_smoothing << "]\n";
   str_buf << "[mixture_smoothing_lambda: " << mixture_smoothing_lambda << "]\n";
   str_buf << "[mixture_warmup_iters: " << mixture_warmup_iters << "]\n";
@@ -1016,6 +1020,7 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_init", {}},
     {"mixture_e_step_alpha", {}},
     {"mixture_e_step_loss", {}},
+    {"mixture_e_step_mode", {}},
     {"mixture_r_smoothing", {}},
     {"mixture_smoothing_lambda", {}},
     {"mixture_warmup_iters", {}},
@@ -1176,6 +1181,7 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_init", "string"},
     {"mixture_e_step_alpha", "double"},
     {"mixture_e_step_loss", "string"},
+    {"mixture_e_step_mode", "string"},
     {"mixture_r_smoothing", "string"},
     {"mixture_smoothing_lambda", "double"},
     {"mixture_warmup_iters", "int"},

@@ -126,9 +126,9 @@ cd "${BUILD_DIRECTORY}"
 if [[ $TASK == "sdist" ]]; then
     sh ./build-python.sh sdist || exit 1
     sh .ci/check-python-dists.sh ./dist || exit 1
-    pip install "./dist/lightgbm-${LGB_VER}.tar.gz" -v || exit 1
+    pip install ./dist/*.tar.gz -v || exit 1
     if [[ $PRODUCES_ARTIFACTS == "true" ]]; then
-        cp "./dist/lightgbm-${LGB_VER}.tar.gz" "${BUILD_ARTIFACTSTAGINGDIRECTORY}" || exit 1
+        cp ./dist/*.tar.gz "${BUILD_ARTIFACTSTAGINGDIRECTORY}/" || exit 1
     fi
     pytest ./tests/python_package_test || exit 1
     exit 0
@@ -137,7 +137,7 @@ elif [[ $TASK == "bdist" ]]; then
         sh ./build-python.sh bdist_wheel || exit 1
         sh .ci/check-python-dists.sh ./dist || exit 1
         if [[ $PRODUCES_ARTIFACTS == "true" ]]; then
-            cp "$(echo "dist/lightgbm-${LGB_VER}-py3-none-macosx"*.whl)" "${BUILD_ARTIFACTSTAGINGDIRECTORY}" || exit 1
+            cp ./dist/*.whl "${BUILD_ARTIFACTSTAGINGDIRECTORY}/" || exit 1
         fi
     else
         if [[ $ARCH == "x86_64" ]]; then
@@ -146,17 +146,17 @@ elif [[ $TASK == "bdist" ]]; then
             PLATFORM="manylinux2014_$ARCH"
         fi
         sh ./build-python.sh bdist_wheel --integrated-opencl || exit 1
-        # rename wheel, to fix scikit-build-core choosing the platform 'linux_aarch64' instead of
-        # a manylinux tag
-        mv \
-            ./dist/*.whl \
-            ./dist/tmp.whl || exit 1
-        mv \
-            ./dist/tmp.whl \
-            "./dist/lightgbm-${LGB_VER}-py3-none-${PLATFORM}.whl" || exit 1
+        # Rename wheel to use manylinux platform tag instead of linux_*
+        WHEEL_FILE=$(ls ./dist/*.whl)
+        WHEEL_NAME=$(basename "${WHEEL_FILE}")
+        # Replace linux_* with the correct manylinux platform tag
+        NEW_WHEEL_NAME=$(echo "${WHEEL_NAME}" | sed "s/linux_[^.]*/${PLATFORM}/")
+        if [[ "${WHEEL_NAME}" != "${NEW_WHEEL_NAME}" ]]; then
+            mv "${WHEEL_FILE}" "./dist/${NEW_WHEEL_NAME}" || exit 1
+        fi
         sh .ci/check-python-dists.sh ./dist || exit 1
         if [[ $PRODUCES_ARTIFACTS == "true" ]]; then
-            cp "dist/lightgbm-${LGB_VER}-py3-none-${PLATFORM}.whl" "${BUILD_ARTIFACTSTAGINGDIRECTORY}" || exit 1
+            cp ./dist/*.whl "${BUILD_ARTIFACTSTAGINGDIRECTORY}/" || exit 1
         fi
         # Make sure we can do both CPU and GPU; see tests/python_package_test/test_dual.py
         export LIGHTGBM_TEST_DUAL_CPU_GPU=1
@@ -175,14 +175,14 @@ if [[ $TASK == "gpu" ]]; then
         pip install \
             -v \
             --config-settings=cmake.define.USE_GPU=ON \
-            "./dist/lightgbm-${LGB_VER}.tar.gz" \
+            ./dist/*.tar.gz \
         || exit 1
         pytest ./tests/python_package_test || exit 1
         exit 0
     elif [[ $METHOD == "wheel" ]]; then
         sh ./build-python.sh bdist_wheel --gpu || exit 1
         sh ./.ci/check-python-dists.sh ./dist || exit 1
-        pip install "$(echo "./dist/lightgbm-${LGB_VER}"*.whl)" -v || exit 1
+        pip install ./dist/*.whl -v || exit 1
         pytest ./tests || exit 1
         exit 0
     elif [[ $METHOD == "source" ]]; then
@@ -200,14 +200,14 @@ elif [[ $TASK == "cuda" ]]; then
         pip install \
             -v \
             --config-settings=cmake.define.USE_CUDA=ON \
-            "./dist/lightgbm-${LGB_VER}.tar.gz" \
+            ./dist/*.tar.gz \
         || exit 1
         pytest ./tests/python_package_test || exit 1
         exit 0
     elif [[ $METHOD == "wheel" ]]; then
         sh ./build-python.sh bdist_wheel --cuda || exit 1
         sh ./.ci/check-python-dists.sh ./dist || exit 1
-        pip install "$(echo "./dist/lightgbm-${LGB_VER}"*.whl)" -v || exit 1
+        pip install ./dist/*.whl -v || exit 1
         pytest ./tests || exit 1
         exit 0
     elif [[ $METHOD == "source" ]]; then
@@ -220,14 +220,14 @@ elif [[ $TASK == "mpi" ]]; then
         pip install \
             -v \
             --config-settings=cmake.define.USE_MPI=ON \
-            "./dist/lightgbm-${LGB_VER}.tar.gz" \
+            ./dist/*.tar.gz \
         || exit 1
         pytest ./tests/python_package_test || exit 1
         exit 0
     elif [[ $METHOD == "wheel" ]]; then
         sh ./build-python.sh bdist_wheel --mpi || exit 1
         sh ./.ci/check-python-dists.sh ./dist || exit 1
-        pip install "$(echo "./dist/lightgbm-${LGB_VER}"*.whl)" -v || exit 1
+        pip install ./dist/*.whl -v || exit 1
         pytest ./tests || exit 1
         exit 0
     elif [[ $METHOD == "source" ]]; then
@@ -282,5 +282,5 @@ matplotlib.use\(\"Agg\"\)\
         pyarrow \
         python-graphviz \
         scikit-learn || exit 1
-    python -c "import lightgbm" || exit 1
+    python -c "import lightgbm_moe" || exit 1
 fi

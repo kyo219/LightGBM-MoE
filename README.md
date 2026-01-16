@@ -80,6 +80,7 @@ expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 | `boosting` | string | `"gbdt"` | `"gbdt"`, `"mixture"` | Set to `"mixture"` to enable MoE mode |
 | `mixture_num_experts` | int | 4 | 2-10 | Number of expert models (K). Each expert is a separate GBDT that specializes in different data regimes. |
 | `mixture_e_step_alpha` | float | 1.0 | 0.1-5.0 | Weight for loss term in E-step responsibility update. Higher = more weight on prediction accuracy vs gate probability. |
+| `mixture_e_step_mode` | string | `"em"` | `"em"`, `"loss_only"` | E-step mode. `"em"`: use gate probability + loss (standard EM). `"loss_only"`: use only loss (simpler, assigns to best-fitting expert). |
 | `mixture_warmup_iters` | int | 10 | 0-50 | Number of warmup iterations. During warmup, responsibilities are uniform (1/K) to allow experts to learn before specialization. |
 | `mixture_balance_factor` | int | 10 | 2-20 | Load balancing aggressiveness. Minimum expert usage = 1/(factor × K). Lower = more aggressive balancing. Recommended: 5-7. |
 | `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | Responsibility smoothing method for time-series stability. |
@@ -222,16 +223,24 @@ Each iteration follows an **Expectation-Maximization (EM)** style update:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**E-Step** (line 348-370): Update responsibilities based on how well each expert fits each sample:
+**E-Step** (line 350-383): Update responsibilities based on how well each expert fits each sample:
 
 ```cpp
-// Score for sample i, expert k:
+// Score calculation depends on mixture_e_step_mode:
+
+// Mode "em" (default): use gate probability + loss
 s_ik = log(gate_proba[i,k] + ε) - α × loss(y_i, expert_pred[k,i])
 //     ↑ Gate's belief          ↑ Expert's prediction quality
+
+// Mode "loss_only": use only loss (simpler, more intuitive)
+s_ik = -α × loss(y_i, expert_pred[k,i])
+//     ↑ Simply: lower loss = higher score
 
 // Convert scores to responsibilities via softmax:
 r_ik = softmax(s_ik)  // Σₖ r_ik = 1
 ```
+
+**When to use `loss_only`**: If you want the Expert with the lowest prediction error to always get the highest responsibility, regardless of what the Gate currently predicts. This avoids the "self-reinforcing loop" problem where the Gate's initial beliefs get locked in.
 
 **M-Step for Experts** (line 481-523): Train each expert with responsibility-weighted gradients:
 
@@ -349,6 +358,7 @@ expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測
 | `boosting` | string | `"gbdt"` | `"gbdt"`, `"mixture"` | MoEモードを有効にするには `"mixture"` を指定 |
 | `mixture_num_experts` | int | 4 | 2-10 | エキスパート数 (K)。各エキスパートは異なるデータレジームに特化する独立したGBDT。 |
 | `mixture_e_step_alpha` | float | 1.0 | 0.1-5.0 | E-stepでの損失項の重み。高いほど予測精度を重視、低いほどゲート確率を重視。 |
+| `mixture_e_step_mode` | string | `"em"` | `"em"`, `"loss_only"` | E-stepモード。`"em"`: ゲート確率+損失（標準EM）。`"loss_only"`: 損失のみ（シンプル、最も適合するExpertに割り当て）。 |
 | `mixture_warmup_iters` | int | 10 | 0-50 | ウォームアップ回数。この期間中、責務は均等 (1/K) で、専門化前にエキスパートが学習できる。 |
 | `mixture_balance_factor` | int | 10 | 2-20 | 負荷分散の強度。最小エキスパート使用率 = 1/(factor × K)。小さいほど積極的なバランシング。推奨: 5-7。 |
 | `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | 時系列安定化のための責務平滑化手法。 |
@@ -491,18 +501,26 @@ Gateは特徴量Xに基づいて **どのExpertが各サンプルを処理すべ
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**E-Step** (348-370行目): 各Expertが各サンプルにどれだけ適合するかに基づいて責務を更新：
+**E-Step** (350-383行目): 各Expertが各サンプルにどれだけ適合するかに基づいて責務を更新：
 
 ```cpp
-// サンプルi、Expert kのスコア:
+// スコア計算は mixture_e_step_mode に依存:
+
+// モード "em" (デフォルト): ゲート確率 + 損失
 s_ik = log(gate_proba[i,k] + ε) - α × loss(y_i, expert_pred[k,i])
 //     ↑ Gateの信念               ↑ Expertの予測品質
+
+// モード "loss_only": 損失のみ（シンプル、より直感的）
+s_ik = -α × loss(y_i, expert_pred[k,i])
+//     ↑ 単純に: 損失が低い = スコアが高い
 
 // スコアをsoftmaxで責務に変換:
 r_ik = softmax(s_ik)  // Σₖ r_ik = 1
 ```
 
-**M-Step for Experts** (481-523行目): 責務重み付き勾配で各Expertを学習：
+**`loss_only`を使う場面**: Gateの現在の予測に関係なく、常に予測誤差が最も小さいExpertに高い責務を与えたい場合。Gateの初期の信念が固定される「自己強化ループ」問題を回避できます。
+
+**M-Step for Experts** (493-535行目): 責務重み付き勾配で各Expertを学習：
 
 ```cpp
 // Expert kのサンプルiでの勾配:

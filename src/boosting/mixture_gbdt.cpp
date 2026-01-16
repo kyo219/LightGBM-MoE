@@ -350,18 +350,29 @@ void MixtureGBDT::Forward() {
 void MixtureGBDT::EStep() {
   const label_t* labels = train_data_->metadata().label();
   const double alpha = config_->mixture_e_step_alpha;
+  const bool use_loss_only = (config_->mixture_e_step_mode == "loss_only");
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     // Create local scores vector for each thread
     std::vector<double> scores(num_experts_);
 
-    // Compute scores: s_ik = log(gate_proba_ik + eps) - alpha * loss(y_i, expert_pred_ik)
+    // Compute scores based on mode
     for (int k = 0; k < num_experts_; ++k) {
-      double gate_prob = gate_proba_[i * num_experts_ + k];
       double expert_p = expert_pred_[k * num_data_ + i];
       double loss = ComputePointwiseLoss(labels[i], expert_p);
-      scores[k] = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
+
+      if (use_loss_only) {
+        // loss_only mode: use only expert loss, ignore gate probability
+        // s_ik = -alpha * loss(y_i, expert_pred_ik)
+        // Lower loss → higher score → higher responsibility
+        scores[k] = -alpha * loss;
+      } else {
+        // em mode (default): use both gate probability and expert loss
+        // s_ik = log(gate_proba_ik + eps) - alpha * loss(y_i, expert_pred_ik)
+        double gate_prob = gate_proba_[i * num_experts_ + k];
+        scores[k] = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
+      }
     }
 
     // Apply softmax to get responsibilities
@@ -997,6 +1008,7 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   ss << "mixture_num_experts=" << num_experts_ << "\n";
   ss << "mixture_e_step_alpha=" << config_->mixture_e_step_alpha << "\n";
   ss << "mixture_e_step_loss=" << e_step_loss_type_ << "\n";
+  ss << "mixture_e_step_mode=" << config_->mixture_e_step_mode << "\n";
   ss << "mixture_r_smoothing=" << config_->mixture_r_smoothing << "\n";
   ss << "mixture_smoothing_lambda=" << config_->mixture_smoothing_lambda << "\n";
   ss << "\n";

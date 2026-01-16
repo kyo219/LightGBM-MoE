@@ -1189,6 +1189,13 @@ struct Config {
   std::string mixture_e_step_loss = "auto";
 
   // type = enum
+  // options = em, loss_only
+  // desc = mode for E-step responsibility calculation
+  // desc = ``em``: use both gate probability and expert loss (standard EM)
+  // desc = ``loss_only``: use only expert loss, ignore gate probability (simpler, more intuitive)
+  std::string mixture_e_step_mode = "em";
+
+  // type = enum
   // options = none, ema, markov, momentum
   // desc = time-series smoothing method for responsibilities
   // desc = ``none``: no smoothing
