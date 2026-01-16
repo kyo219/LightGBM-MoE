@@ -148,6 +148,7 @@ elif [[ $TASK == "bdist" ]]; then
         WHEEL_FILE=$(ls ./dist/*.whl)
         WHEEL_NAME=$(basename "${WHEEL_FILE}")
         # Replace linux_* with the correct manylinux platform tag
+        # shellcheck disable=SC2001
         NEW_WHEEL_NAME=$(echo "${WHEEL_NAME}" | sed "s/linux_[^.]*/${PLATFORM}/")
         if [[ "${WHEEL_NAME}" != "${NEW_WHEEL_NAME}" ]]; then
             mv "${WHEEL_FILE}" "./dist/${NEW_WHEEL_NAME}" || exit 1
