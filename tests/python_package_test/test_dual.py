@@ -4,7 +4,7 @@
 import os
 import platform
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import pytest
 from sklearn.metrics import log_loss
 

@@ -1,7 +1,7 @@
 # coding: utf-8
 from pathlib import Path
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import pandas as pd
 
 if lgb.compat.MATPLOTLIB_INSTALLED:

@@ -6,10 +6,10 @@ from copy import deepcopy
 from os import getenv
 from pathlib import Path
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import numpy as np
 import pytest
-from lightgbm.compat import PANDAS_INSTALLED, pd_DataFrame, pd_Series
+from lightgbm_moe.compat import PANDAS_INSTALLED, pd_DataFrame, pd_Series
 from scipy import sparse
 from sklearn.datasets import dump_svmlight_file, load_svmlight_file, make_blobs
 from sklearn.model_selection import train_test_split

@@ -98,14 +98,20 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // Note: We pass nullptr for objective_function because we use custom gradients
   // (responsibility-weighted) in MStepExperts. The main objective is stored in
   // objective_function_ and used to compute gradients on yhat.
+  // Each expert gets a different seed to break symmetry when using uniform initialization.
   Log::Debug("MixtureGBDT::Init - creating %d experts", num_experts_);
   experts_.clear();
   experts_.reserve(num_experts_);
+  expert_configs_.clear();
+  expert_configs_.reserve(num_experts_);
   for (int k = 0; k < num_experts_; ++k) {
     Log::Debug("MixtureGBDT::Init - creating expert %d", k);
+    // Create per-expert config with different seed for symmetry breaking
+    expert_configs_.emplace_back(new Config(*expert_config_));
+    expert_configs_[k]->seed = config_->seed + k + 1;  // Different seed per expert
     experts_.emplace_back(new GBDT());
-    Log::Debug("MixtureGBDT::Init - initializing expert %d", k);
-    experts_[k]->Init(expert_config_.get(), train_data_, nullptr, {});
+    Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d", k, expert_configs_[k]->seed);
+    experts_[k]->Init(expert_configs_[k].get(), train_data_, nullptr, {});
     Log::Debug("MixtureGBDT::Init - expert %d initialized", k);
   }
 
@@ -206,30 +212,17 @@ void MixtureGBDT::InitResponsibilities() {
       }
     }
   } else {
-    // Default: quantile-based initialization (better than uniform for MoE)
-    // Use quantile as default because it ensures experts specialize on different
-    // regions of the target distribution
-    Log::Info("MixtureGBDT: Using default quantile-based initialization");
+    // Default: uniform initialization
+    // All experts start with equal responsibility (1/K).
+    // Symmetry is broken by per-expert seeds (set in Init()).
+    // This allows experts to naturally specialize based on prediction error,
+    // without explicit label-based assignment.
+    Log::Info("MixtureGBDT: Using uniform initialization (symmetry broken by per-expert seeds)");
 
-    std::vector<data_size_t> sorted_indices(num_data_);
-    std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
-    std::sort(sorted_indices.begin(), sorted_indices.end(),
-              [labels](data_size_t a, data_size_t b) { return labels[a] < labels[b]; });
-
-    const double base_r = 0.1 / num_experts_;
-    const double main_r = 1.0 - base_r * num_experts_;
-
-    for (data_size_t rank = 0; rank < num_data_; ++rank) {
-      data_size_t i = sorted_indices[rank];
-      int assigned_expert = static_cast<int>(rank * num_experts_ / num_data_);
-      if (assigned_expert >= num_experts_) assigned_expert = num_experts_ - 1;
-
+    const double uniform_r = 1.0 / num_experts_;
+    for (data_size_t i = 0; i < num_data_; ++i) {
       for (int k = 0; k < num_experts_; ++k) {
-        if (k == assigned_expert) {
-          responsibilities_[i * num_experts_ + k] = main_r + base_r;
-        } else {
-          responsibilities_[i * num_experts_ + k] = base_r;
-        }
+        responsibilities_[i * num_experts_ + k] = uniform_r;
       }
     }
   }

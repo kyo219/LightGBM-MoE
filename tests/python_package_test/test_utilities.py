@@ -1,7 +1,7 @@
 # coding: utf-8
 import logging
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import numpy as np
 import pytest
 

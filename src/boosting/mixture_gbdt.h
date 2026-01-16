@@ -203,8 +203,11 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Gate GBDT (multiclass with K classes) */
   std::unique_ptr<GBDT> gate_;
 
-  /*! \brief Config for experts */
+  /*! \brief Base config for experts (shared settings) */
   std::unique_ptr<Config> expert_config_;
+
+  /*! \brief Per-expert configs (with different seeds for symmetry breaking) */
+  std::vector<std::unique_ptr<Config>> expert_configs_;
 
   /*! \brief Config for gate */
   std::unique_ptr<Config> gate_config_;

@@ -1,5 +1,5 @@
 # coding: utf-8
-"""Tests for lightgbm.dask module"""
+"""Tests for lightgbm_moe.dask module"""
 
 import inspect
 import re
@@ -9,14 +9,14 @@ from os import getenv
 from sys import platform
 from urllib.parse import urlparse
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import pytest
 from sklearn.metrics import accuracy_score, r2_score
 
 from .utils import np_assert_array_equal, sklearn_multiclass_custom_objective
 
 if platform in {"cygwin", "win32"}:
-    pytest.skip("lightgbm.dask is not currently supported on Windows", allow_module_level=True)
+    pytest.skip("lightgbm_moe.dask is not currently supported on Windows", allow_module_level=True)
 if not lgb.compat.DASK_INSTALLED:
     pytest.skip("Dask is not installed", allow_module_level=True)
 

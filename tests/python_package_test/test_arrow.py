@@ -3,7 +3,7 @@ import filecmp
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import numpy as np
 import pytest
 

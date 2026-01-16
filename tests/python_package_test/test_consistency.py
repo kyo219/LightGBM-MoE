@@ -1,7 +1,7 @@
 # coding: utf-8
 from pathlib import Path
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import numpy as np
 from sklearn.datasets import load_svmlight_file
 

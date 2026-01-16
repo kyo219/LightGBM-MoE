@@ -11,11 +11,11 @@ from os import getenv
 from pathlib import Path
 from shutil import copyfile
 
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import numpy as np
 import psutil
 import pytest
-from lightgbm.compat import PANDAS_INSTALLED, pd_DataFrame, pd_Series
+from lightgbm_moe.compat import PANDAS_INSTALLED, pd_DataFrame, pd_Series
 from scipy.sparse import csr_matrix, isspmatrix_csc, isspmatrix_csr
 from sklearn.datasets import load_svmlight_file, make_blobs, make_classification, make_multilabel_classification
 from sklearn.metrics import (

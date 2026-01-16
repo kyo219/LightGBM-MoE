@@ -8,11 +8,11 @@ from os import getenv
 from pathlib import Path
 
 import joblib
-import lightgbm as lgb
+import lightgbm_moe as lgb
 import numpy as np
 import pytest
 import scipy.sparse
-from lightgbm.compat import (
+from lightgbm_moe.compat import (
     DASK_INSTALLED,
     PANDAS_INSTALLED,
     PYARROW_INSTALLED,
