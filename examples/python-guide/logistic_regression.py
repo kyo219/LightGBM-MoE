@@ -13,10 +13,11 @@ probabilistic.
 
 import time
 
-import lightgbm_moe as lgb
 import numpy as np
 import pandas as pd
 from scipy.special import expit
+
+import lightgbm_moe as lgb
 
 #################
 # Simulate some binary data with a single categorical and

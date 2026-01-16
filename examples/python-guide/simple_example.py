@@ -1,9 +1,10 @@
 # coding: utf-8
 from pathlib import Path
 
-import lightgbm_moe as lgb
 import pandas as pd
 from sklearn.metrics import mean_squared_error
+
+import lightgbm_moe as lgb
 
 print("Loading data...")
 # load or create your dataset

@@ -1,7 +1,8 @@
 import dask.array as da
-import lightgbm_moe as lgb
 from distributed import Client, LocalCluster
 from sklearn.datasets import make_blobs
+
+import lightgbm_moe as lgb
 
 if __name__ == "__main__":
     print("loading data")

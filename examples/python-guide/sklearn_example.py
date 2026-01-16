@@ -1,11 +1,12 @@
 # coding: utf-8
 from pathlib import Path
 
-import lightgbm_moe as lgb
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import GridSearchCV
+
+import lightgbm_moe as lgb
 
 print("Loading data...")
 # load or create your dataset

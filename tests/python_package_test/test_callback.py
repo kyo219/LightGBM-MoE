@@ -1,6 +1,7 @@
 # coding: utf-8
-import lightgbm_moe as lgb
 import pytest
+
+import lightgbm_moe as lgb
 
 from .utils import SERIALIZERS, pickle_and_unpickle_object
 

@@ -4,10 +4,11 @@ import json
 import pickle
 from pathlib import Path
 
-import lightgbm_moe as lgb
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
+
+import lightgbm_moe as lgb
 
 print("Loading data...")
 # load or create your dataset
