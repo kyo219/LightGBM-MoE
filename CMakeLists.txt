@@ -692,7 +692,7 @@ if(BUILD_CLI)
 endif()
 
 if(__BUILD_FOR_PYTHON)
-    set(CMAKE_INSTALL_PREFIX "lightgbm")
+    set(CMAKE_INSTALL_PREFIX "lightgbm_moe")
 endif()
 
 # The macOS linker puts an absolute path to linked libraries in lib_lightgbm.dylib.

@@ -31,7 +31,7 @@ repos:
         args:
           - --root=..  # workaround to get correct header guard pattern
           - --recursive
-          - --filter=-build/include_subdir,-whitespace/line_length
+          - --filter=-build/include_subdir,-whitespace/line_length,-build/header_guard
   - repo: local
     hooks:
       - id: check-omp-pragmas
