@@ -1242,6 +1242,22 @@ struct Config {
   // check = >=0.0
   double mixture_gate_lambda_l2 = 1.0;
 
+  // desc = per-expert max_depth values (comma-separated list)
+  // desc = if empty, all experts use the global max_depth setting
+  // desc = if provided, must have exactly mixture_num_experts values
+  // desc = example: "3,5,7" for 3 experts with different depths
+  std::vector<int> mixture_expert_max_depths;
+
+  // desc = per-expert num_leaves values (comma-separated list)
+  // desc = if empty, all experts use the global num_leaves setting
+  // desc = if provided, must have exactly mixture_num_experts values
+  std::vector<int> mixture_expert_num_leaves;
+
+  // desc = per-expert learning_rate values (comma-separated list)
+  // desc = if empty, all experts use the global learning_rate setting
+  // desc = if provided, must have exactly mixture_num_experts values
+  std::vector<double> mixture_expert_learning_rates;
+
   #ifndef __NVCC__
   #pragma endregion
 
