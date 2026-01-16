@@ -9,9 +9,10 @@ from os import getenv
 from sys import platform
 from urllib.parse import urlparse
 
-import lightgbm_moe as lgb
 import pytest
 from sklearn.metrics import accuracy_score, r2_score
+
+import lightgbm_moe as lgb
 
 from .utils import np_assert_array_equal, sklearn_multiclass_custom_objective
 

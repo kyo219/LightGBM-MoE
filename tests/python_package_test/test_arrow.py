@@ -3,9 +3,10 @@ import filecmp
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import lightgbm_moe as lgb
 import numpy as np
 import pytest
+
+import lightgbm_moe as lgb
 
 from .utils import np_assert_array_equal
 

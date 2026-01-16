@@ -1,10 +1,11 @@
 # coding: utf-8
-import lightgbm_moe as lgb
 import numpy as np
 import pandas as pd
 import pytest
-from lightgbm_moe.compat import GRAPHVIZ_INSTALLED, MATPLOTLIB_INSTALLED, PANDAS_INSTALLED, pd_DataFrame
 from sklearn.model_selection import train_test_split
+
+import lightgbm_moe as lgb
+from lightgbm_moe.compat import GRAPHVIZ_INSTALLED, MATPLOTLIB_INSTALLED, PANDAS_INSTALLED, pd_DataFrame
 
 if MATPLOTLIB_INSTALLED:
     import matplotlib

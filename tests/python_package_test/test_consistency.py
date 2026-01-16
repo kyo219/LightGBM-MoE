@@ -1,9 +1,10 @@
 # coding: utf-8
 from pathlib import Path
 
-import lightgbm_moe as lgb
 import numpy as np
 from sklearn.datasets import load_svmlight_file
+
+import lightgbm_moe as lgb
 
 EXAMPLES_DIR = Path(__file__).absolute().parents[2] / "examples"
 

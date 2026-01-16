@@ -1,10 +1,11 @@
 from pathlib import Path
 
 import dask.array as da
-import lightgbm_moe as lgb
 import numpy as np
 from distributed import Client, LocalCluster
 from sklearn.datasets import load_svmlight_file
+
+import lightgbm_moe as lgb
 
 if __name__ == "__main__":
     print("loading data")

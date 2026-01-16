@@ -1,8 +1,9 @@
 # coding: utf-8
 from pathlib import Path
 
-import lightgbm_moe as lgb
 import pandas as pd
+
+import lightgbm_moe as lgb
 
 if lgb.compat.MATPLOTLIB_INSTALLED:
     import matplotlib.pyplot as plt

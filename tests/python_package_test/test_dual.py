@@ -4,9 +4,10 @@
 import os
 import platform
 
-import lightgbm_moe as lgb
 import pytest
 from sklearn.metrics import log_loss
+
+import lightgbm_moe as lgb
 
 from .utils import load_breast_cancer
 
