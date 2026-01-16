@@ -127,6 +127,45 @@ params = {
 
 This allows experts to have different capacities: shallow experts for simple patterns, deep experts for complex patterns.
 
+#### Optuna Optimization Tips
+
+When using Optuna for hyperparameter tuning, suggest values for each expert individually, then join them into a comma-separated string:
+
+```python
+import optuna
+
+def objective(trial):
+    num_experts = 3
+
+    # Option 1: Same hyperparameters for all experts (simpler search space)
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': num_experts,
+        'max_depth': trial.suggest_int('max_depth', 3, 10),
+        'num_leaves': trial.suggest_int('num_leaves', 8, 64),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+    }
+
+    # Option 2: Different hyperparameters per expert (richer search space)
+    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 10) for k in range(num_experts)]
+    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 64) for k in range(num_experts)]
+    learning_rates = [trial.suggest_float(f'lr_{k}', 0.01, 0.3, log=True) for k in range(num_experts)]
+
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': num_experts,
+        'mixture_expert_max_depths': ','.join(map(str, max_depths)),      # "3,5,7"
+        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),      # "8,16,32"
+        'mixture_expert_learning_rates': ','.join(map(str, learning_rates)),  # "0.1,0.05,0.03"
+    }
+
+    # ... train and evaluate
+    return score
+
+# Tip: Start with Option 1, then try Option 2 if you have enough compute budget
+# Option 2 has K× more hyperparameters, so needs more trials to converge
+```
+
 ### Smoothing Methods
 
 | Method | Formula | Use Case |
@@ -448,6 +487,45 @@ params = {
 ```
 
 これにより、浅いExpertは単純なパターン、深いExpertは複雑なパターンを担当するなど、異なる容量を持たせることができます。
+
+#### Optunaでの最適化Tips
+
+Optunaでハイパーパラメータチューニングを行う場合、各Expertの値を個別に提案し、カンマ区切り文字列に結合します：
+
+```python
+import optuna
+
+def objective(trial):
+    num_experts = 3
+
+    # 方法1: 全Expertで同じハイパーパラメータ（探索空間がシンプル）
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': num_experts,
+        'max_depth': trial.suggest_int('max_depth', 3, 10),
+        'num_leaves': trial.suggest_int('num_leaves', 8, 64),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+    }
+
+    # 方法2: Expertごとに異なるハイパーパラメータ（探索空間がリッチ）
+    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 10) for k in range(num_experts)]
+    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 64) for k in range(num_experts)]
+    learning_rates = [trial.suggest_float(f'lr_{k}', 0.01, 0.3, log=True) for k in range(num_experts)]
+
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': num_experts,
+        'mixture_expert_max_depths': ','.join(map(str, max_depths)),      # "3,5,7"
+        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),      # "8,16,32"
+        'mixture_expert_learning_rates': ','.join(map(str, learning_rates)),  # "0.1,0.05,0.03"
+    }
+
+    # ... 学習と評価
+    return score
+
+# Tip: まず方法1を試し、計算リソースに余裕があれば方法2を試す
+# 方法2はK倍のハイパーパラメータがあるため、収束に多くのトライアルが必要
+```
 
 ### 平滑化手法
 
