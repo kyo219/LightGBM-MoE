@@ -1,10 +1,9 @@
 from pathlib import Path
 
 import h5py
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
-
-import lightgbm as lgb
 
 
 class HDFSequence(lgb.Sequence):

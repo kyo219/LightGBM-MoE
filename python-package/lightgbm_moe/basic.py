@@ -5005,11 +5005,11 @@ class Booster:
 
         # Get lambda from model params
         params = self.params
-        lambda_val = float(params.get('mixture_smoothing_lambda', 0.0))
-        smoothing = params.get('mixture_r_smoothing', 'none')
+        lambda_val = float(params.get("mixture_smoothing_lambda", 0.0))
+        smoothing = params.get("mixture_r_smoothing", "none")
 
         # Apply Markov smoothing if in markov mode
-        if smoothing == 'markov' and lambda_val > 0.0:
+        if smoothing == "markov" and lambda_val > 0.0:
             out_result = np.empty((nrow, num_experts), dtype=np.float64)
             # First sample: use base probabilities
             out_result[0] = base_proba[0]
@@ -5060,9 +5060,7 @@ class Booster:
         regime_proba = self.predict_regime_proba_markov(data)  # (nrow, n_experts)
 
         # Weighted sum: prediction = sum_k(proba[k] * expert[k])
-        result = (regime_proba * expert_preds).sum(axis=1)
-
-        return result
+        return (regime_proba * expert_preds).sum(axis=1)
 
     def refit(
         self,

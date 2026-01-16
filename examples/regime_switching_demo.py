@@ -10,9 +10,10 @@ over standard GBDT when the data has underlying regime structure.
 データに潜在的なレジーム構造がある場合のMoE GBDTの優位性を示します。
 """
 
-import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
 import lightgbm_moe as lgb
 
 # Set random seed for reproducibility
@@ -51,17 +52,21 @@ def generate_regime_switching_data(n_samples=3000, noise_level=0.5):
 
     # Regime 0: Complex positive relationship
     mask0 = regime_true == 0
-    y[mask0] = (5.0 * X[mask0, 0] +
-                3.0 * X[mask0, 0] * X[mask0, 2] +  # Interaction term
-                2.0 * np.sin(2 * X[mask0, 3]) +    # Non-linear term
-                10.0)
+    y[mask0] = (
+        5.0 * X[mask0, 0]
+        + 3.0 * X[mask0, 0] * X[mask0, 2]  # Interaction term
+        + 2.0 * np.sin(2 * X[mask0, 3])  # Non-linear term
+        + 10.0
+    )
 
     # Regime 1: Complex negative relationship (fundamentally different)
     mask1 = regime_true == 1
-    y[mask1] = (-5.0 * X[mask1, 0] -
-                2.0 * X[mask1, 1]**2 +              # Quadratic term
-                3.0 * np.cos(2 * X[mask1, 4]) -     # Different non-linear
-                10.0)
+    y[mask1] = (
+        -5.0 * X[mask1, 0]
+        - 2.0 * X[mask1, 1] ** 2  # Quadratic term
+        + 3.0 * np.cos(2 * X[mask1, 4])  # Different non-linear
+        - 10.0
+    )
 
     # Add noise
     y += np.random.randn(n_samples) * noise_level
@@ -88,17 +93,17 @@ def train_and_evaluate():
 
     # Common parameters
     common_params = {
-        'objective': 'regression',
-        'verbose': -1,
-        'num_leaves': 31,
-        'learning_rate': 0.05,
-        'num_threads': 4,
-        'seed': 42,
+        "objective": "regression",
+        "verbose": -1,
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "num_threads": 4,
+        "seed": 42,
     }
 
     # Train standard GBDT
     print("Training Standard GBDT...")
-    params_std = {**common_params, 'boosting': 'gbdt'}
+    params_std = {**common_params, "boosting": "gbdt"}
     model_std = lgb.train(params_std, train_data, num_boost_round=150)
     pred_std = model_std.predict(X_test)
 
@@ -106,10 +111,10 @@ def train_and_evaluate():
     print("Training MoE GBDT (K=2)...")
     params_moe = {
         **common_params,
-        'boosting': 'mixture',
-        'mixture_num_experts': 2,
-        'mixture_e_step_alpha': 1.0,  # Hard alpha (1.0) now works after gate indexing fix!
-        'mixture_warmup_iters': 50,   # Warmup iterations for expert differentiation
+        "boosting": "mixture",
+        "mixture_num_experts": 2,
+        "mixture_e_step_alpha": 1.0,  # Hard alpha (1.0) now works after gate indexing fix!
+        "mixture_warmup_iters": 50,  # Warmup iterations for expert differentiation
     }
     # Train same number of rounds as standard GBDT
     model_moe = lgb.train(params_moe, train_data, num_boost_round=150)
@@ -119,34 +124,36 @@ def train_and_evaluate():
 
     # Calculate metrics
     metrics = {
-        'Standard GBDT': {
-            'RMSE': np.sqrt(mean_squared_error(y_test, pred_std)),
-            'MAE': mean_absolute_error(y_test, pred_std),
-            'R2': r2_score(y_test, pred_std),
+        "Standard GBDT": {
+            "RMSE": np.sqrt(mean_squared_error(y_test, pred_std)),
+            "MAE": mean_absolute_error(y_test, pred_std),
+            "R2": r2_score(y_test, pred_std),
         },
-        'MoE GBDT (K=2)': {
-            'RMSE': np.sqrt(mean_squared_error(y_test, pred_moe)),
-            'MAE': mean_absolute_error(y_test, pred_moe),
-            'R2': r2_score(y_test, pred_moe),
-        }
+        "MoE GBDT (K=2)": {
+            "RMSE": np.sqrt(mean_squared_error(y_test, pred_moe)),
+            "MAE": mean_absolute_error(y_test, pred_moe),
+            "R2": r2_score(y_test, pred_moe),
+        },
     }
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Performance Comparison / 性能比較")
-    print("="*60)
+    print("=" * 60)
     for model_name, m in metrics.items():
         print(f"\n{model_name}:")
         print(f"  RMSE: {m['RMSE']:.4f}")
         print(f"  MAE:  {m['MAE']:.4f}")
         print(f"  R2:   {m['R2']:.4f}")
 
-    improvement = (metrics['Standard GBDT']['RMSE'] - metrics['MoE GBDT (K=2)']['RMSE']) / metrics['Standard GBDT']['RMSE'] * 100
+    improvement = (
+        (metrics["Standard GBDT"]["RMSE"] - metrics["MoE GBDT (K=2)"]["RMSE"]) / metrics["Standard GBDT"]["RMSE"] * 100
+    )
     print(f"\nRMSE Improvement: {improvement:.1f}%")
 
     # Key insight: MoE provides interpretability with comparable accuracy
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Key Advantage: Interpretability / 主な利点：解釈可能性")
-    print("="*60)
+    print("=" * 60)
     print("MoE GBDT provides regime probabilities for each prediction,")
     print("enabling regime-aware analysis that standard GBDT cannot offer.")
     print("\nUse cases: Financial regime detection, market state analysis,")
@@ -154,22 +161,18 @@ def train_and_evaluate():
 
     # Create visualizations
     print("\nCreating visualizations...")
-    create_visualizations(
-        t_test, y_test, pred_std, pred_moe,
-        regime_test, regime_pred, regime_proba, metrics
-    )
+    create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regime_pred, regime_proba, metrics)
 
     return metrics
 
 
-def create_visualizations(t_test, y_test, pred_std, pred_moe,
-                         regime_test, regime_pred, regime_proba, metrics):
+def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regime_pred, regime_proba, metrics):
     """Create all comparison visualizations."""
 
     # Color maps for regimes (2 regimes now)
     num_regimes = 2
-    regime_colors = ['#2ecc71', '#e74c3c']  # Green, Red
-    regime_names = ['Regime 0 (Bull)', 'Regime 1 (Bear)']
+    regime_colors = ["#2ecc71", "#e74c3c"]  # Green, Red
+    regime_names = ["Regime 0 (Bull)", "Regime 1 (Bear)"]
 
     fig = plt.figure(figsize=(16, 14))
 
@@ -181,13 +184,12 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     ax1.scatter(y_test, pred_moe, alpha=0.5, label=f"MoE GBDT (R²={metrics['MoE GBDT (K=2)']['R2']:.3f})", s=20)
 
     # Perfect prediction line
-    lims = [min(y_test.min(), pred_std.min(), pred_moe.min()),
-            max(y_test.max(), pred_std.max(), pred_moe.max())]
-    ax1.plot(lims, lims, 'k--', alpha=0.5, label='Perfect')
+    lims = [min(y_test.min(), pred_std.min(), pred_moe.min()), max(y_test.max(), pred_std.max(), pred_moe.max())]
+    ax1.plot(lims, lims, "k--", alpha=0.5, label="Perfect")
 
-    ax1.set_xlabel('Actual')
-    ax1.set_ylabel('Predicted')
-    ax1.set_title('1. Actual vs Predicted / 実測値 vs 予測値')
+    ax1.set_xlabel("Actual")
+    ax1.set_ylabel("Predicted")
+    ax1.set_title("1. Actual vs Predicted / 実測値 vs 予測値")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
@@ -195,11 +197,11 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     # 2. Time Series: Standard GBDT
     # ============================================================
     ax2 = fig.add_subplot(3, 2, 2)
-    ax2.plot(t_test, y_test, 'k-', alpha=0.7, label='Actual', linewidth=1)
-    ax2.plot(t_test, pred_std, 'b-', alpha=0.7, label='Predicted (Std)', linewidth=1)
-    ax2.fill_between(t_test, y_test, pred_std, alpha=0.3, color='red')
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('Value')
+    ax2.plot(t_test, y_test, "k-", alpha=0.7, label="Actual", linewidth=1)
+    ax2.plot(t_test, pred_std, "b-", alpha=0.7, label="Predicted (Std)", linewidth=1)
+    ax2.fill_between(t_test, y_test, pred_std, alpha=0.3, color="red")
+    ax2.set_xlabel("Time")
+    ax2.set_ylabel("Value")
     ax2.set_title(f"2. Standard GBDT (RMSE={metrics['Standard GBDT']['RMSE']:.3f})")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
@@ -208,11 +210,11 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     # 3. Time Series: MoE GBDT
     # ============================================================
     ax3 = fig.add_subplot(3, 2, 3)
-    ax3.plot(t_test, y_test, 'k-', alpha=0.7, label='Actual', linewidth=1)
-    ax3.plot(t_test, pred_moe, 'g-', alpha=0.7, label='Predicted (MoE)', linewidth=1)
-    ax3.fill_between(t_test, y_test, pred_moe, alpha=0.3, color='red')
-    ax3.set_xlabel('Time')
-    ax3.set_ylabel('Value')
+    ax3.plot(t_test, y_test, "k-", alpha=0.7, label="Actual", linewidth=1)
+    ax3.plot(t_test, pred_moe, "g-", alpha=0.7, label="Predicted (MoE)", linewidth=1)
+    ax3.fill_between(t_test, y_test, pred_moe, alpha=0.3, color="red")
+    ax3.set_xlabel("Time")
+    ax3.set_ylabel("Value")
     ax3.set_title(f"3. MoE GBDT (RMSE={metrics['MoE GBDT (K=2)']['RMSE']:.3f})")
     ax3.legend()
     ax3.grid(True, alpha=0.3)
@@ -225,19 +227,17 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     # Plot actual values colored by true regime
     for r in range(num_regimes):
         mask = regime_test == r
-        ax4.scatter(t_test[mask], y_test[mask], c=regime_colors[r],
-                   alpha=0.6, s=15, label=f'Actual {regime_names[r]}')
+        ax4.scatter(t_test[mask], y_test[mask], c=regime_colors[r], alpha=0.6, s=15, label=f"Actual {regime_names[r]}")
 
     # Plot predictions colored by predicted regime (with different marker)
     for r in range(num_regimes):
         mask = regime_pred == r
-        ax4.scatter(t_test[mask], pred_moe[mask], c=regime_colors[r],
-                   alpha=0.6, s=15, marker='x')
+        ax4.scatter(t_test[mask], pred_moe[mask], c=regime_colors[r], alpha=0.6, s=15, marker="x")
 
-    ax4.set_xlabel('Time')
-    ax4.set_ylabel('Value')
-    ax4.set_title('4. Regime Estimation / レジーム推定\n(●: Actual, ×: Predicted)')
-    ax4.legend(loc='upper right', fontsize=8)
+    ax4.set_xlabel("Time")
+    ax4.set_ylabel("Value")
+    ax4.set_title("4. Regime Estimation / レジーム推定\n(●: Actual, ×: Predicted)")
+    ax4.legend(loc="upper right", fontsize=8)
     ax4.grid(True, alpha=0.3)
 
     # ============================================================
@@ -246,18 +246,17 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     ax5 = fig.add_subplot(3, 2, 5)
 
     for r in range(num_regimes):
-        ax5.fill_between(t_test, 0, regime_proba[:, r], alpha=0.5,
-                        color=regime_colors[r], label=regime_names[r])
+        ax5.fill_between(t_test, 0, regime_proba[:, r], alpha=0.5, color=regime_colors[r], label=regime_names[r])
 
     # Add true regime boundaries
     regime_changes = np.where(np.diff(regime_test) != 0)[0]
     for rc in regime_changes:
-        ax5.axvline(x=t_test[rc], color='black', linestyle='--', alpha=0.5)
+        ax5.axvline(x=t_test[rc], color="black", linestyle="--", alpha=0.5)
 
-    ax5.set_xlabel('Time')
-    ax5.set_ylabel('Probability')
-    ax5.set_title('5. Gate Probabilities Over Time / ゲート確率の時系列')
-    ax5.legend(loc='upper right', fontsize=8)
+    ax5.set_xlabel("Time")
+    ax5.set_ylabel("Probability")
+    ax5.set_title("5. Gate Probabilities Over Time / ゲート確率の時系列")
+    ax5.legend(loc="upper right", fontsize=8)
     ax5.set_ylim(0, 1)
     ax5.grid(True, alpha=0.3)
 
@@ -277,21 +276,21 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     x_pos = np.arange(num_regimes)
     width = 0.35
 
-    ax6.bar(x_pos - width/2, [e.mean() for e in errors_std], width,
-            label='Standard GBDT', color='steelblue', alpha=0.7)
-    ax6.bar(x_pos + width/2, [e.mean() for e in errors_moe], width,
-            label='MoE GBDT', color='forestgreen', alpha=0.7)
+    ax6.bar(
+        x_pos - width / 2, [e.mean() for e in errors_std], width, label="Standard GBDT", color="steelblue", alpha=0.7
+    )
+    ax6.bar(x_pos + width / 2, [e.mean() for e in errors_moe], width, label="MoE GBDT", color="forestgreen", alpha=0.7)
 
-    ax6.set_xlabel('True Regime')
-    ax6.set_ylabel('Mean Absolute Error')
-    ax6.set_title('6. MAE by Regime / レジーム別MAE')
+    ax6.set_xlabel("True Regime")
+    ax6.set_ylabel("Mean Absolute Error")
+    ax6.set_title("6. MAE by Regime / レジーム別MAE")
     ax6.set_xticks(x_pos)
-    ax6.set_xticklabels([f'Regime {i}' for i in range(num_regimes)])
+    ax6.set_xticklabels([f"Regime {i}" for i in range(num_regimes)])
     ax6.legend()
-    ax6.grid(True, alpha=0.3, axis='y')
+    ax6.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
-    plt.savefig('examples/regime_switching_comparison.png', dpi=150, bbox_inches='tight')
+    plt.savefig("examples/regime_switching_comparison.png", dpi=150, bbox_inches="tight")
     print("Saved: examples/regime_switching_comparison.png")
     plt.close()
 
@@ -301,7 +300,6 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     fig2, ax = plt.subplots(figsize=(8, 6))
 
     # Create confusion matrix
-    from collections import Counter
     confusion = np.zeros((num_regimes, num_regimes))
     for true_r, pred_r in zip(regime_test, regime_pred):
         if true_r < num_regimes and pred_r < num_regimes:
@@ -310,29 +308,30 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe,
     # Normalize
     confusion_norm = confusion / (confusion.sum(axis=1, keepdims=True) + 1e-10)
 
-    im = ax.imshow(confusion_norm, cmap='Blues', vmin=0, vmax=1)
+    im = ax.imshow(confusion_norm, cmap="Blues", vmin=0, vmax=1)
 
     # Add text annotations
     for i in range(num_regimes):
         for j in range(num_regimes):
-            text = ax.text(j, i, f'{confusion_norm[i, j]:.2f}\n({int(confusion[i, j])})',
-                          ha='center', va='center', fontsize=12)
+            text = ax.text(
+                j, i, f"{confusion_norm[i, j]:.2f}\n({int(confusion[i, j])})", ha="center", va="center", fontsize=12
+            )
 
     ax.set_xticks(range(num_regimes))
     ax.set_yticks(range(num_regimes))
-    ax.set_xticklabels([f'Pred {i}' for i in range(num_regimes)])
-    ax.set_yticklabels([f'True {i}' for i in range(num_regimes)])
-    ax.set_xlabel('Predicted Regime')
-    ax.set_ylabel('True Regime')
-    ax.set_title('Regime Classification Accuracy\nレジーム分類精度')
+    ax.set_xticklabels([f"Pred {i}" for i in range(num_regimes)])
+    ax.set_yticklabels([f"True {i}" for i in range(num_regimes)])
+    ax.set_xlabel("Predicted Regime")
+    ax.set_ylabel("True Regime")
+    ax.set_title("Regime Classification Accuracy\nレジーム分類精度")
 
-    plt.colorbar(im, ax=ax, label='Proportion')
+    plt.colorbar(im, ax=ax, label="Proportion")
     plt.tight_layout()
-    plt.savefig('examples/regime_confusion_matrix.png', dpi=150, bbox_inches='tight')
+    plt.savefig("examples/regime_confusion_matrix.png", dpi=150, bbox_inches="tight")
     print("Saved: examples/regime_confusion_matrix.png")
     plt.close()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     metrics = train_and_evaluate()
     print("\nDone! Check the examples/ folder for visualizations.")

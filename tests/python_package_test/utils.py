@@ -5,11 +5,10 @@ from inspect import getfullargspec
 
 import cloudpickle
 import joblib
+import lightgbm as lgb
 import numpy as np
 import sklearn.datasets
 from sklearn.utils import check_random_state
-
-import lightgbm as lgb
 
 SERIALIZERS = ["pickle", "joblib", "cloudpickle"]
 

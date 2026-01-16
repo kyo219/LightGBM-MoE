@@ -1,10 +1,9 @@
 # coding: utf-8
 import logging
 
+import lightgbm as lgb
 import numpy as np
 import pytest
-
-import lightgbm as lgb
 
 
 def test_register_logger(tmp_path):

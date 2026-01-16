@@ -202,7 +202,15 @@ raises-extend-require-match-for = ["*Exception", "*Error"]
     # pydocstyle
     "D",
     # flake8-print
-    "T"
+    "T",
+    # NumPy-specific rules (np.random.seed, np.random.randn, etc.)
+    "NPY002",
+    # unused local variable
+    "F841",
+    # unnecessary assignment before return
+    "RET504",
+    # import not at top-level
+    "PLC0415"
 ]
 "python-package/lightgbm_moe/basic.py" = [
     # (pylint) Using the global statement is discouraged
@@ -214,7 +222,17 @@ raises-extend-require-match-for = ["*Exception", "*Error"]
     # pydocstyle
     "D",
     # flake8-print
-    "T"
+    "T",
+    # NumPy-specific rules (np.random.seed, np.random.randn, etc.)
+    "NPY002",
+    # unused local variable
+    "F841",
+    # pytest.raises too broad
+    "PT011",
+    # unnecessary assignment before return
+    "RET504",
+    # import not at top-level
+    "PLC0415"
 ]
 
 [tool.ruff.lint.pydocstyle]

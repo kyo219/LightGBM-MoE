@@ -1,7 +1,6 @@
+import lightgbm
 import numpy as np
 import pytest
-
-import lightgbm
 
 
 @pytest.fixture(scope="function")

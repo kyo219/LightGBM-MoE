@@ -8,8 +8,6 @@ Based on specification section 8:
 - mixture_enable=0 should match standard GBDT behavior
 - Python import works
 """
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -43,9 +41,10 @@ class TestMixtureImport:
     def test_import_lightgbm_moe(self):
         """Test that import lightgbm_moe works."""
         import lightgbm_moe
-        assert hasattr(lightgbm_moe, 'Dataset')
-        assert hasattr(lightgbm_moe, 'train')
-        assert hasattr(lightgbm_moe, 'Booster')
+
+        assert hasattr(lightgbm_moe, "Dataset")
+        assert hasattr(lightgbm_moe, "train")
+        assert hasattr(lightgbm_moe, "Booster")
 
     def test_basic_train_predict(self):
         """Test basic train/predict works (non-MoE)."""
@@ -53,10 +52,10 @@ class TestMixtureImport:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
         }
         bst = lgb.train(params, train_data, num_boost_round=10)
         pred = bst.predict(X)
@@ -74,13 +73,13 @@ class TestMixtureTraining:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'boosting': 'mixture',
-            'mixture_enable': True,
-            'mixture_num_experts': 2,
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 2,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
         }
 
         bst = lgb.train(params, train_data, num_boost_round=20)
@@ -96,13 +95,13 @@ class TestMixtureTraining:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'boosting': 'mixture',
-            'mixture_enable': True,
-            'mixture_num_experts': 4,
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 4,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
         }
 
         bst = lgb.train(params, train_data, num_boost_round=15)
@@ -123,13 +122,13 @@ class TestMixturePrediction:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'boosting': 'mixture',
-            'mixture_enable': True,
-            'mixture_num_experts': 3,
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 3,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
         }
 
         bst = lgb.train(params, train_data, num_boost_round=20)
@@ -145,8 +144,7 @@ class TestMixturePrediction:
 
         # Check rows sum to 1
         row_sums = regime_proba.sum(axis=1)
-        np.testing.assert_allclose(row_sums, 1.0, rtol=1e-6,
-                                   err_msg="regime_proba rows do not sum to 1")
+        np.testing.assert_allclose(row_sums, 1.0, rtol=1e-6, err_msg="regime_proba rows do not sum to 1")
 
         # Check all values are in [0, 1]
         assert np.all(regime_proba >= 0), "regime_proba contains negative values"
@@ -192,13 +190,13 @@ class TestMixtureSaveLoad:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'boosting': 'mixture',
-            'mixture_enable': True,
-            'mixture_num_experts': 2,
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 2,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
         }
 
         # Train and save
@@ -222,14 +220,14 @@ class TestMixtureSaveLoad:
         expert_pred_after = bst_loaded.predict_expert_pred(X)
 
         # Check consistency
-        np.testing.assert_allclose(pred_before, pred_after, rtol=1e-6,
-                                   err_msg="predict differs after save/load")
-        np.testing.assert_allclose(regime_proba_before, regime_proba_after, rtol=1e-6,
-                                   err_msg="predict_regime_proba differs after save/load")
-        np.testing.assert_array_equal(regime_before, regime_after,
-                                      err_msg="predict_regime differs after save/load")
-        np.testing.assert_allclose(expert_pred_before, expert_pred_after, rtol=1e-6,
-                                   err_msg="predict_expert_pred differs after save/load")
+        np.testing.assert_allclose(pred_before, pred_after, rtol=1e-6, err_msg="predict differs after save/load")
+        np.testing.assert_allclose(
+            regime_proba_before, regime_proba_after, rtol=1e-6, err_msg="predict_regime_proba differs after save/load"
+        )
+        np.testing.assert_array_equal(regime_before, regime_after, err_msg="predict_regime differs after save/load")
+        np.testing.assert_allclose(
+            expert_pred_before, expert_pred_after, rtol=1e-6, err_msg="predict_expert_pred differs after save/load"
+        )
 
         # Check loaded model properties
         assert bst_loaded.is_mixture() is True
@@ -246,30 +244,31 @@ class TestMixtureDisabled:
 
         # Standard GBDT
         params_std = {
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
-            'seed': 42,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
+            "seed": 42,
         }
         bst_std = lgb.train(params_std, train_data, num_boost_round=10)
         pred_std = bst_std.predict(X)
 
         # GBDT with mixture_enable=0 (should behave same)
         params_moe_off = {
-            'objective': 'regression',
-            'mixture_enable': False,
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
-            'seed': 42,
+            "objective": "regression",
+            "mixture_enable": False,
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
+            "seed": 42,
         }
         bst_moe_off = lgb.train(params_moe_off, train_data, num_boost_round=10)
         pred_moe_off = bst_moe_off.predict(X)
 
         # Predictions should be identical
-        np.testing.assert_allclose(pred_std, pred_moe_off, rtol=1e-10,
-                                   err_msg="mixture_enable=0 differs from standard GBDT")
+        np.testing.assert_allclose(
+            pred_std, pred_moe_off, rtol=1e-10, err_msg="mixture_enable=0 differs from standard GBDT"
+        )
 
         # Standard model should not be a mixture
         assert bst_std.is_mixture() is False
@@ -285,9 +284,9 @@ class TestMixtureNonMixtureErrors:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
         }
         bst = lgb.train(params, train_data, num_boost_round=5)
 
@@ -300,9 +299,9 @@ class TestMixtureNonMixtureErrors:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'objective': 'regression',
-            'verbose': -1,
-            'num_leaves': 8,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
         }
         bst = lgb.train(params, train_data, num_boost_round=5)
 
@@ -320,13 +319,13 @@ class TestMixtureWithDifferentObjectives:
         train_data = lgb.Dataset(X, label=y)
 
         params = {
-            'boosting': 'mixture',
-            'mixture_enable': True,
-            'mixture_num_experts': 2,
-            'objective': objective,
-            'verbose': -1,
-            'num_leaves': 8,
-            'num_threads': 1,
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 2,
+            "objective": objective,
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
         }
 
         bst = lgb.train(params, train_data, num_boost_round=10)

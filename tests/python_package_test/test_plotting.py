@@ -1,11 +1,10 @@
 # coding: utf-8
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.model_selection import train_test_split
-
-import lightgbm as lgb
 from lightgbm.compat import GRAPHVIZ_INSTALLED, MATPLOTLIB_INSTALLED, PANDAS_INSTALLED, pd_DataFrame
+from sklearn.model_selection import train_test_split
 
 if MATPLOTLIB_INSTALLED:
     import matplotlib
