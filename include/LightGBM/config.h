@@ -1253,10 +1253,17 @@ struct Config {
   // desc = if provided, must have exactly mixture_num_experts values
   std::vector<int> mixture_expert_num_leaves;
 
-  // desc = per-expert learning_rate values (comma-separated list)
-  // desc = if empty, all experts use the global learning_rate setting
+  // desc = per-expert min_data_in_leaf values (comma-separated list)
+  // desc = if empty, all experts use the global min_data_in_leaf setting
   // desc = if provided, must have exactly mixture_num_experts values
-  std::vector<double> mixture_expert_learning_rates;
+  // desc = example: "20,5,1" for coarse-to-fine experts
+  std::vector<int> mixture_expert_min_data_in_leaf;
+
+  // desc = per-expert min_gain_to_split values (comma-separated list)
+  // desc = if empty, all experts use the global min_gain_to_split setting
+  // desc = if provided, must have exactly mixture_num_experts values
+  // desc = example: "0.1,0.01,0.0" for conservative-to-aggressive experts
+  std::vector<double> mixture_expert_min_gain_to_split;
 
   #ifndef __NVCC__
   #pragma endregion

@@ -99,13 +99,14 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // (responsibility-weighted) in MStepExperts. The main objective is stored in
   // objective_function_ and used to compute gradients on yhat.
   // Each expert gets a different seed to break symmetry when using uniform initialization.
-  // Per-expert hyperparameters (max_depth, num_leaves, learning_rate) can be specified.
+  // Per-expert hyperparameters (max_depth, num_leaves, min_data_in_leaf, min_gain_to_split) can be specified.
   Log::Debug("MixtureGBDT::Init - creating %d experts", num_experts_);
 
   // Validate per-expert hyperparameters if provided
   const bool use_per_expert_max_depth = !config_->mixture_expert_max_depths.empty();
   const bool use_per_expert_num_leaves = !config_->mixture_expert_num_leaves.empty();
-  const bool use_per_expert_learning_rate = !config_->mixture_expert_learning_rates.empty();
+  const bool use_per_expert_min_data_in_leaf = !config_->mixture_expert_min_data_in_leaf.empty();
+  const bool use_per_expert_min_gain_to_split = !config_->mixture_expert_min_gain_to_split.empty();
 
   if (use_per_expert_max_depth &&
       static_cast<int>(config_->mixture_expert_max_depths.size()) != num_experts_) {
@@ -117,10 +118,15 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
     Log::Fatal("mixture_expert_num_leaves must have exactly %d values (one per expert), got %d",
                num_experts_, static_cast<int>(config_->mixture_expert_num_leaves.size()));
   }
-  if (use_per_expert_learning_rate &&
-      static_cast<int>(config_->mixture_expert_learning_rates.size()) != num_experts_) {
-    Log::Fatal("mixture_expert_learning_rates must have exactly %d values (one per expert), got %d",
-               num_experts_, static_cast<int>(config_->mixture_expert_learning_rates.size()));
+  if (use_per_expert_min_data_in_leaf &&
+      static_cast<int>(config_->mixture_expert_min_data_in_leaf.size()) != num_experts_) {
+    Log::Fatal("mixture_expert_min_data_in_leaf must have exactly %d values (one per expert), got %d",
+               num_experts_, static_cast<int>(config_->mixture_expert_min_data_in_leaf.size()));
+  }
+  if (use_per_expert_min_gain_to_split &&
+      static_cast<int>(config_->mixture_expert_min_gain_to_split.size()) != num_experts_) {
+    Log::Fatal("mixture_expert_min_gain_to_split must have exactly %d values (one per expert), got %d",
+               num_experts_, static_cast<int>(config_->mixture_expert_min_gain_to_split.size()));
   }
 
   experts_.clear();
@@ -140,14 +146,18 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
     if (use_per_expert_num_leaves) {
       expert_configs_[k]->num_leaves = config_->mixture_expert_num_leaves[k];
     }
-    if (use_per_expert_learning_rate) {
-      expert_configs_[k]->learning_rate = config_->mixture_expert_learning_rates[k];
+    if (use_per_expert_min_data_in_leaf) {
+      expert_configs_[k]->min_data_in_leaf = config_->mixture_expert_min_data_in_leaf[k];
+    }
+    if (use_per_expert_min_gain_to_split) {
+      expert_configs_[k]->min_gain_to_split = config_->mixture_expert_min_gain_to_split[k];
     }
 
     experts_.emplace_back(new GBDT());
-    Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d, max_depth=%d, num_leaves=%d, lr=%.4f",
+    Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d, max_depth=%d, num_leaves=%d, min_data=%d, min_gain=%.4f",
                k, expert_configs_[k]->seed, expert_configs_[k]->max_depth,
-               expert_configs_[k]->num_leaves, expert_configs_[k]->learning_rate);
+               expert_configs_[k]->num_leaves, expert_configs_[k]->min_data_in_leaf,
+               expert_configs_[k]->min_gain_to_split);
     experts_[k]->Init(expert_configs_[k].get(), train_data_, nullptr, {});
     Log::Debug("MixtureGBDT::Init - expert %d initialized", k);
   }

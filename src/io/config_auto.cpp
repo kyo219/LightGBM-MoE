@@ -346,7 +346,8 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_gate_lambda_l2",
   "mixture_expert_max_depths",
   "mixture_expert_num_leaves",
-  "mixture_expert_learning_rates",
+  "mixture_expert_min_data_in_leaf",
+  "mixture_expert_min_gain_to_split",
   });
   return params;
 }
@@ -745,8 +746,12 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
     mixture_expert_num_leaves = Common::StringToArray<int>(tmp_str, ',');
   }
 
-  if (GetString(params, "mixture_expert_learning_rates", &tmp_str)) {
-    mixture_expert_learning_rates = Common::StringToArray<double>(tmp_str, ',');
+  if (GetString(params, "mixture_expert_min_data_in_leaf", &tmp_str)) {
+    mixture_expert_min_data_in_leaf = Common::StringToArray<int>(tmp_str, ',');
+  }
+
+  if (GetString(params, "mixture_expert_min_gain_to_split", &tmp_str)) {
+    mixture_expert_min_gain_to_split = Common::StringToArray<double>(tmp_str, ',');
   }
 }
 
@@ -885,7 +890,8 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_gate_lambda_l2: " << mixture_gate_lambda_l2 << "]\n";
   str_buf << "[mixture_expert_max_depths: " << Common::Join(mixture_expert_max_depths, ",") << "]\n";
   str_buf << "[mixture_expert_num_leaves: " << Common::Join(mixture_expert_num_leaves, ",") << "]\n";
-  str_buf << "[mixture_expert_learning_rates: " << Common::Join(mixture_expert_learning_rates, ",") << "]\n";
+  str_buf << "[mixture_expert_min_data_in_leaf: " << Common::Join(mixture_expert_min_data_in_leaf, ",") << "]\n";
+  str_buf << "[mixture_expert_min_gain_to_split: " << Common::Join(mixture_expert_min_gain_to_split, ",") << "]\n";
   return str_buf.str();
 }
 
@@ -1049,7 +1055,8 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_gate_lambda_l2", {}},
     {"mixture_expert_max_depths", {}},
     {"mixture_expert_num_leaves", {}},
-    {"mixture_expert_learning_rates", {}},
+    {"mixture_expert_min_data_in_leaf", {}},
+    {"mixture_expert_min_gain_to_split", {}},
   });
   return map;
 }
@@ -1213,7 +1220,8 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_gate_lambda_l2", "double"},
     {"mixture_expert_max_depths", "string"},
     {"mixture_expert_num_leaves", "string"},
-    {"mixture_expert_learning_rates", "string"},
+    {"mixture_expert_min_data_in_leaf", "string"},
+    {"mixture_expert_min_gain_to_split", "string"},
   });
   return map;
 }

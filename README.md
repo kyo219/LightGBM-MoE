@@ -88,17 +88,18 @@ expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 
 ### Per-Expert Hyperparameters (Advanced)
 
-These parameters allow each expert to have different tree configurations. If not specified, all experts share the same hyperparameters.
+These parameters allow each expert to have different tree **structural** configurations. If not specified, all experts share the same hyperparameters.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `mixture_expert_max_depths` | string | `""` | Comma-separated max_depth for each expert. Must have exactly K values if specified. |
 | `mixture_expert_num_leaves` | string | `""` | Comma-separated num_leaves for each expert. Must have exactly K values if specified. |
-| `mixture_expert_learning_rates` | string | `""` | Comma-separated learning_rate for each expert. Must have exactly K values if specified. |
+| `mixture_expert_min_data_in_leaf` | string | `""` | Comma-separated min_data_in_leaf for each expert. Controls tree granularity. |
+| `mixture_expert_min_gain_to_split` | string | `""` | Comma-separated min_gain_to_split for each expert. Controls split aggressiveness. |
 
 #### Same Hyperparameters for All Experts (Default)
 
-When per-expert parameters are not specified, all experts share the base `max_depth`, `num_leaves`, and `learning_rate`:
+When per-expert parameters are not specified, all experts share the base hyperparameters:
 
 ```python
 params = {
@@ -106,7 +107,7 @@ params = {
     'mixture_num_experts': 3,
     'max_depth': 5,           # All 3 experts use max_depth=5
     'num_leaves': 31,         # All 3 experts use num_leaves=31
-    'learning_rate': 0.1,     # All 3 experts use learning_rate=0.1
+    'min_data_in_leaf': 20,   # All 3 experts use min_data_in_leaf=20
 }
 ```
 
@@ -118,14 +119,17 @@ Specify comma-separated values (one per expert) to customize each expert:
 params = {
     'boosting': 'mixture',
     'mixture_num_experts': 3,
-    # Expert 0: shallow (max_depth=3), Expert 1: medium (5), Expert 2: deep (7)
+    # Expert 0: coarse (high min_data), Expert 1: medium, Expert 2: fine (low min_data)
     'mixture_expert_max_depths': '3,5,7',
     'mixture_expert_num_leaves': '8,16,32',
-    'mixture_expert_learning_rates': '0.1,0.05,0.03',
+    'mixture_expert_min_data_in_leaf': '50,20,5',      # coarse → fine
+    'mixture_expert_min_gain_to_split': '0.1,0.01,0.001',  # conservative → aggressive
 }
 ```
 
-This allows experts to have different capacities: shallow experts for simple patterns, deep experts for complex patterns.
+This allows experts to have different structural capacities:
+- **Coarse expert** (high min_data_in_leaf): captures broad patterns, less prone to overfitting
+- **Fine expert** (low min_data_in_leaf): captures detailed patterns, good for complex regimes
 
 #### Optuna Optimization Tips
 
@@ -143,20 +147,22 @@ def objective(trial):
         'mixture_num_experts': num_experts,
         'max_depth': trial.suggest_int('max_depth', 3, 10),
         'num_leaves': trial.suggest_int('num_leaves', 8, 64),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
     }
 
-    # Option 2: Different hyperparameters per expert (richer search space)
+    # Option 2: Different structural params per expert (richer search space)
     max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 10) for k in range(num_experts)]
     num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 64) for k in range(num_experts)]
-    learning_rates = [trial.suggest_float(f'lr_{k}', 0.01, 0.3, log=True) for k in range(num_experts)]
+    min_data = [trial.suggest_int(f'min_data_{k}', 5, 100) for k in range(num_experts)]
+    min_gain = [trial.suggest_float(f'min_gain_{k}', 1e-4, 0.5, log=True) for k in range(num_experts)]
 
     params = {
         'boosting': 'mixture',
         'mixture_num_experts': num_experts,
-        'mixture_expert_max_depths': ','.join(map(str, max_depths)),      # "3,5,7"
-        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),      # "8,16,32"
-        'mixture_expert_learning_rates': ','.join(map(str, learning_rates)),  # "0.1,0.05,0.03"
+        'mixture_expert_max_depths': ','.join(map(str, max_depths)),
+        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),
+        'mixture_expert_min_data_in_leaf': ','.join(map(str, min_data)),
+        'mixture_expert_min_gain_to_split': ','.join(map(str, min_gain)),
     }
 
     # ... train and evaluate
@@ -337,7 +343,7 @@ grad_k[i] = r_ik × ∂L(y_i, f_k(x_i)) / ∂f_k
 
 ### 4. Per-Expert Hyperparameters (Implemented)
 
-Each Expert can have different tree configurations via per-expert hyperparameters:
+Each Expert can have different tree **structural** configurations via per-expert hyperparameters:
 
 **Implementation** (`src/boosting/mixture_gbdt.cpp`):
 
@@ -345,35 +351,37 @@ Each Expert can have different tree configurations via per-expert hyperparameter
 // Each expert has its own config
 std::vector<std::unique_ptr<Config>> expert_configs_;  // One per expert
 
-// Per-expert parameters (comma-separated in config)
-std::vector<int> mixture_expert_max_depths;      // e.g., "3,5,7"
-std::vector<int> mixture_expert_num_leaves;      // e.g., "8,16,32"
-std::vector<double> mixture_expert_learning_rates;  // e.g., "0.1,0.05,0.03"
+// Per-expert structural parameters (comma-separated in config)
+std::vector<int> mixture_expert_max_depths;           // e.g., "3,5,7"
+std::vector<int> mixture_expert_num_leaves;           // e.g., "8,16,32"
+std::vector<int> mixture_expert_min_data_in_leaf;     // e.g., "50,20,5"
+std::vector<double> mixture_expert_min_gain_to_split; // e.g., "0.1,0.01,0.001"
 ```
 
 **How it works**:
 
 | Specification | Behavior |
 |---------------|----------|
-| Not specified | All experts use base `max_depth`, `num_leaves`, `learning_rate` |
+| Not specified | All experts use base structural hyperparameters |
 | Comma-separated list | Each expert uses its corresponding value (must have exactly K values) |
 
 **Example use cases**:
 
 ```python
-# Use case 1: Shallow vs Deep experts
-# Expert 0 handles simple patterns, Expert 1 handles complex patterns
+# Use case 1: Coarse vs Fine experts
+# Expert 0 captures broad patterns, Expert 1 captures detailed patterns
+params = {
+    'mixture_num_experts': 2,
+    'mixture_expert_min_data_in_leaf': '50,5',    # coarse vs fine
+    'mixture_expert_min_gain_to_split': '0.1,0.001',  # conservative vs aggressive
+}
+
+# Use case 2: Shallow vs Deep experts
+# Different tree depths for different regime complexities
 params = {
     'mixture_num_experts': 2,
     'mixture_expert_max_depths': '3,7',
     'mixture_expert_num_leaves': '8,64',
-}
-
-# Use case 2: Different learning rates for stability
-# Conservative expert (slow learning) vs aggressive expert (fast learning)
-params = {
-    'mixture_num_experts': 2,
-    'mixture_expert_learning_rates': '0.03,0.1',
 }
 ```
 
@@ -449,17 +457,18 @@ expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測
 
 ### Expertごとのハイパーパラメータ（上級者向け）
 
-各Expertに異なるツリー設定を持たせることができます。指定しない場合、全Expertは同じハイパーパラメータを共有します。
+各Expertに異なるツリー**構造**設定を持たせることができます。指定しない場合、全Expertは同じハイパーパラメータを共有します。
 
 | パラメータ | 型 | デフォルト | 説明 |
 |-----------|------|---------|-------------|
 | `mixture_expert_max_depths` | string | `""` | カンマ区切りの各Expertのmax_depth。指定する場合はK個の値が必要。 |
 | `mixture_expert_num_leaves` | string | `""` | カンマ区切りの各Expertのnum_leaves。指定する場合はK個の値が必要。 |
-| `mixture_expert_learning_rates` | string | `""` | カンマ区切りの各Expertのlearning_rate。指定する場合はK個の値が必要。 |
+| `mixture_expert_min_data_in_leaf` | string | `""` | カンマ区切りの各Expertのmin_data_in_leaf。木の粒度を制御。 |
+| `mixture_expert_min_gain_to_split` | string | `""` | カンマ区切りの各Expertのmin_gain_to_split。分割の積極性を制御。 |
 
 #### 全Expertで同じハイパーパラメータ（デフォルト）
 
-Expertごとのパラメータを指定しない場合、全Expertはベースの `max_depth`、`num_leaves`、`learning_rate` を共有します：
+Expertごとのパラメータを指定しない場合、全Expertはベースのハイパーパラメータを共有します：
 
 ```python
 params = {
@@ -467,7 +476,7 @@ params = {
     'mixture_num_experts': 3,
     'max_depth': 5,           # 3つのExpert全てがmax_depth=5を使用
     'num_leaves': 31,         # 3つのExpert全てがnum_leaves=31を使用
-    'learning_rate': 0.1,     # 3つのExpert全てがlearning_rate=0.1を使用
+    'min_data_in_leaf': 20,   # 3つのExpert全てがmin_data_in_leaf=20を使用
 }
 ```
 
@@ -479,14 +488,17 @@ params = {
 params = {
     'boosting': 'mixture',
     'mixture_num_experts': 3,
-    # Expert 0: 浅い (max_depth=3), Expert 1: 中程度 (5), Expert 2: 深い (7)
+    # Expert 0: 粗い (高min_data), Expert 1: 中程度, Expert 2: 細かい (低min_data)
     'mixture_expert_max_depths': '3,5,7',
     'mixture_expert_num_leaves': '8,16,32',
-    'mixture_expert_learning_rates': '0.1,0.05,0.03',
+    'mixture_expert_min_data_in_leaf': '50,20,5',      # 粗い → 細かい
+    'mixture_expert_min_gain_to_split': '0.1,0.01,0.001',  # 保守的 → 積極的
 }
 ```
 
-これにより、浅いExpertは単純なパターン、深いExpertは複雑なパターンを担当するなど、異なる容量を持たせることができます。
+これにより、異なる構造容量を持たせることができます：
+- **粗いExpert** (高min_data_in_leaf): 大まかなパターンを捕捉、過学習しにくい
+- **細かいExpert** (低min_data_in_leaf): 詳細なパターンを捕捉、複雑なレジームに適合
 
 #### Optunaでの最適化Tips
 
@@ -504,20 +516,22 @@ def objective(trial):
         'mixture_num_experts': num_experts,
         'max_depth': trial.suggest_int('max_depth', 3, 10),
         'num_leaves': trial.suggest_int('num_leaves', 8, 64),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
     }
 
-    # 方法2: Expertごとに異なるハイパーパラメータ（探索空間がリッチ）
+    # 方法2: Expertごとに異なる構造パラメータ（探索空間がリッチ）
     max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 10) for k in range(num_experts)]
     num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 64) for k in range(num_experts)]
-    learning_rates = [trial.suggest_float(f'lr_{k}', 0.01, 0.3, log=True) for k in range(num_experts)]
+    min_data = [trial.suggest_int(f'min_data_{k}', 5, 100) for k in range(num_experts)]
+    min_gain = [trial.suggest_float(f'min_gain_{k}', 1e-4, 0.5, log=True) for k in range(num_experts)]
 
     params = {
         'boosting': 'mixture',
         'mixture_num_experts': num_experts,
-        'mixture_expert_max_depths': ','.join(map(str, max_depths)),      # "3,5,7"
-        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),      # "8,16,32"
-        'mixture_expert_learning_rates': ','.join(map(str, learning_rates)),  # "0.1,0.05,0.03"
+        'mixture_expert_max_depths': ','.join(map(str, max_depths)),
+        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),
+        'mixture_expert_min_data_in_leaf': ','.join(map(str, min_data)),
+        'mixture_expert_min_gain_to_split': ','.join(map(str, min_gain)),
     }
 
     # ... 学習と評価
@@ -698,7 +712,7 @@ grad_k[i] = r_ik × ∂L(y_i, f_k(x_i)) / ∂f_k
 
 ### 4. Expertごとのハイパーパラメータ（実装済み）
 
-各Expertはper-expertハイパーパラメータにより異なるツリー設定を持てます：
+各Expertはper-expertハイパーパラメータにより異なるツリー**構造**設定を持てます：
 
 **実装** (`src/boosting/mixture_gbdt.cpp`):
 
@@ -706,35 +720,37 @@ grad_k[i] = r_ik × ∂L(y_i, f_k(x_i)) / ∂f_k
 // 各Expertは独自の設定を持つ
 std::vector<std::unique_ptr<Config>> expert_configs_;  // Expertごとに1つ
 
-// Expertごとのパラメータ（設定でカンマ区切り）
-std::vector<int> mixture_expert_max_depths;      // 例: "3,5,7"
-std::vector<int> mixture_expert_num_leaves;      // 例: "8,16,32"
-std::vector<double> mixture_expert_learning_rates;  // 例: "0.1,0.05,0.03"
+// Expertごとの構造パラメータ（設定でカンマ区切り）
+std::vector<int> mixture_expert_max_depths;           // 例: "3,5,7"
+std::vector<int> mixture_expert_num_leaves;           // 例: "8,16,32"
+std::vector<int> mixture_expert_min_data_in_leaf;     // 例: "50,20,5"
+std::vector<double> mixture_expert_min_gain_to_split; // 例: "0.1,0.01,0.001"
 ```
 
 **動作**:
 
 | 指定方法 | 動作 |
 |---------|------|
-| 未指定 | 全Expertがベースの `max_depth`、`num_leaves`、`learning_rate` を使用 |
+| 未指定 | 全Expertがベースの構造ハイパーパラメータを使用 |
 | カンマ区切りリスト | 各Expertが対応する値を使用（K個の値が必要） |
 
 **使用例**:
 
 ```python
-# 使用例1: 浅いExpert vs 深いExpert
-# Expert 0は単純なパターン、Expert 1は複雑なパターンを担当
+# 使用例1: 粗いExpert vs 細かいExpert
+# Expert 0は大まかなパターン、Expert 1は詳細なパターンを担当
+params = {
+    'mixture_num_experts': 2,
+    'mixture_expert_min_data_in_leaf': '50,5',    # 粗い vs 細かい
+    'mixture_expert_min_gain_to_split': '0.1,0.001',  # 保守的 vs 積極的
+}
+
+# 使用例2: 浅いExpert vs 深いExpert
+# 異なるレジーム複雑度に対応
 params = {
     'mixture_num_experts': 2,
     'mixture_expert_max_depths': '3,7',
     'mixture_expert_num_leaves': '8,64',
-}
-
-# 使用例2: 安定性のための異なる学習率
-# 保守的なExpert（遅い学習） vs 積極的なExpert（速い学習）
-params = {
-    'mixture_num_experts': 2,
-    'mixture_expert_learning_rates': '0.03,0.1',
 }
 ```
 
