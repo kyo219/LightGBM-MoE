@@ -68,7 +68,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: ${{ matrix.task }} ${{ matrix.method }} (${{ matrix.os-display-name || matrix.os }}, ${{ matrix.compiler }}, Python ${{ matrix.python_version }})
+    name: ${{ matrix.task }} (${{ matrix.os-display-name || matrix.os }}, Python ${{ matrix.python_version }})
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     timeout-minutes: 60

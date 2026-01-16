@@ -1404,11 +1404,15 @@ Mixture-of-Experts Parameters
 
    -  each expert is a separate GBDT that specializes in different regimes
 
--  ``mixture_r_min`` :raw-html:`<a id="mixture_r_min" title="Permalink to this parameter" href="#mixture_r_min">&#x1F517;&#xFE0E;</a>`, default = ``1e-3``, type = double, constraints: ``mixture_r_min > 0.0``
+-  ``mixture_balance_factor`` :raw-html:`<a id="mixture_balance_factor" title="Permalink to this parameter" href="#mixture_balance_factor">&#x1F517;&#xFE0E;</a>`, default = ``10``, type = int, constraints: ``2 <= mixture_balance_factor <= 10``
 
-   -  minimum responsibility value for each expert (prevents expert collapse)
+   -  load balancing factor for Loss-Free Load Balancing
 
-   -  responsibilities are clipped to this minimum value and renormalized
+   -  minimum expert usage threshold is calculated as 1 / (mixture_balance_factor * num_experts)
+
+   -  lower values enforce more balanced usage, higher values allow more imbalance
+
+   -  e.g., factor=10 with 2 experts allows up to 95:5 imbalance
 
 -  ``mixture_gate_iters_per_round`` :raw-html:`<a id="mixture_gate_iters_per_round" title="Permalink to this parameter" href="#mixture_gate_iters_per_round">&#x1F517;&#xFE0E;</a>`, default = ``1``, type = int, constraints: ``mixture_gate_iters_per_round >= 1``
 
@@ -1444,7 +1448,7 @@ Mixture-of-Experts Parameters
 
    -  ``quantile``: pinball loss (for quantile regression)
 
--  ``mixture_r_smoothing`` :raw-html:`<a id="mixture_r_smoothing" title="Permalink to this parameter" href="#mixture_r_smoothing">&#x1F517;&#xFE0E;</a>`, default = ``none``, type = enum, options: ``none``, ``ema``
+-  ``mixture_r_smoothing`` :raw-html:`<a id="mixture_r_smoothing" title="Permalink to this parameter" href="#mixture_r_smoothing">&#x1F517;&#xFE0E;</a>`, default = ``none``, type = enum, options: ``none``, ``ema``, ``markov``, ``momentum``
 
    -  time-series smoothing method for responsibilities
 
@@ -1452,13 +1456,27 @@ Mixture-of-Experts Parameters
 
    -  ``ema``: exponential moving average (assumes row order is time order)
 
+   -  ``markov``: use previous gate probabilities for blending
+
+   -  ``momentum``: EMA with trend (considers direction of regime changes)
+
 -  ``mixture_smoothing_lambda`` :raw-html:`<a id="mixture_smoothing_lambda" title="Permalink to this parameter" href="#mixture_smoothing_lambda">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_smoothing_lambda <= 1.0``
 
-   -  EMA decay factor for responsibility smoothing
+   -  smoothing coefficient for responsibility/gate smoothing (used by EMA, Markov modes)
 
    -  r[i] = (1-lambda)*r[i] + lambda*r[i-1]
 
    -  0 means no smoothing, 1 means complete carry-forward
+
+-  ``mixture_warmup_iters`` :raw-html:`<a id="mixture_warmup_iters" title="Permalink to this parameter" href="#mixture_warmup_iters">&#x1F517;&#xFE0E;</a>`, default = ``5``, type = int, constraints: ``mixture_warmup_iters >= 0``
+
+   -  number of warmup iterations before E-step begins
+
+   -  during warmup, experts train with initial responsibilities (quantile-based)
+
+   -  this allows experts to differentiate before competitive EM begins
+
+   -  0 means no warmup (may cause expert collapse)
 
 -  ``mixture_predict_output`` :raw-html:`<a id="mixture_predict_output" title="Permalink to this parameter" href="#mixture_predict_output">&#x1F517;&#xFE0E;</a>`, default = ``value``, type = enum, options: ``value``, ``value_and_regime``, ``all``
 

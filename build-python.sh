@@ -197,7 +197,7 @@ create_isolated_source_dir() {
     cp -R ./python-package ./lightgbm-python
 
     cp LICENSE ./lightgbm-python/
-    cp VERSION.txt ./lightgbm-python/lightgbm/VERSION.txt
+    cp VERSION.txt ./lightgbm-python/lightgbm_moe/VERSION.txt
 
     cp -R ./cmake ./lightgbm-python
     cp CMakeLists.txt ./lightgbm-python
@@ -310,29 +310,29 @@ if test "${INSTALL}" = true; then
         echo 'requires = ["setuptools"]' >> ./pyproject.toml
         echo 'build-backend = "setuptools.build_meta"' >> ./pyproject.toml
         echo "" >> ./pyproject.toml
-        echo "recursive-include lightgbm *.dll *.dylib *.so" > ./MANIFEST.in
+        echo "recursive-include lightgbm_moe *.dll *.dylib *.so" > ./MANIFEST.in
         echo "" >> ./MANIFEST.in
-        mkdir -p ./lightgbm/lib
+        mkdir -p ./lightgbm_moe/lib
         if test -f ../lib_lightgbm.so; then
             echo "[INFO] found pre-compiled lib_lightgbm.so"
-            cp ../lib_lightgbm.so ./lightgbm/lib/lib_lightgbm.so
+            cp ../lib_lightgbm.so ./lightgbm_moe/lib/lib_lightgbm.so
         elif test -f ../lib_lightgbm.dylib; then
             echo "[INFO] found pre-compiled lib_lightgbm.dylib"
-            cp ../lib_lightgbm.dylib ./lightgbm/lib/lib_lightgbm.dylib
+            cp ../lib_lightgbm.dylib ./lightgbm_moe/lib/lib_lightgbm.dylib
         elif test -f ../lib_lightgbm.dll; then
             echo "[INFO] found pre-compiled lib_lightgbm.dll"
-            cp ../lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
+            cp ../lib_lightgbm.dll ./lightgbm_moe/lib/lib_lightgbm.dll
         elif test -f ../Release/lib_lightgbm.dll; then
             echo "[INFO] found pre-compiled Release/lib_lightgbm.dll"
-            cp ../Release/lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
+            cp ../Release/lib_lightgbm.dll ./lightgbm_moe/lib/lib_lightgbm.dll
         elif test -f ../windows/x64/DLL/lib_lightgbm.dll; then
             echo "[INFO] found pre-compiled windows/x64/DLL/lib_lightgbm.dll"
-            cp ../windows/x64/DLL/lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
-            cp ../windows/x64/DLL/lib_lightgbm.lib ./lightgbm/lib/lib_lightgbm.lib
+            cp ../windows/x64/DLL/lib_lightgbm.dll ./lightgbm_moe/lib/lib_lightgbm.dll
+            cp ../windows/x64/DLL/lib_lightgbm.lib ./lightgbm_moe/lib/lib_lightgbm.lib
         elif test -f ../windows/x64/Debug_DLL/lib_lightgbm.dll; then
             echo "[INFO] found pre-compiled windows/x64/Debug_DLL/lib_lightgbm.dll"
-            cp ../windows/x64/Debug_DLL/lib_lightgbm.dll ./lightgbm/lib/lib_lightgbm.dll
-            cp ../windows/x64/Debug_DLL/lib_lightgbm.lib ./lightgbm/lib/lib_lightgbm.lib
+            cp ../windows/x64/Debug_DLL/lib_lightgbm.dll ./lightgbm_moe/lib/lib_lightgbm.dll
+            cp ../windows/x64/Debug_DLL/lib_lightgbm.lib ./lightgbm_moe/lib/lib_lightgbm.lib
         else
             echo "[ERROR] cannot find pre-compiled library. Aborting"
             exit 1
