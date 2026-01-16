@@ -141,6 +141,156 @@ expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 
 ---
 
+## Technical Deep Dive
+
+### 1. How MoE is Achieved: Architecture
+
+The MoE model consists of **K Expert GBDTs** and **1 Gate GBDT**:
+
+```
+                    ┌─────────────┐
+                    │   Input X   │
+                    └──────┬──────┘
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+    ┌────────────┐  ┌────────────┐  ┌────────────┐
+    │  Expert 0  │  │  Expert 1  │  │    Gate    │
+    │   (GBDT)   │  │   (GBDT)   │  │   (GBDT)   │
+    │ Regression │  │ Regression │  │ Multiclass │
+    └─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+          │               │               │
+          │  f₀(x)        │  f₁(x)        │ logits
+          ▼               ▼               ▼
+    ┌─────────────────────────────────────────────┐
+    │           Weighted Combination              │
+    │  ŷ = Σₖ softmax(gate_logits)ₖ · fₖ(x)      │
+    └─────────────────────────────────────────────┘
+```
+
+**Key implementation details** (`src/boosting/mixture_gbdt.cpp`):
+
+| Component | Implementation | Lines |
+|-----------|----------------|-------|
+| Expert GBDTs | `std::vector<std::unique_ptr<GBDT>> experts_` | Same objective as mixture |
+| Gate GBDT | `std::unique_ptr<GBDT> gate_` | Multiclass with K classes |
+| Responsibilities | `std::vector<double> responsibilities_` | N × K soft assignments |
+| Load Balancing | `std::vector<double> expert_bias_` | Prevents expert collapse |
+
+### 2. Gate Learning Mechanism
+
+The Gate is trained as a **K-class classification GBDT** using LightGBM's multiclass objective:
+
+```cpp
+// Gate config setup (mixture_gbdt.cpp:86-93)
+gate_config_->objective = "multiclass";
+gate_config_->num_class = num_experts_;
+gate_config_->max_depth = config_->mixture_gate_max_depth;      // default: 3
+gate_config_->num_leaves = config_->mixture_gate_num_leaves;    // default: 8
+gate_config_->learning_rate = config_->mixture_gate_learning_rate;  // default: 0.1
+```
+
+**Training process** (M-Step for Gate, `MStepGate()` at line 526):
+
+1. **Create pseudo-labels**: `z_i = argmax_k(r_ik)` (hard assignment from responsibilities)
+2. **Compute gradients**: Softmax cross-entropy gradients
+   ```cpp
+   // For each sample i and class k:
+   if (k == label) {
+       grad[i,k] = p_k - 1.0;   // Gradient for correct class
+   } else {
+       grad[i,k] = p_k;         // Gradient for other classes
+   }
+   hess[i,k] = p_k * (1 - p_k); // Hessian: softmax derivative
+   ```
+3. **Update Gate**: `gate_->TrainOneIter(gate_grad, gate_hess)`
+
+The Gate learns to predict **which Expert should handle each sample**, based on features X.
+
+### 3. EM-Style Training Algorithm
+
+Each iteration follows an **Expectation-Maximization (EM)** style update:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TrainOneIter()                           │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Forward()     → Compute expert_pred[N,K], gate_proba[N,K]│
+│ 2. EStep()       → Update responsibilities r[N,K]           │
+│ 3. Smoothing()   → Apply EMA/Markov/Momentum (optional)     │
+│ 4. MStepExperts()→ Train experts with weighted gradients    │
+│ 5. MStepGate()   → Train gate with pseudo-labels            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**E-Step** (line 348-370): Update responsibilities based on how well each expert fits each sample:
+
+```cpp
+// Score for sample i, expert k:
+s_ik = log(gate_proba[i,k] + ε) - α × loss(y_i, expert_pred[k,i])
+//     ↑ Gate's belief          ↑ Expert's prediction quality
+
+// Convert scores to responsibilities via softmax:
+r_ik = softmax(s_ik)  // Σₖ r_ik = 1
+```
+
+**M-Step for Experts** (line 481-523): Train each expert with responsibility-weighted gradients:
+
+```cpp
+// For expert k, gradient at sample i:
+grad_k[i] = r_ik × ∂L(y_i, f_k(x_i)) / ∂f_k
+//          ↑ Responsibility weight (soft assignment)
+
+// High r_ik → Expert k learns more from sample i
+// Low r_ik  → Expert k ignores sample i
+```
+
+**Why EM works**: Responsibilities `r_ik` act as soft cluster assignments. Each Expert specializes on samples where it has high responsibility. The Gate learns to route samples to the appropriate Expert.
+
+### 4. Future Work: Per-Expert Hyperparameters
+
+**Current limitation**: All Experts share the same hyperparameters (`expert_config_` is single instance).
+
+**Implementation feasibility**: **Possible** with moderate code changes:
+
+```cpp
+// Current implementation:
+std::unique_ptr<Config> expert_config_;  // Shared by all experts
+
+// Proposed change:
+std::vector<std::unique_ptr<Config>> expert_configs_;  // One per expert
+```
+
+**Required changes**:
+1. Add per-expert parameters to `config.h`:
+   ```cpp
+   std::vector<int> mixture_expert_max_depths;    // e.g., [3, 5, 7]
+   std::vector<int> mixture_expert_num_leaves;    // e.g., [8, 16, 32]
+   std::vector<double> mixture_expert_learning_rates;
+   ```
+2. Modify `Init()` to create separate configs for each expert
+3. Update Python bindings to accept per-expert params
+
+**Trade-offs**:
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Shared config | Simple tuning, fewer params | All experts same capacity |
+| Per-expert config | Experts can have different capacity | K × more hyperparameters |
+| Expert groups | Balance of both | Moderate complexity |
+
+**Recommended approach**: Start with expert groups (e.g., "shallow" vs "deep" experts):
+```python
+params = {
+    'mixture_num_experts': 4,
+    'mixture_expert_groups': [
+        {'experts': [0, 1], 'max_depth': 3, 'num_leaves': 8},   # Shallow
+        {'experts': [2, 3], 'max_depth': 6, 'num_leaves': 32},  # Deep
+    ]
+}
+```
+
+---
+
 <a name="japanese"></a>
 ## Japanese (日本語)
 
@@ -257,6 +407,156 @@ expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測
 - レジームが潜在的（隠れマルコフ、観測されない状態）
 - 標準GBDTが既にパターンを捕捉できる
 - データに明確なレジーム構造がない
+
+---
+
+## 技術的詳細
+
+### 1. MoEの実現方法：アーキテクチャ
+
+MoEモデルは **K個のExpert GBDT** と **1個のGate GBDT** で構成されます：
+
+```
+                    ┌─────────────┐
+                    │   入力 X    │
+                    └──────┬──────┘
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+    ┌────────────┐  ┌────────────┐  ┌────────────┐
+    │  Expert 0  │  │  Expert 1  │  │    Gate    │
+    │   (GBDT)   │  │   (GBDT)   │  │   (GBDT)   │
+    │   回帰     │  │   回帰     │  │ 多クラス分類│
+    └─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+          │               │               │
+          │  f₀(x)        │  f₁(x)        │ logits
+          ▼               ▼               ▼
+    ┌─────────────────────────────────────────────┐
+    │              重み付き結合                    │
+    │  ŷ = Σₖ softmax(gate_logits)ₖ · fₖ(x)      │
+    └─────────────────────────────────────────────┘
+```
+
+**主要な実装詳細** (`src/boosting/mixture_gbdt.cpp`):
+
+| コンポーネント | 実装 | 説明 |
+|---------------|------|------|
+| Expert群 | `std::vector<std::unique_ptr<GBDT>> experts_` | 混合モデルと同じ目的関数 |
+| Gate | `std::unique_ptr<GBDT> gate_` | K-クラス分類 |
+| 責務 | `std::vector<double> responsibilities_` | N × K のソフト割り当て |
+| 負荷分散 | `std::vector<double> expert_bias_` | Expert崩壊を防止 |
+
+### 2. Gateの学習メカニズム
+
+GateはLightGBMの多クラス分類として **K-クラス分類GBDT** で学習されます：
+
+```cpp
+// Gate設定 (mixture_gbdt.cpp:86-93)
+gate_config_->objective = "multiclass";
+gate_config_->num_class = num_experts_;
+gate_config_->max_depth = config_->mixture_gate_max_depth;      // デフォルト: 3
+gate_config_->num_leaves = config_->mixture_gate_num_leaves;    // デフォルト: 8
+gate_config_->learning_rate = config_->mixture_gate_learning_rate;  // デフォルト: 0.1
+```
+
+**学習プロセス** (M-Step for Gate, `MStepGate()` 526行目):
+
+1. **疑似ラベル作成**: `z_i = argmax_k(r_ik)` (責務からのハード割り当て)
+2. **勾配計算**: Softmax交差エントロピー勾配
+   ```cpp
+   // 各サンプルi、クラスkに対して:
+   if (k == label) {
+       grad[i,k] = p_k - 1.0;   // 正解クラスの勾配
+   } else {
+       grad[i,k] = p_k;         // 他クラスの勾配
+   }
+   hess[i,k] = p_k * (1 - p_k); // ヘシアン: softmax微分
+   ```
+3. **Gate更新**: `gate_->TrainOneIter(gate_grad, gate_hess)`
+
+Gateは特徴量Xに基づいて **どのExpertが各サンプルを処理すべきか** を予測するよう学習します。
+
+### 3. EMスタイルの学習アルゴリズム
+
+各イテレーションは **期待値最大化法 (EM)** スタイルの更新に従います：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TrainOneIter()                           │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Forward()     → expert_pred[N,K], gate_proba[N,K]を計算  │
+│ 2. EStep()       → 責務 r[N,K] を更新                       │
+│ 3. Smoothing()   → EMA/Markov/Momentum適用（オプション）    │
+│ 4. MStepExperts()→ 重み付き勾配でExpertを学習               │
+│ 5. MStepGate()   → 疑似ラベルでGateを学習                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**E-Step** (348-370行目): 各Expertが各サンプルにどれだけ適合するかに基づいて責務を更新：
+
+```cpp
+// サンプルi、Expert kのスコア:
+s_ik = log(gate_proba[i,k] + ε) - α × loss(y_i, expert_pred[k,i])
+//     ↑ Gateの信念               ↑ Expertの予測品質
+
+// スコアをsoftmaxで責務に変換:
+r_ik = softmax(s_ik)  // Σₖ r_ik = 1
+```
+
+**M-Step for Experts** (481-523行目): 責務重み付き勾配で各Expertを学習：
+
+```cpp
+// Expert kのサンプルiでの勾配:
+grad_k[i] = r_ik × ∂L(y_i, f_k(x_i)) / ∂f_k
+//          ↑ 責務の重み（ソフト割り当て）
+
+// r_ikが高い → Expert kはサンプルiからより学習
+// r_ikが低い → Expert kはサンプルiを無視
+```
+
+**EMが機能する理由**: 責務 `r_ik` はソフトクラスタ割り当てとして機能します。各Expertは高い責務を持つサンプルに特化します。Gateは適切なExpertにサンプルをルーティングするよう学習します。
+
+### 4. 今後の展望：Expertごとのハイパーパラメータ
+
+**現在の制限**: 全Expertが同じハイパーパラメータを共有（`expert_config_`が単一インスタンス）
+
+**実装可能性**: 中程度のコード変更で **実現可能**：
+
+```cpp
+// 現在の実装:
+std::unique_ptr<Config> expert_config_;  // 全Expertで共有
+
+// 提案する変更:
+std::vector<std::unique_ptr<Config>> expert_configs_;  // Expertごとに1つ
+```
+
+**必要な変更**:
+1. `config.h`にExpertごとのパラメータを追加:
+   ```cpp
+   std::vector<int> mixture_expert_max_depths;    // 例: [3, 5, 7]
+   std::vector<int> mixture_expert_num_leaves;    // 例: [8, 16, 32]
+   std::vector<double> mixture_expert_learning_rates;
+   ```
+2. `Init()`を修正して各Expertに個別設定を作成
+3. PythonバインディングをExpertごとのパラメータを受け入れるよう更新
+
+**トレードオフ**:
+
+| アプローチ | 長所 | 短所 |
+|-----------|------|------|
+| 共有設定 | チューニングが簡単、パラメータ数少 | 全Expert同じ容量 |
+| Expertごと設定 | Expertごとに異なる容量可能 | K × ハイパラ数 |
+| Expertグループ | 両者のバランス | 中程度の複雑さ |
+
+**推奨アプローチ**: Expertグループから始める（例: "浅い" vs "深い" Expert）:
+```python
+params = {
+    'mixture_num_experts': 4,
+    'mixture_expert_groups': [
+        {'experts': [0, 1], 'max_depth': 3, 'num_leaves': 8},   # 浅い
+        {'experts': [2, 3], 'max_depth': 6, 'num_leaves': 32},  # 深い
+    ]
+}
+```
 
 ---
 

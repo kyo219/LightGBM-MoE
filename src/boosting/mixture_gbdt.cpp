@@ -17,10 +17,12 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace LightGBM {
@@ -260,7 +262,7 @@ double MixtureGBDT::ComputePointwiseLoss(double y, double pred) const {
   } else if (e_step_loss_type_ == "l1") {
     return std::fabs(diff);
   } else if (e_step_loss_type_ == "quantile") {
-    // TODO: Get quantile alpha from config
+    // TODO(shiyu1994): Get quantile alpha from config
     double alpha = 0.5;  // default median
     if (diff >= 0) {
       return alpha * diff;
@@ -544,7 +546,7 @@ void MixtureGBDT::MStepGate() {
   // Update gate's labels
   // Note: This requires modifying the dataset's labels, which is complex.
   // For now, we'll use the gate's TrainOneIter with custom gradients.
-  // TODO: Implement proper label update for gate training
+  // TODO(shiyu1994): Implement proper label update for gate training
 
   // For multiclass, we compute softmax cross-entropy gradients
   std::vector<score_t> gate_grad(static_cast<size_t>(num_data_) * num_experts_);
