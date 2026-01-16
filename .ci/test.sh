@@ -11,8 +11,6 @@ SANITIZERS=${SANITIZERS:-""}
 
 ARCH=$(uname -m)
 
-LGB_VER=$(head -n 1 "${BUILD_DIRECTORY}/VERSION.txt")
-
 # create the artifact upload directory if it doesn't exist yet
 mkdir -p "${BUILD_ARTIFACTSTAGINGDIRECTORY}"
 

@@ -1448,6 +1448,14 @@ Mixture-of-Experts Parameters
 
    -  ``quantile``: pinball loss (for quantile regression)
 
+-  ``mixture_e_step_mode`` :raw-html:`<a id="mixture_e_step_mode" title="Permalink to this parameter" href="#mixture_e_step_mode">&#x1F517;&#xFE0E;</a>`, default = ``em``, type = enum, options: ``em``, ``loss_only``
+
+   -  mode for E-step responsibility calculation
+
+   -  ``em``: use both gate probability and expert loss (standard EM)
+
+   -  ``loss_only``: use only expert loss, ignore gate probability (simpler, more intuitive)
+
 -  ``mixture_r_smoothing`` :raw-html:`<a id="mixture_r_smoothing" title="Permalink to this parameter" href="#mixture_r_smoothing">&#x1F517;&#xFE0E;</a>`, default = ``none``, type = enum, options: ``none``, ``ema``, ``markov``, ``momentum``
 
    -  time-series smoothing method for responsibilities
