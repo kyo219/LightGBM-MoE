@@ -131,6 +131,40 @@ This allows experts to have different structural capacities:
 - **Coarse expert** (high min_data_in_leaf): captures broad patterns, less prone to overfitting
 - **Fine expert** (low min_data_in_leaf): captures detailed patterns, good for complex regimes
 
+#### Training Behavior with Per-Expert Hyperparameters
+
+**EM iteration structure**: Each boosting iteration adds ONE tree to each expert:
+
+```
+TrainOneIter() {
+  1. Forward()      → Compute predictions from all experts
+  2. EStep()        → Update responsibilities
+  3. MStepExperts() → Each expert adds 1 tree (sequential)
+  4. MStepGate()    → Gate adds 1 tree
+}
+```
+
+**What changes / doesn't change with different hyperparameters:**
+
+| Aspect | Deep Expert | Shallow Expert |
+|--------|-------------|----------------|
+| EM iterations | Same | Same |
+| Number of trees | Same | Same |
+| Time per tree | Longer | Shorter |
+| Expressiveness per tree | Higher | Lower |
+
+**Key insight**: `num_boost_round=100` means each expert builds 100 trees, regardless of depth settings. The per-expert hyperparameters control **expressiveness per tree**, not the number of trees.
+
+```
+num_boost_round = 100:
+  Expert 0 (shallow): 100 shallow trees → simple patterns
+  Expert 1 (deep):    100 deep trees    → complex patterns
+                ↓
+        Same 100 EM iterations
+```
+
+**Training time**: Currently experts are trained sequentially in each iteration, so the deepest/most complex expert becomes the bottleneck. Total time ≈ sum of all expert tree build times per iteration.
+
 #### Optuna Optimization Tips
 
 When using Optuna for hyperparameter tuning, suggest values for each expert individually, then join them into a comma-separated string:
@@ -499,6 +533,40 @@ params = {
 これにより、異なる構造容量を持たせることができます：
 - **粗いExpert** (高min_data_in_leaf): 大まかなパターンを捕捉、過学習しにくい
 - **細かいExpert** (低min_data_in_leaf): 詳細なパターンを捕捉、複雑なレジームに適合
+
+#### Expertごとのハイパラと学習の動作
+
+**EMイテレーションの構造**: 各ブースティングイテレーションで、各Expertに1本ずつ木を追加：
+
+```
+TrainOneIter() {
+  1. Forward()      → 全Expertの予測を計算
+  2. EStep()        → 責務を更新
+  3. MStepExperts() → 各Expertが1本ずつ木を追加（逐次実行）
+  4. MStepGate()    → Gateが1本木を追加
+}
+```
+
+**ハイパラで変わるもの / 変わらないもの:**
+
+| 項目 | 深いExpert | 浅いExpert |
+|------|------------|------------|
+| EMイテレーション数 | 同じ | 同じ |
+| 木の本数 | 同じ | 同じ |
+| 1本あたりの構築時間 | 長い | 短い |
+| 1本あたりの表現力 | 高い | 低い |
+
+**重要なポイント**: `num_boost_round=100` は各Expertが100本の木を構築することを意味し、深さの設定に関係ありません。Expertごとのハイパラは**木1本あたりの表現力**を制御し、木の本数は変わりません。
+
+```
+num_boost_round = 100:
+  Expert 0 (浅い): 100本の浅い木 → シンプルなパターン
+  Expert 1 (深い): 100本の深い木 → 複雑なパターン
+                ↓
+        同じ100 EMイテレーション
+```
+
+**学習時間**: 現在の実装では各イテレーションでExpertは逐次的に学習されるため、最も深い/複雑なExpertがボトルネックになります。合計時間 ≈ 各イテレーションの全Expert木構築時間の合計。
 
 #### Optunaでの最適化Tips
 
