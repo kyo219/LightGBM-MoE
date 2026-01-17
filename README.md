@@ -25,26 +25,37 @@ Where:
 - `gₖ(x)`: Gate's routing probability for expert k (softmax output)
 - `K`: Number of experts (hyperparameter)
 
+### Requirements
+
+- **Python**: 3.10 or later
+- **OS**: Linux (x86_64, aarch64), macOS (Intel, Apple Silicon)
+- **Dependencies**: numpy, scipy (automatically installed)
+
 ### Installation
 
+**Recommended: Install directly from GitHub** (builds from source, requires CMake):
+
 ```bash
-# Linux
-pip install https://github.com/kyo219/LightGBM-MoE/releases/download/v0.1.0/lightgbm_moe-0.1.0-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-
-# macOS (Apple Silicon)
-pip install https://github.com/kyo219/LightGBM-MoE/releases/download/v0.1.0/lightgbm_moe-0.1.0-py3-none-macosx_11_0_arm64.whl
-
-# Windows
-pip install https://github.com/kyo219/LightGBM-MoE/releases/download/v0.1.0/lightgbm_moe-0.1.0-py3-none-win_amd64.whl
+pip install git+https://github.com/kyo219/LightGBM-MoE.git
 ```
 
-Or build from source:
+**Alternative: Build manually from source**:
+
 ```bash
 git clone https://github.com/kyo219/LightGBM-MoE.git
-cd LightGBM-MoE && mkdir build && cd build
-cmake .. && make -j4
-cd ../python-package && pip install -e .
+cd LightGBM-MoE
+pip install ./python-package
 ```
+
+**For development (editable install)**:
+
+```bash
+git clone https://github.com/kyo219/LightGBM-MoE.git
+cd LightGBM-MoE/python-package
+pip install -e .
+```
+
+> **Note**: Building from source requires CMake (3.16+) and a C++ compiler (GCC, Clang, or Apple Clang).
 
 ### Quick Start
 
@@ -436,18 +447,37 @@ LightGBM-MoE は [Microsoft LightGBM](https://github.com/microsoft/LightGBM) の
 ŷ(x) = Σₖ gₖ(x) · fₖ(x)
 ```
 
+### 動作環境
+
+- **Python**: 3.10以上
+- **OS**: Linux (x86_64, aarch64), macOS (Intel, Apple Silicon)
+- **依存関係**: numpy, scipy（自動インストール）
+
 ### インストール
 
+**推奨: GitHubから直接インストール**（ソースからビルド、CMake必須）:
+
 ```bash
-# Linux
-pip install https://github.com/kyo219/LightGBM-MoE/releases/download/v0.1.0/lightgbm_moe-0.1.0-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-
-# macOS (Apple Silicon)
-pip install https://github.com/kyo219/LightGBM-MoE/releases/download/v0.1.0/lightgbm_moe-0.1.0-py3-none-macosx_11_0_arm64.whl
-
-# Windows
-pip install https://github.com/kyo219/LightGBM-MoE/releases/download/v0.1.0/lightgbm_moe-0.1.0-py3-none-win_amd64.whl
+pip install git+https://github.com/kyo219/LightGBM-MoE.git
 ```
+
+**別方法: 手動ビルド**:
+
+```bash
+git clone https://github.com/kyo219/LightGBM-MoE.git
+cd LightGBM-MoE
+pip install ./python-package
+```
+
+**開発者向け（編集可能インストール）**:
+
+```bash
+git clone https://github.com/kyo219/LightGBM-MoE.git
+cd LightGBM-MoE/python-package
+pip install -e .
+```
+
+> **注意**: ソースからビルドするにはCMake（3.16以上）とC++コンパイラ（GCC、Clang、Apple Clang）が必要です。
 
 ### クイックスタート
 
