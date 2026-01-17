@@ -176,46 +176,114 @@ num_boost_round = 100:
 
 **Training time**: Currently experts are trained sequentially in each iteration, so the deepest/most complex expert becomes the bottleneck. Total time ≈ sum of all expert tree build times per iteration.
 
-#### Optuna Optimization Tips
+#### Initialization and Symmetry Breaking
 
-When using Optuna for hyperparameter tuning, suggest values for each expert individually, then join them into a comma-separated string:
+By default, MoE uses **uniform initialization**: all samples start with equal responsibility `1/K` for all experts.
+
+```
+Initial state (K=2):
+  Sample 0: r = [0.5, 0.5]  (equal for both experts)
+  Sample 1: r = [0.5, 0.5]
+  ...
+```
+
+**Symmetry breaking** is achieved through per-expert random seeds:
+```cpp
+expert_configs_[k]->seed = config_->seed + k + 1;  // Different seed per expert
+```
+
+This means experts naturally differentiate as training progresses, without relying on label-based initialization (which could leak target information).
+
+Available initialization modes (`mixture_init` parameter):
+| Mode | Description |
+|------|-------------|
+| `uniform` (default) | Equal `1/K` responsibility, symmetry broken by per-expert seeds |
+| `random` | Randomly assign each sample to one expert |
+| `quantile` | Assign by label quantiles (y-dependent, use with caution) |
+
+#### Optuna Optimization Examples
+
+**Standard MoE** (shared hyperparameters across experts):
 
 ```python
 import optuna
+import lightgbm_moe as lgb
+from sklearn.model_selection import cross_val_score
 
 def objective(trial):
-    num_experts = 3
-
-    # Option 1: Same hyperparameters for all experts (simpler search space)
     params = {
         'boosting': 'mixture',
-        'mixture_num_experts': num_experts,
-        'max_depth': trial.suggest_int('max_depth', 3, 10),
-        'num_leaves': trial.suggest_int('num_leaves', 8, 64),
+        'objective': 'regression',
+        'verbose': -1,
+        # Tree structure (shared by all experts)
+        'num_leaves': trial.suggest_int('num_leaves', 8, 128),
+        'max_depth': trial.suggest_int('max_depth', 3, 12),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        # MoE specific
+        'mixture_num_experts': trial.suggest_int('mixture_num_experts', 2, 4),
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
+        # Smoothing (optional, for time-series)
+        'mixture_r_smoothing': trial.suggest_categorical(
+            'mixture_r_smoothing', ['none', 'ema', 'markov']
+        ),
     }
+    if params['mixture_r_smoothing'] != 'none':
+        params['mixture_smoothing_lambda'] = trial.suggest_float(
+            'mixture_smoothing_lambda', 0.1, 0.9
+        )
 
-    # Option 2: Different structural params per expert (richer search space)
-    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 10) for k in range(num_experts)]
-    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 64) for k in range(num_experts)]
+    # Train and evaluate
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=100)
+```
+
+**Per-Expert MoE** (different tree structure per expert):
+
+```python
+def objective_per_expert(trial):
+    num_experts = trial.suggest_int('mixture_num_experts', 2, 4)
+
+    # Per-expert tree structure
+    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 12) for k in range(num_experts)]
+    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 128) for k in range(num_experts)]
     min_data = [trial.suggest_int(f'min_data_{k}', 5, 100) for k in range(num_experts)]
-    min_gain = [trial.suggest_float(f'min_gain_{k}', 1e-4, 0.5, log=True) for k in range(num_experts)]
 
     params = {
         'boosting': 'mixture',
+        'objective': 'regression',
+        'verbose': -1,
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        # MoE specific
         'mixture_num_experts': num_experts,
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
+        # Per-expert structure (comma-separated)
         'mixture_expert_max_depths': ','.join(map(str, max_depths)),
         'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),
         'mixture_expert_min_data_in_leaf': ','.join(map(str, min_data)),
-        'mixture_expert_min_gain_to_split': ','.join(map(str, min_gain)),
     }
 
-    # ... train and evaluate
-    return score
+    # Train and evaluate
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
 
-# Tip: Start with Option 1, then try Option 2 if you have enough compute budget
-# Option 2 has K× more hyperparameters, so needs more trials to converge
+# Note: Per-expert adds K×3 more hyperparameters, so needs more trials (e.g., 200+)
+study = optuna.create_study(direction='minimize')
+study.optimize(objective_per_expert, n_trials=200)
 ```
+
+**Tip**: Start with standard MoE. Per-expert requires more trials to converge due to larger search space.
 
 ### Smoothing Methods
 
@@ -617,46 +685,114 @@ num_boost_round = 100:
 
 **学習時間**: 現在の実装では各イテレーションでExpertは逐次的に学習されるため、最も深い/複雑なExpertがボトルネックになります。合計時間 ≈ 各イテレーションの全Expert木構築時間の合計。
 
-#### Optunaでの最適化Tips
+#### 初期化と対称性の破壊
 
-Optunaでハイパーパラメータチューニングを行う場合、各Expertの値を個別に提案し、カンマ区切り文字列に結合します：
+デフォルトでは **uniform初期化** を使用：全サンプルが全Expertに対して均等な責務 `1/K` で開始。
+
+```
+初期状態 (K=2):
+  サンプル 0: r = [0.5, 0.5]  (両Expertに均等)
+  サンプル 1: r = [0.5, 0.5]
+  ...
+```
+
+**対称性の破壊** はExpertごとの乱数シードで実現：
+```cpp
+expert_configs_[k]->seed = config_->seed + k + 1;  // Expertごとに異なるseed
+```
+
+これにより、ラベルに基づく初期化（ターゲット情報のリークの可能性）に頼らず、学習が進むにつれてExpertが自然に分化します。
+
+利用可能な初期化モード（`mixture_init` パラメータ）：
+| モード | 説明 |
+|--------|------|
+| `uniform`（デフォルト） | 均等な `1/K` 責務、対称性はExpertごとのseedで破壊 |
+| `random` | 各サンプルをランダムに1つのExpertに割り当て |
+| `quantile` | ラベルのquantileで割り当て（y依存、注意して使用） |
+
+#### Optuna最適化の例
+
+**標準MoE**（全Expertで共通のハイパーパラメータ）：
 
 ```python
 import optuna
+import lightgbm_moe as lgb
+from sklearn.metrics import mean_squared_error
 
 def objective(trial):
-    num_experts = 3
-
-    # 方法1: 全Expertで同じハイパーパラメータ（探索空間がシンプル）
     params = {
         'boosting': 'mixture',
-        'mixture_num_experts': num_experts,
-        'max_depth': trial.suggest_int('max_depth', 3, 10),
-        'num_leaves': trial.suggest_int('num_leaves', 8, 64),
+        'objective': 'regression',
+        'verbose': -1,
+        # 木構造（全Expertで共通）
+        'num_leaves': trial.suggest_int('num_leaves', 8, 128),
+        'max_depth': trial.suggest_int('max_depth', 3, 12),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        # MoE固有
+        'mixture_num_experts': trial.suggest_int('mixture_num_experts', 2, 4),
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
+        # 平滑化（オプション、時系列向け）
+        'mixture_r_smoothing': trial.suggest_categorical(
+            'mixture_r_smoothing', ['none', 'ema', 'markov']
+        ),
     }
+    if params['mixture_r_smoothing'] != 'none':
+        params['mixture_smoothing_lambda'] = trial.suggest_float(
+            'mixture_smoothing_lambda', 0.1, 0.9
+        )
 
-    # 方法2: Expertごとに異なる構造パラメータ（探索空間がリッチ）
-    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 10) for k in range(num_experts)]
-    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 64) for k in range(num_experts)]
+    # 学習と評価
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=100)
+```
+
+**Per-Expert MoE**（Expertごとに異なる木構造）：
+
+```python
+def objective_per_expert(trial):
+    num_experts = trial.suggest_int('mixture_num_experts', 2, 4)
+
+    # Expertごとの木構造
+    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 12) for k in range(num_experts)]
+    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 128) for k in range(num_experts)]
     min_data = [trial.suggest_int(f'min_data_{k}', 5, 100) for k in range(num_experts)]
-    min_gain = [trial.suggest_float(f'min_gain_{k}', 1e-4, 0.5, log=True) for k in range(num_experts)]
 
     params = {
         'boosting': 'mixture',
+        'objective': 'regression',
+        'verbose': -1,
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        # MoE固有
         'mixture_num_experts': num_experts,
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
+        # Expertごとの構造（カンマ区切り）
         'mixture_expert_max_depths': ','.join(map(str, max_depths)),
         'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),
         'mixture_expert_min_data_in_leaf': ','.join(map(str, min_data)),
-        'mixture_expert_min_gain_to_split': ','.join(map(str, min_gain)),
     }
 
-    # ... 学習と評価
-    return score
+    # 学習と評価
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
 
-# Tip: まず方法1を試し、計算リソースに余裕があれば方法2を試す
-# 方法2はK倍のハイパーパラメータがあるため、収束に多くのトライアルが必要
+# 注意: Per-expertはK×3個のハイパラが追加されるため、より多くのtrial（200+）が必要
+study = optuna.create_study(direction='minimize')
+study.optimize(objective_per_expert, n_trials=200)
 ```
+
+**Tip**: まず標準MoEを試す。Per-expertは探索空間が大きいため収束に多くのtrialが必要。
 
 ### 平滑化手法
 
