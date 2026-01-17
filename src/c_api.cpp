@@ -892,6 +892,8 @@ class Booster {
 
   const Boosting* GetBoosting() const { return boosting_.get(); }
 
+  Boosting* GetMutableBoosting() { return boosting_.get(); }
+
  private:
   const Dataset* train_data_;
   std::unique_ptr<Boosting> boosting_;
@@ -2859,10 +2861,13 @@ int LGBM_BoosterPredictRegime(BoosterHandle handle,
                                int32_t* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(ref_booster->GetBoosting());
+  auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(ref_booster->GetMutableBoosting());
   if (mixture == nullptr) {
     Log::Fatal("LGBM_BoosterPredictRegime can only be used with MoE models");
   }
+
+  // Initialize for prediction (required before PredictRaw calls)
+  mixture->InitPredict(0, -1, false);
 
   // Get row accessor based on data type
   std::function<std::vector<double>(int)> get_row;
@@ -2931,10 +2936,13 @@ int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
                                     double* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(ref_booster->GetBoosting());
+  auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(ref_booster->GetMutableBoosting());
   if (mixture == nullptr) {
     Log::Fatal("LGBM_BoosterPredictRegimeProba can only be used with MoE models");
   }
+
+  // Initialize for prediction (required before PredictRaw calls)
+  mixture->InitPredict(0, -1, false);
 
   int num_experts = mixture->NumExperts();
 
@@ -3003,10 +3011,13 @@ int LGBM_BoosterPredictExpertPred(BoosterHandle handle,
                                    double* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(ref_booster->GetBoosting());
+  auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(ref_booster->GetMutableBoosting());
   if (mixture == nullptr) {
     Log::Fatal("LGBM_BoosterPredictExpertPred can only be used with MoE models");
   }
+
+  // Initialize for prediction (required before PredictRaw calls)
+  mixture->InitPredict(0, -1, false);
 
   int num_experts = mixture->NumExperts();
 
