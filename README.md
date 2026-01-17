@@ -80,6 +80,34 @@ regime_proba = model.predict_regime_proba(X_test)  # Gate probabilities (N, K)
 expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 ```
 
+### Training with Validation & Early Stopping
+
+```python
+import lightgbm_moe as lgb
+
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 2,
+    'objective': 'regression',
+    'metric': 'rmse',
+    'verbose': 1,
+}
+
+train_data = lgb.Dataset(X_train, label=y_train)
+valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+model = lgb.train(
+    params,
+    train_data,
+    num_boost_round=100,
+    valid_sets=[valid_data],
+    valid_names=['valid'],
+    callbacks=[lgb.early_stopping(stopping_rounds=10)]
+)
+
+print(f"Best iteration: {model.best_iteration}")
+```
+
 ---
 
 ## API Reference
@@ -96,6 +124,55 @@ expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 | `mixture_balance_factor` | int | 10 | 2-20 | Load balancing aggressiveness. Minimum expert usage = 1/(factor × K). Lower = more aggressive balancing. Recommended: 5-7. |
 | `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | Responsibility smoothing method for time-series stability. |
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | Smoothing strength. Only used when `mixture_r_smoothing` is not `"none"`. Higher = more smoothing (slower regime transitions). |
+
+### Early Stopping
+
+MoE supports validation-based early stopping, useful for hyperparameter tuning with Optuna.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `early_stopping_round` | int | 0 | Stop training if validation metric doesn't improve for N rounds. Set via `lgb.early_stopping()` callback. |
+| `first_metric_only` | bool | False | Only use the first metric for early stopping (when multiple metrics specified). |
+
+**Usage with callbacks:**
+
+```python
+model = lgb.train(
+    params,
+    train_data,
+    valid_sets=[valid_data],
+    callbacks=[
+        lgb.early_stopping(stopping_rounds=10),  # Stop after 10 rounds without improvement
+        lgb.log_evaluation(period=10),           # Log every 10 iterations
+    ]
+)
+```
+
+**Usage with Optuna:**
+
+```python
+def objective(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        'objective': 'regression',
+        'metric': 'rmse',
+        'verbose': -1,
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=500,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=20)]
+    )
+
+    return model.best_score['valid_0']['rmse']
+```
 
 ### Per-Expert Hyperparameters (Advanced)
 
@@ -589,6 +666,34 @@ regime_proba = model.predict_regime_proba(X_test)  # ゲート確率 (N, K)
 expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測 (N, K)
 ```
 
+### バリデーション & Early Stopping
+
+```python
+import lightgbm_moe as lgb
+
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 2,
+    'objective': 'regression',
+    'metric': 'rmse',
+    'verbose': 1,
+}
+
+train_data = lgb.Dataset(X_train, label=y_train)
+valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+model = lgb.train(
+    params,
+    train_data,
+    num_boost_round=100,
+    valid_sets=[valid_data],
+    valid_names=['valid'],
+    callbacks=[lgb.early_stopping(stopping_rounds=10)]
+)
+
+print(f"Best iteration: {model.best_iteration}")
+```
+
 ---
 
 ## API リファレンス
@@ -605,6 +710,55 @@ expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測
 | `mixture_balance_factor` | int | 10 | 2-20 | 負荷分散の強度。最小エキスパート使用率 = 1/(factor × K)。小さいほど積極的なバランシング。推奨: 5-7。 |
 | `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | 時系列安定化のための責務平滑化手法。 |
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | 平滑化強度。`mixture_r_smoothing` が `"none"` 以外の場合のみ使用。高いほど平滑化が強い（レジーム遷移が遅い）。 |
+
+### Early Stopping
+
+MoEはバリデーションベースのearly stoppingをサポート。Optunaでのハイパーパラメータ最適化に便利です。
+
+| パラメータ | 型 | デフォルト | 説明 |
+|-----------|------|---------|-------------|
+| `early_stopping_round` | int | 0 | N回連続でバリデーション指標が改善しない場合に学習を停止。`lgb.early_stopping()` コールバックで設定。 |
+| `first_metric_only` | bool | False | 複数のmetricを指定した場合、最初のmetricのみでearly stoppingを判定。 |
+
+**コールバックでの使用:**
+
+```python
+model = lgb.train(
+    params,
+    train_data,
+    valid_sets=[valid_data],
+    callbacks=[
+        lgb.early_stopping(stopping_rounds=10),  # 10ラウンド改善なしで停止
+        lgb.log_evaluation(period=10),           # 10イテレーションごとにログ
+    ]
+)
+```
+
+**Optunaでの使用:**
+
+```python
+def objective(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        'objective': 'regression',
+        'metric': 'rmse',
+        'verbose': -1,
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=500,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=20)]
+    )
+
+    return model.best_score['valid_0']['rmse']
+```
 
 ### Expertごとのハイパーパラメータ（上級者向け）
 
