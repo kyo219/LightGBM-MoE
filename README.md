@@ -239,18 +239,21 @@ def objective(trial):
 
 ## Benchmark
 
-**Setup**: 30 Optuna trials, 5-fold time-series CV, full hyperparameter search.
+**Setup**: 100 Optuna trials, 5-fold time-series CV, full hyperparameter search.
 
 | Dataset | Description | Standard | MoE | MoE-PerExp | Best |
 |---------|-------------|----------|-----|------------|------|
-| **Synthetic** | X→Regime | 5.15 | 4.39 | **4.36** | **+15.3%** |
-| Hamilton | Latent Markov | **0.74** | 0.75 | 0.74 | +0.0% |
+| **Synthetic** | X→Regime | 5.49 | **4.09** | 4.25 | **+25.7%** |
+| Hamilton | Latent Markov | 0.74 | 0.74 | **0.74** | +0.1% |
 | VIX | Latent volatility | **0.012** | 0.012 | 0.012 | +0.0% |
 
 - **MoE**: Shared hyperparameters across all experts
 - **MoE-PerExp**: Per-expert tree structure (`mixture_expert_max_depths`, etc.)
 
-**Key Finding**: MoE excels when regime is determinable from features (X). Per-expert hyperparameters provide additional flexibility.
+**Key Findings**:
+- MoE excels when regime is determinable from features (X): **+25.7%** on Synthetic with 99.2% regime accuracy
+- Per-expert hyperparameters add more search dimensions, requiring more trials to converge
+- On latent regime data (Hamilton, VIX), MoE provides little benefit as expected
 
 ### Run Benchmark
 
@@ -677,18 +680,21 @@ def objective(trial):
 
 ## ベンチマーク
 
-**設定**: 30 Optunaトライアル、5分割時系列CV、完全ハイパーパラメータ探索。
+**設定**: 100 Optunaトライアル、5分割時系列CV、完全ハイパーパラメータ探索。
 
 | データセット | 説明 | Standard | MoE | MoE-PerExp | Best |
 |-------------|------|----------|-----|------------|------|
-| **合成** | X→Regime | 5.15 | 4.39 | **4.36** | **+15.3%** |
-| Hamilton | 潜在マルコフ | **0.74** | 0.75 | 0.74 | +0.0% |
+| **合成** | X→Regime | 5.49 | **4.09** | 4.25 | **+25.7%** |
+| Hamilton | 潜在マルコフ | 0.74 | 0.74 | **0.74** | +0.1% |
 | VIX | 潜在ボラティリティ | **0.012** | 0.012 | 0.012 | +0.0% |
 
 - **MoE**: 全Expertで共通のハイパーパラメータ
 - **MoE-PerExp**: Expertごとの木構造 (`mixture_expert_max_depths`等)
 
-**重要な発見**: MoEはレジームが特徴量(X)から決定可能な場合に有効。per-expertハイパラで追加の柔軟性。
+**重要な発見**:
+- MoEはレジームが特徴量(X)から決定可能な場合に有効: 合成データで**+25.7%**、regime精度99.2%
+- per-expertハイパラは探索次元が増えるため、収束に多くのtrialが必要
+- 潜在レジームデータ(Hamilton, VIX)ではMoEの効果は限定的（想定通り）
 
 ### ベンチマーク実行
 
