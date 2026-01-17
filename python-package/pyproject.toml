@@ -11,7 +11,6 @@ classifiers = [
     "Operating System :: POSIX",
     "Operating System :: Unix",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -29,7 +28,7 @@ maintainers = [
 ]
 name = "lightgbm-moe"
 readme = "README.rst"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 arrow = [
@@ -115,8 +114,8 @@ exclude = [
 ]
 line-length = 120
 
-# this should be set to the oldest version of python LightGBM supports
-target-version = "py39"
+# this should be set to the oldest version of python LightGBM-MoE supports
+target-version = "py310"
 
 [tool.ruff.format]
 docstring-code-format = false
