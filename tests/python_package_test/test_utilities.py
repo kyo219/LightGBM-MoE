@@ -92,11 +92,16 @@ WARNING | More than one metric available, picking one to plot.
         "INFO | [LightGBM] [Warning] Metric auc is not implemented in cuda version. Fall back to evaluation on CPU.",
         "INFO | [LightGBM] [Warning] Metric binary_error is not implemented in cuda version. Fall back to evaluation on CPU.",
     ]
+    # Internal debug lines that may appear depending on build configuration
+    internal_debug_lines = [
+        "INFO | [LightGBM] [Info] CreateBoosting:",
+    ]
     with open(log_filename, "rt", encoding="utf-8") as f:
         actual_log = f.read().strip()
         actual_log_wo_gpu_stuff = []
+        lines_to_filter = gpu_lines + cuda_lines + internal_debug_lines
         for line in actual_log.split("\n"):
-            if not any(line.startswith(gpu_or_cuda_line) for gpu_or_cuda_line in gpu_lines + cuda_lines):
+            if not any(line.startswith(filter_line) for filter_line in lines_to_filter):
                 actual_log_wo_gpu_stuff.append(line)
 
     assert "\n".join(actual_log_wo_gpu_stuff) == expected_log
