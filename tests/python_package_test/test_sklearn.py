@@ -49,6 +49,7 @@ from .utils import (
 
 SKLEARN_MAJOR, SKLEARN_MINOR, *_ = _sklearn_version.split(".")
 SKLEARN_VERSION_GTE_1_6 = (int(SKLEARN_MAJOR), int(SKLEARN_MINOR)) >= (1, 6)
+SKLEARN_VERSION_GTE_1_9 = (int(SKLEARN_MAJOR), int(SKLEARN_MINOR)) >= (1, 9)
 
 decreasing_generator = itertools.count(0, -1)
 estimator_classes = (lgb.LGBMModel, lgb.LGBMClassifier, lgb.LGBMRegressor, lgb.LGBMRanker)
@@ -1339,6 +1340,10 @@ def test_multiple_eval_metrics():
     assert "binary_logloss" in gbm.evals_result_["training"]
 
 
+@pytest.mark.skipif(
+    SKLEARN_VERSION_GTE_1_9,
+    reason="sklearn>=1.9 no longer allows all-zero sample weights",
+)
 def test_nan_handle(rng):
     nrows = 100
     ncols = 10

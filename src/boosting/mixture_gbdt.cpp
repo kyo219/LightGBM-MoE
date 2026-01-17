@@ -1073,8 +1073,8 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
   std::istringstream ss(model_str);
   std::string line;
 
-  // Read header
-  if (!std::getline(ss, line) || line != "mixture") {
+  // Read header (trim to handle Windows CRLF line endings)
+  if (!std::getline(ss, line) || Common::Trim(line) != "mixture") {
     Log::Fatal("Invalid mixture model format: expected 'mixture' header");
     return false;
   }
@@ -1082,13 +1082,14 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
   // Parse mixture parameters
   std::unordered_map<std::string, std::string> params;
   while (std::getline(ss, line)) {
+    line = Common::Trim(line);
     if (line.empty() || line[0] == '[') {
       break;
     }
     size_t eq_pos = line.find('=');
     if (eq_pos != std::string::npos) {
-      std::string key = line.substr(0, eq_pos);
-      std::string value = line.substr(eq_pos + 1);
+      std::string key = Common::Trim(line.substr(0, eq_pos));
+      std::string value = Common::Trim(line.substr(eq_pos + 1));
       params[key] = value;
     }
   }
@@ -1135,7 +1136,14 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
     Log::Fatal("Invalid mixture model format: [gate_model] section not found");
     return false;
   }
-  gate_start += std::string("[gate_model]\n").length();
+  gate_start += std::string("[gate_model]").length();
+  // Skip newline (handles both CRLF and LF)
+  if (gate_start < remaining.length() && remaining[gate_start] == '\r') {
+    ++gate_start;
+  }
+  if (gate_start < remaining.length() && remaining[gate_start] == '\n') {
+    ++gate_start;
+  }
 
   // Find first expert
   size_t expert0_start = remaining.find("[expert_model_0]");
@@ -1154,7 +1162,14 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
       Log::Fatal("Invalid mixture model format: %s section not found", section_name.c_str());
       return false;
     }
-    section_start += section_name.length() + 1;  // +1 for newline
+    section_start += section_name.length();
+    // Skip newline (handles both CRLF and LF)
+    if (section_start < remaining.length() && remaining[section_start] == '\r') {
+      ++section_start;
+    }
+    if (section_start < remaining.length() && remaining[section_start] == '\n') {
+      ++section_start;
+    }
 
     // Find next section or end
     size_t section_end;
