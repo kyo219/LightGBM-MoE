@@ -239,15 +239,31 @@ def objective(trial):
 
 ## Benchmark
 
-**Setup**: 100 Optuna trials, 5-fold time-series CV, full hyperparameter search for both Standard and MoE.
+**Setup**: 30 Optuna trials, 5-fold time-series CV, full hyperparameter search.
 
-| Dataset | Description | Std RMSE | MoE RMSE | Improvement |
-|---------|-------------|----------|----------|-------------|
-| **Synthetic (X→Regime)** | Regime determinable from features | 5.22 | **4.35** | **+16.7%** |
-| Hamilton GNP | Latent Markov regime | 0.74 | 0.74 | +0.0% |
-| VIX Volatility | Latent volatility state | 0.012 | 0.012 | -0.7% |
+| Dataset | Description | Standard | MoE | MoE-PerExp | Best |
+|---------|-------------|----------|-----|------------|------|
+| **Synthetic** | X→Regime | 5.15 | 4.39 | **4.36** | **+15.3%** |
+| Hamilton | Latent Markov | **0.74** | 0.75 | 0.74 | +0.0% |
+| VIX | Latent volatility | **0.012** | 0.012 | 0.012 | +0.0% |
 
-**Key Finding**: MoE excels when regime is determinable from features (X).
+- **MoE**: Shared hyperparameters across all experts
+- **MoE-PerExp**: Per-expert tree structure (`mixture_expert_max_depths`, etc.)
+
+**Key Finding**: MoE excels when regime is determinable from features (X). Per-expert hyperparameters provide additional flexibility.
+
+### Run Benchmark
+
+```bash
+# Basic benchmark (Standard vs MoE)
+python examples/benchmark.py
+
+# Include per-expert hyperparameter search
+python examples/benchmark.py --per-expert
+
+# Quick test with fewer trials
+python examples/benchmark.py --trials 20 --per-expert
+```
 
 ### Visualization
 
@@ -661,15 +677,31 @@ def objective(trial):
 
 ## ベンチマーク
 
-**設定**: 100 Optunaトライアル、5分割時系列CV、Standard/MoE両方で完全ハイパーパラメータ探索。
+**設定**: 30 Optunaトライアル、5分割時系列CV、完全ハイパーパラメータ探索。
 
-| データセット | 説明 | Std RMSE | MoE RMSE | 改善率 |
-|-------------|------|----------|----------|--------|
-| **合成 (X→Regime)** | レジームが特徴量から決定可能 | 5.22 | **4.35** | **+16.7%** |
-| Hamilton GNP | 潜在マルコフレジーム | 0.74 | 0.74 | +0.0% |
-| VIX Volatility | 潜在ボラティリティ状態 | 0.012 | 0.012 | -0.7% |
+| データセット | 説明 | Standard | MoE | MoE-PerExp | Best |
+|-------------|------|----------|-----|------------|------|
+| **合成** | X→Regime | 5.15 | 4.39 | **4.36** | **+15.3%** |
+| Hamilton | 潜在マルコフ | **0.74** | 0.75 | 0.74 | +0.0% |
+| VIX | 潜在ボラティリティ | **0.012** | 0.012 | 0.012 | +0.0% |
 
-**重要な発見**: MoEはレジームが特徴量(X)から決定可能な場合に有効。
+- **MoE**: 全Expertで共通のハイパーパラメータ
+- **MoE-PerExp**: Expertごとの木構造 (`mixture_expert_max_depths`等)
+
+**重要な発見**: MoEはレジームが特徴量(X)から決定可能な場合に有効。per-expertハイパラで追加の柔軟性。
+
+### ベンチマーク実行
+
+```bash
+# 基本ベンチマーク (Standard vs MoE)
+python examples/benchmark.py
+
+# per-expertハイパーパラメータも含める
+python examples/benchmark.py --per-expert
+
+# 軽めのテスト
+python examples/benchmark.py --trials 20 --per-expert
+```
 
 ### 可視化
 
