@@ -104,18 +104,43 @@ def main():
     # Fill background with regime colors
     for i in range(len(t_test) - 1):
         regime = regime_pred[i]
-        ax1.axvspan(t_test[i], t_test[i + 1], alpha=0.2, color=colors[regime], linewidth=0)
+        ax1.axvspan(
+            t_test[i], t_test[i + 1], alpha=0.2, color=colors[regime], linewidth=0
+        )
 
     # Plot actual and predicted
-    ax1.plot(t_test, y_test, "o-", color="#2c3e50", markersize=4, linewidth=1.5, label="Actual", alpha=0.8)
-    ax1.plot(t_test, y_pred, "s--", color="#27ae60", markersize=4, linewidth=1.5, label="Predicted", alpha=0.8)
+    ax1.plot(
+        t_test,
+        y_test,
+        "o-",
+        color="#2c3e50",
+        markersize=4,
+        linewidth=1.5,
+        label="Actual",
+        alpha=0.8,
+    )
+    ax1.plot(
+        t_test,
+        y_pred,
+        "s--",
+        color="#27ae60",
+        markersize=4,
+        linewidth=1.5,
+        label="Predicted",
+        alpha=0.8,
+    )
 
     # Add legend for regimes
-    regime_patches = [mpatches.Patch(color=colors[i], alpha=0.3, label=color_names[i]) for i in range(2)]
+    regime_patches = [
+        mpatches.Patch(color=colors[i], alpha=0.3, label=color_names[i])
+        for i in range(2)
+    ]
 
     # Combine legends
     handles1, labels1 = ax1.get_legend_handles_labels()
-    ax1.legend(handles=handles1 + regime_patches, loc="upper left", framealpha=0.9, ncol=2)
+    ax1.legend(
+        handles=handles1 + regime_patches, loc="upper left", framealpha=0.9, ncol=2
+    )
 
     ax1.set_ylabel("Value")
     ax1.set_title(
@@ -128,8 +153,12 @@ def main():
     ax2 = axes[1]
 
     # Stacked area for regime probabilities
-    ax2.fill_between(t_test, 0, regime_proba[:, 0], color=colors[0], alpha=0.6, label="P(Regime 0)")
-    ax2.fill_between(t_test, regime_proba[:, 0], 1, color=colors[1], alpha=0.6, label="P(Regime 1)")
+    ax2.fill_between(
+        t_test, 0, regime_proba[:, 0], color=colors[0], alpha=0.6, label="P(Regime 0)"
+    )
+    ax2.fill_between(
+        t_test, regime_proba[:, 0], 1, color=colors[1], alpha=0.6, label="P(Regime 1)"
+    )
 
     # Add true regime markers
     for i, (ti, r_true) in enumerate(zip(t_test, regime_true_test)):
@@ -148,7 +177,9 @@ def main():
 
     # Save
     output_path = "examples/regime_switching_visualization.png"
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
+    plt.savefig(
+        output_path, dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none"
+    )
     print(f"Saved: {output_path}")
 
     plt.close()

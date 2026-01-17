@@ -9,9 +9,13 @@ from scipy import sparse
 try:
     from lightgbm_moe.basic import _LIB as LIB
 except ModuleNotFoundError:
-    print("Could not import lightgbm Python-package, looking for lib_lightgbm at the repo root")
+    print(
+        "Could not import lightgbm Python-package, looking for lib_lightgbm at the repo root"
+    )
     if system() in ("Windows", "Microsoft"):
-        lib_file = Path(__file__).absolute().parents[2] / "Release" / "lib_lightgbm_moe.dll"
+        lib_file = (
+            Path(__file__).absolute().parents[2] / "Release" / "lib_lightgbm_moe.dll"
+        )
     else:
         lib_file = Path(__file__).absolute().parents[2] / "lib_lightgbm_moe.so"
     LIB = ctypes.cdll.LoadLibrary(lib_file)
@@ -33,7 +37,9 @@ def load_from_file(filename, reference):
     if reference is not None:
         ref = reference
     handle = ctypes.c_void_p()
-    LIB.LGBM_DatasetCreateFromFile(c_str(str(filename)), c_str("max_bin=15"), ref, ctypes.byref(handle))
+    LIB.LGBM_DatasetCreateFromFile(
+        c_str(str(filename)), c_str("max_bin=15"), ref, ctypes.byref(handle)
+    )
     print(LIB.LGBM_GetLastError())
     num_data = ctypes.c_int(0)
     LIB.LGBM_DatasetGetNumData(handle, ctypes.byref(num_data))
@@ -161,7 +167,9 @@ def free_dataset(handle):
 
 
 def test_dataset(tmp_path):
-    binary_example_dir = Path(__file__).absolute().parents[2] / "examples" / "binary_classification"
+    binary_example_dir = (
+        Path(__file__).absolute().parents[2] / "examples" / "binary_classification"
+    )
     train = load_from_file(binary_example_dir / "binary.train", None)
     test = load_from_mat(binary_example_dir / "binary.test", train)
     free_dataset(test)
@@ -177,12 +185,18 @@ def test_dataset(tmp_path):
 
 
 def test_booster(tmp_path):
-    binary_example_dir = Path(__file__).absolute().parents[2] / "examples" / "binary_classification"
+    binary_example_dir = (
+        Path(__file__).absolute().parents[2] / "examples" / "binary_classification"
+    )
     train = load_from_mat(binary_example_dir / "binary.train", None)
     test = load_from_mat(binary_example_dir / "binary.test", train)
     booster = ctypes.c_void_p()
     model_path = tmp_path / "model.txt"
-    LIB.LGBM_BoosterCreate(train, c_str("app=binary metric=auc num_leaves=31 verbose=0"), ctypes.byref(booster))
+    LIB.LGBM_BoosterCreate(
+        train,
+        c_str("app=binary metric=auc num_leaves=31 verbose=0"),
+        ctypes.byref(booster),
+    )
     LIB.LGBM_BoosterAddValidData(booster, test)
     produced_empty_tree = ctypes.c_int(0)
     for i in range(1, 51):
@@ -190,17 +204,28 @@ def test_booster(tmp_path):
         result = np.array([0.0], dtype=np.float64)
         out_len = ctypes.c_int(0)
         LIB.LGBM_BoosterGetEval(
-            booster, ctypes.c_int(0), ctypes.byref(out_len), result.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            booster,
+            ctypes.c_int(0),
+            ctypes.byref(out_len),
+            result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
         )
         if i % 10 == 0:
             print(f"{i} iteration test AUC {result[0]:.6f}")
-    LIB.LGBM_BoosterSaveModel(booster, ctypes.c_int(0), ctypes.c_int(-1), ctypes.c_int(0), c_str(str(model_path)))
+    LIB.LGBM_BoosterSaveModel(
+        booster,
+        ctypes.c_int(0),
+        ctypes.c_int(-1),
+        ctypes.c_int(0),
+        c_str(str(model_path)),
+    )
     LIB.LGBM_BoosterFree(booster)
     free_dataset(train)
     free_dataset(test)
     booster2 = ctypes.c_void_p()
     num_total_model = ctypes.c_int(0)
-    LIB.LGBM_BoosterCreateFromModelfile(c_str(str(model_path)), ctypes.byref(num_total_model), ctypes.byref(booster2))
+    LIB.LGBM_BoosterCreateFromModelfile(
+        c_str(str(model_path)), ctypes.byref(num_total_model), ctypes.byref(booster2)
+    )
     data = np.loadtxt(str(binary_example_dir / "binary.test"), dtype=np.float64)
     mat = data[:, 1:]
     preds = np.empty(mat.shape[0], dtype=np.float64)

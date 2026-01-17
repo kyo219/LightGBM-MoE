@@ -31,9 +31,16 @@ feature_name = [f"feature_{col}" for col in range(num_feature)]
 # create dataset for lightgbm
 # if you want to re-use data, remember to set free_raw_data=False
 lgb_train = lgb.Dataset(
-    X_train, y_train, weight=W_train, feature_name=feature_name, categorical_feature=[21], free_raw_data=False
+    X_train,
+    y_train,
+    weight=W_train,
+    feature_name=feature_name,
+    categorical_feature=[21],
+    free_raw_data=False,
 )
-lgb_eval = lgb.Dataset(X_test, y_test, reference=lgb_train, weight=W_test, free_raw_data=False)
+lgb_eval = lgb.Dataset(
+    X_test, y_test, reference=lgb_train, weight=W_test, free_raw_data=False
+)
 
 # specify your configurations as a dict
 params = {
@@ -104,7 +111,9 @@ print(f"The ROC AUC of pickled model's prediction is: {auc_pickled_model}")
 # init_model accepts:
 # 1. model file name
 # 2. Booster()
-gbm = lgb.train(params, lgb_train, num_boost_round=10, init_model="model.txt", valid_sets=lgb_eval)
+gbm = lgb.train(
+    params, lgb_train, num_boost_round=10, init_model="model.txt", valid_sets=lgb_eval
+)
 
 print("Finished 10 - 20 rounds with model file...")
 
@@ -165,7 +174,12 @@ params_custom_obj = copy.deepcopy(params)
 params_custom_obj["objective"] = loglikelihood
 
 gbm = lgb.train(
-    params_custom_obj, lgb_train, num_boost_round=10, init_model=gbm, feval=binary_error, valid_sets=lgb_eval
+    params_custom_obj,
+    lgb_train,
+    num_boost_round=10,
+    init_model=gbm,
+    feval=binary_error,
+    valid_sets=lgb_eval,
 )
 
 print("Finished 40 - 50 rounds with self-defined objective function and eval metric...")
@@ -197,7 +211,9 @@ gbm = lgb.train(
     valid_sets=lgb_eval,
 )
 
-print("Finished 50 - 60 rounds with self-defined objective function and multiple self-defined eval metrics...")
+print(
+    "Finished 50 - 60 rounds with self-defined objective function and multiple self-defined eval metrics..."
+)
 
 print("Starting a new training job...")
 
@@ -215,6 +231,12 @@ def reset_metrics():
     return callback
 
 
-gbm = lgb.train(params, lgb_train, num_boost_round=10, valid_sets=lgb_train, callbacks=[reset_metrics()])
+gbm = lgb.train(
+    params,
+    lgb_train,
+    num_boost_round=10,
+    valid_sets=lgb_train,
+    callbacks=[reset_metrics()],
+)
 
 print("Finished first 10 rounds with callback function...")

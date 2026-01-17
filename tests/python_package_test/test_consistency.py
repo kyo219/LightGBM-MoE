@@ -20,7 +20,11 @@ class FileLoader:
                 if line and not line.startswith("#"):
                     key, value = [token.strip() for token in line.split("=")]
                     if "early_stopping" not in key:  # disable early_stopping
-                        self.params[key] = value if key not in {"num_trees", "num_threads"} else int(value)
+                        self.params[key] = (
+                            value
+                            if key not in {"num_trees", "num_threads"}
+                            else int(value)
+                        )
 
     def load_dataset(self, suffix, is_sparse=False):
         filename = str(self.path(suffix))
@@ -48,7 +52,14 @@ class FileLoader:
 
     def file_load_check(self, lgb_train, name):
         lgb_train_f = lgb.Dataset(self.path(name), params=self.params).construct()
-        for f in ("num_data", "num_feature", "get_label", "get_weight", "get_init_score", "get_group"):
+        for f in (
+            "num_data",
+            "num_feature",
+            "get_label",
+            "get_weight",
+            "get_init_score",
+            "get_group",
+        ):
             a = getattr(lgb_train, f)()
             b = getattr(lgb_train_f, f)()
             if a is None and b is None:
@@ -78,7 +89,9 @@ def test_binary():
 
 
 def test_binary_linear():
-    fd = FileLoader(EXAMPLES_DIR / "binary_classification", "binary", "train_linear.conf")
+    fd = FileLoader(
+        EXAMPLES_DIR / "binary_classification", "binary", "train_linear.conf"
+    )
     X_train, y_train, _ = fd.load_dataset(".train")
     X_test, _, X_test_fn = fd.load_dataset(".test")
     weight_train = fd.load_field(".train.weight")

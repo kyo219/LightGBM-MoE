@@ -42,7 +42,9 @@ class BenchmarkConfig:
 # =============================================================================
 # Data Generation
 # =============================================================================
-def generate_synthetic_data(n_samples: int = 2000, noise_level: float = 0.5, seed: int = 42):
+def generate_synthetic_data(
+    n_samples: int = 2000, noise_level: float = 0.5, seed: int = 42
+):
     """
     Synthetic regime-switching data (regime determinable from X).
     MoEが得意とするケース：特徴量からregimeが決まる。
@@ -59,11 +61,21 @@ def generate_synthetic_data(n_samples: int = 2000, noise_level: float = 0.5, see
 
     # Regime 0: positive, nonlinear
     mask0 = regime_true == 0
-    y[mask0] = 5.0 * X[mask0, 0] + 3.0 * X[mask0, 0] * X[mask0, 2] + 2.0 * np.sin(2 * X[mask0, 3]) + 10.0
+    y[mask0] = (
+        5.0 * X[mask0, 0]
+        + 3.0 * X[mask0, 0] * X[mask0, 2]
+        + 2.0 * np.sin(2 * X[mask0, 3])
+        + 10.0
+    )
 
     # Regime 1: negative, different nonlinearity
     mask1 = regime_true == 1
-    y[mask1] = -5.0 * X[mask1, 0] - 2.0 * X[mask1, 1] ** 2 + 3.0 * np.cos(2 * X[mask1, 4]) - 10.0
+    y[mask1] = (
+        -5.0 * X[mask1, 0]
+        - 2.0 * X[mask1, 1] ** 2
+        + 3.0 * np.cos(2 * X[mask1, 4])
+        - 10.0
+    )
 
     y += np.random.randn(n_samples) * noise_level
 
@@ -162,7 +174,9 @@ def evaluate_cv(X, y, params, config: BenchmarkConfig):
         train_data = lgb.Dataset(X_train, label=y_train)
 
         try:
-            model = lgb.train(params, train_data, num_boost_round=config.num_boost_round)
+            model = lgb.train(
+                params, train_data, num_boost_round=config.num_boost_round
+            )
             pred = model.predict(X_val)
             rmse = np.sqrt(mean_squared_error(y_val, pred))
             scores.append(rmse)
@@ -212,7 +226,9 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
     """
 
     def objective(trial):
-        smoothing = trial.suggest_categorical("mixture_r_smoothing", ["none", "ema", "markov", "momentum"])
+        smoothing = trial.suggest_categorical(
+            "mixture_r_smoothing", ["none", "ema", "markov", "momentum"]
+        )
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
 
         params = {
@@ -232,17 +248,28 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             # MoE specific
             "mixture_num_experts": num_experts,
-            "mixture_e_step_alpha": trial.suggest_float("mixture_e_step_alpha", 0.1, 2.0),
+            "mixture_e_step_alpha": trial.suggest_float(
+                "mixture_e_step_alpha", 0.1, 2.0
+            ),
             "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 30),
-            "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
+            "mixture_balance_factor": trial.suggest_int(
+                "mixture_balance_factor", 2, 10
+            ),
             "mixture_r_smoothing": smoothing,
         }
 
         if per_expert:
             # Per-expert tree structure (different for each expert)
-            max_depths = [trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)]
-            num_leaves = [trial.suggest_int(f"num_leaves_{k}", 8, 128) for k in range(num_experts)]
-            min_data = [trial.suggest_int(f"min_data_in_leaf_{k}", 5, 100) for k in range(num_experts)]
+            max_depths = [
+                trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)
+            ]
+            num_leaves = [
+                trial.suggest_int(f"num_leaves_{k}", 8, 128) for k in range(num_experts)
+            ]
+            min_data = [
+                trial.suggest_int(f"min_data_in_leaf_{k}", 5, 100)
+                for k in range(num_experts)
+            ]
 
             params["mixture_expert_max_depths"] = ",".join(map(str, max_depths))
             params["mixture_expert_num_leaves"] = ",".join(map(str, num_leaves))
@@ -255,7 +282,9 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
 
         # Smoothing lambda (if smoothing enabled)
         if smoothing != "none":
-            params["mixture_smoothing_lambda"] = trial.suggest_float("mixture_smoothing_lambda", 0.1, 0.9)
+            params["mixture_smoothing_lambda"] = trial.suggest_float(
+                "mixture_smoothing_lambda", 0.1, 0.9
+            )
 
         return evaluate_cv(X, y, params, config)
 
@@ -354,7 +383,10 @@ def print_regime_analysis(name: str, analysis: dict):
         print(row)
 
     # Expert usage
-    print(f"\n  Expert usage: " + ", ".join([f"E{k}={expert_pct[k]:.1f}%" for k in range(K)]))
+    print(
+        "\n  Expert usage: "
+        + ", ".join([f"E{k}={expert_pct[k]:.1f}%" for k in range(K)])
+    )
 
     # Accuracy if available
     if analysis["accuracy"] is not None:
@@ -384,8 +416,12 @@ def print_prediction_stats(X, y, params_std, params_moe, config: BenchmarkConfig
     }
     full_params_moe.update(params_moe)
 
-    model_std = lgb.train(full_params_std, train_data, num_boost_round=config.num_boost_round)
-    model_moe = lgb.train(full_params_moe, train_data, num_boost_round=config.num_boost_round)
+    model_std = lgb.train(
+        full_params_std, train_data, num_boost_round=config.num_boost_round
+    )
+    model_moe = lgb.train(
+        full_params_moe, train_data, num_boost_round=config.num_boost_round
+    )
 
     pred_std = model_std.predict(X)
     pred_moe = model_moe.predict(X)
@@ -396,16 +432,24 @@ def print_prediction_stats(X, y, params_std, params_moe, config: BenchmarkConfig
 
     print("\n  [Prediction Statistics (on training data)]")
     print(f"  {'':20} {'Standard':>12} {'MoE':>12}")
-    print(f"  {'RMSE':20} {np.sqrt((resid_std**2).mean()):>12.4f} {np.sqrt((resid_moe**2).mean()):>12.4f}")
-    print(f"  {'MAE':20} {np.abs(resid_std).mean():>12.4f} {np.abs(resid_moe).mean():>12.4f}")
-    print(f"  {'Max Error':20} {np.abs(resid_std).max():>12.4f} {np.abs(resid_moe).max():>12.4f}")
+    print(
+        f"  {'RMSE':20} {np.sqrt((resid_std**2).mean()):>12.4f} {np.sqrt((resid_moe**2).mean()):>12.4f}"
+    )
+    print(
+        f"  {'MAE':20} {np.abs(resid_std).mean():>12.4f} {np.abs(resid_moe).mean():>12.4f}"
+    )
+    print(
+        f"  {'Max Error':20} {np.abs(resid_std).max():>12.4f} {np.abs(resid_moe).max():>12.4f}"
+    )
     print(f"  {'Residual Std':20} {resid_std.std():>12.4f} {resid_moe.std():>12.4f}")
 
 
 # =============================================================================
 # Benchmark Runner
 # =============================================================================
-def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_per_expert: bool = False):
+def run_benchmark(
+    name: str, X, y, regime_true, config: BenchmarkConfig, test_per_expert: bool = False
+):
     """1データセットのベンチマーク実行。
 
     Args:
@@ -415,7 +459,9 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_pe
     print(f"Dataset: {name}")
     print(f"{'=' * 70}")
     print(f"Samples: {len(y)}, Features: {X.shape[1]}")
-    print(f"Regime distribution: {(regime_true == 0).mean():.1%} / {(regime_true == 1).mean():.1%}")
+    print(
+        f"Regime distribution: {(regime_true == 0).mean():.1%} / {(regime_true == 1).mean():.1%}"
+    )
 
     n_methods = 3 if test_per_expert else 2
     results = {}
@@ -424,7 +470,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_pe
     print(f"\n[1/{n_methods}] Standard GBDT ({config.n_trials} trials)...")
     start = time.time()
     study_std = optuna.create_study(direction="minimize")
-    study_std.optimize(create_objective_standard(X, y, config), n_trials=config.n_trials, show_progress_bar=True)
+    study_std.optimize(
+        create_objective_standard(X, y, config),
+        n_trials=config.n_trials,
+        show_progress_bar=True,
+    )
     elapsed_std = time.time() - start
     results["Standard"] = {
         "rmse": study_std.best_value,
@@ -437,7 +487,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_pe
     print(f"\n[2/{n_methods}] MoE GBDT ({config.n_trials} trials)...")
     start = time.time()
     study_moe = optuna.create_study(direction="minimize")
-    study_moe.optimize(create_objective_moe(X, y, config, per_expert=False), n_trials=config.n_trials, show_progress_bar=True)
+    study_moe.optimize(
+        create_objective_moe(X, y, config, per_expert=False),
+        n_trials=config.n_trials,
+        show_progress_bar=True,
+    )
     elapsed_moe = time.time() - start
     results["MoE"] = {
         "rmse": study_moe.best_value,
@@ -451,7 +505,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_pe
         print(f"\n[3/{n_methods}] MoE per-expert ({config.n_trials} trials)...")
         start = time.time()
         study_moe_pe = optuna.create_study(direction="minimize")
-        study_moe_pe.optimize(create_objective_moe(X, y, config, per_expert=True), n_trials=config.n_trials, show_progress_bar=True)
+        study_moe_pe.optimize(
+            create_objective_moe(X, y, config, per_expert=True),
+            n_trials=config.n_trials,
+            show_progress_bar=True,
+        )
         elapsed_moe_pe = time.time() - start
         results["MoE-PerExp"] = {
             "rmse": study_moe_pe.best_value,
@@ -483,18 +541,20 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_pe
 
     # MoE best params summary
     moe_params = results["MoE"]["params"]
-    print(f"\n  MoE Best Params:")
+    print("\n  MoE Best Params:")
     print(f"    K={moe_params.get('mixture_num_experts')}, ", end="")
     print(f"alpha={moe_params.get('mixture_e_step_alpha', 0):.2f}, ", end="")
     print(f"balance={moe_params.get('mixture_balance_factor')}, ", end="")
     print(f"smoothing={moe_params.get('mixture_r_smoothing')}")
     if moe_params.get("mixture_r_smoothing") != "none":
-        print(f"    smoothing_lambda={moe_params.get('mixture_smoothing_lambda', 0):.3f}")
+        print(
+            f"    smoothing_lambda={moe_params.get('mixture_smoothing_lambda', 0):.3f}"
+        )
 
     if test_per_expert:
         moe_pe_params = results["MoE-PerExp"]["params"]
         K = moe_pe_params.get("mixture_num_experts", 2)
-        print(f"\n  MoE-PerExp Best Params:")
+        print("\n  MoE-PerExp Best Params:")
         print(f"    K={K}, ", end="")
         print(f"alpha={moe_pe_params.get('mixture_e_step_alpha', 0):.2f}, ", end="")
         print(f"balance={moe_pe_params.get('mixture_balance_factor')}, ", end="")
@@ -513,7 +573,9 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig, test_pe
         best_moe_key = "MoE-PerExp"
 
     try:
-        analysis = analyze_regime_prediction(X, y, regime_true, results[best_moe_key]["params"], config)
+        analysis = analyze_regime_prediction(
+            X, y, regime_true, results[best_moe_key]["params"], config
+        )
         print_regime_analysis(f"{name} ({best_moe_key})", analysis)
         results["regime_analysis"] = analysis
     except Exception as e:
@@ -530,7 +592,9 @@ def print_final_summary(all_results: dict, test_per_expert: bool = False):
 
     # Results table
     if test_per_expert:
-        print(f"\n{'Dataset':<12} {'Std':>10} {'MoE':>10} {'MoE-PE':>10} {'Best':>12} {'vs Std':>10}")
+        print(
+            f"\n{'Dataset':<12} {'Std':>10} {'MoE':>10} {'MoE-PE':>10} {'Best':>12} {'vs Std':>10}"
+        )
         print("-" * 70)
 
         for name, results in all_results.items():
@@ -548,9 +612,13 @@ def print_final_summary(all_results: dict, test_per_expert: bool = False):
 
             improvement = (std_rmse - best_rmse) / std_rmse * 100
 
-            print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {winner:>12} {improvement:>+9.1f}%")
+            print(
+                f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {winner:>12} {improvement:>+9.1f}%"
+            )
     else:
-        print(f"\n{'Dataset':<15} {'Std RMSE':>12} {'MoE RMSE':>12} {'Improve':>10} {'Winner':>10}")
+        print(
+            f"\n{'Dataset':<15} {'Std RMSE':>12} {'MoE RMSE':>12} {'Improve':>10} {'Winner':>10}"
+        )
         print("-" * 60)
 
         for name, results in all_results.items():
@@ -559,7 +627,9 @@ def print_final_summary(all_results: dict, test_per_expert: bool = False):
             improvement = (std_rmse - moe_rmse) / std_rmse * 100
             winner = "MoE ✓" if improvement > 0 else "Standard"
 
-            print(f"{name:<15} {std_rmse:>12.4f} {moe_rmse:>12.4f} {improvement:>+9.1f}% {winner:>10}")
+            print(
+                f"{name:<15} {std_rmse:>12.4f} {moe_rmse:>12.4f} {improvement:>+9.1f}% {winner:>10}"
+            )
 
     # MoE hyperparameters summary
     print("\n" + "-" * 70)
@@ -604,11 +674,15 @@ def print_final_summary(all_results: dict, test_per_expert: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark: Standard GBDT vs MoE GBDT")
-    parser.add_argument("--trials", type=int, default=50, help="Number of Optuna trials")
+    parser.add_argument(
+        "--trials", type=int, default=50, help="Number of Optuna trials"
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--splits", type=int, default=5, help="CV splits")
     parser.add_argument("--rounds", type=int, default=100, help="Boosting rounds")
-    parser.add_argument("--per-expert", action="store_true", help="Also test per-expert hyperparameters")
+    parser.add_argument(
+        "--per-expert", action="store_true", help="Also test per-expert hyperparameters"
+    )
     args = parser.parse_args()
 
     config = BenchmarkConfig(
@@ -634,7 +708,9 @@ def main():
         params["seed"] = config.seed
 
         X, y, regime = generator(**params)
-        all_results[name] = run_benchmark(name, X, y, regime, config, test_per_expert=args.per_expert)
+        all_results[name] = run_benchmark(
+            name, X, y, regime, config, test_per_expert=args.per_expert
+        )
 
     print_final_summary(all_results, test_per_expert=args.per_expert)
 
