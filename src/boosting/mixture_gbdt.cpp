@@ -38,7 +38,10 @@ MixtureGBDT::MixtureGBDT()
       max_feature_idx_(0),
       label_idx_(0),
       use_markov_(false),
-      use_momentum_(false) {
+      use_momentum_(false),
+      early_stopping_round_(0),
+      early_stopping_min_delta_(0.0),
+      es_first_metric_only_(false) {
 }
 
 MixtureGBDT::~MixtureGBDT() {
@@ -199,6 +202,11 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
 
   // Initialize expert bias for loss-free load balancing
   expert_bias_.resize(num_experts_, 0.0);
+
+  // Initialize early stopping parameters
+  early_stopping_round_ = config_->early_stopping_round;
+  early_stopping_min_delta_ = config_->early_stopping_min_delta;
+  es_first_metric_only_ = config_->first_metric_only;
 
   // Initialize responsibilities
   InitResponsibilities();
@@ -384,6 +392,79 @@ void MixtureGBDT::Forward() {
       sum += gate_proba_[i * num_experts_ + k] * expert_pred_[k * num_data_ + i];
     }
     yhat_[i] = sum;
+  }
+}
+
+void MixtureGBDT::ForwardValid(int valid_idx) {
+  CHECK(valid_idx >= 0 && valid_idx < static_cast<int>(valid_datas_.size()));
+
+  const Dataset* valid_data = valid_datas_[valid_idx];
+  data_size_t num_valid = valid_data->num_data();
+  int data_idx = valid_idx + 1;  // data_idx 0 is training data
+
+  std::vector<double>& expert_pred = expert_pred_valid_[valid_idx];
+  std::vector<double>& gate_proba = gate_proba_valid_[valid_idx];
+  std::vector<double>& yhat = yhat_valid_[valid_idx];
+
+  // Get expert predictions on validation data
+  for (int k = 0; k < num_experts_; ++k) {
+    int64_t out_len;
+    experts_[k]->GetPredictAt(data_idx, expert_pred.data() + k * num_valid, &out_len);
+  }
+
+  // Get gate raw predictions on validation data (class-major order)
+  std::vector<double> gate_raw(static_cast<size_t>(num_valid) * num_experts_);
+  int64_t out_len;
+  gate_->GetPredictAt(data_idx, gate_raw.data(), &out_len);
+
+  // Apply softmax per sample with expert bias
+  // gate_raw is in class-major order: gate_raw[k * num_valid + i]
+  // gate_proba is in sample-major order: gate_proba[i * num_experts_ + k]
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_valid; ++i) {
+    std::vector<double> scores(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      scores[k] = gate_raw[k * num_valid + i] + expert_bias_[k];
+    }
+    Softmax(scores.data(), num_experts_, gate_proba.data() + i * num_experts_);
+  }
+
+  // Markov mode: blend gate_proba with prev_gate_proba
+  if (use_markov_ && valid_idx < static_cast<int>(prev_gate_proba_valid_.size())) {
+    const double lambda = config_->mixture_smoothing_lambda;
+    std::vector<double>& prev_gate_proba = prev_gate_proba_valid_[valid_idx];
+    if (lambda > 0.0) {
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (data_size_t i = 0; i < num_valid; ++i) {
+        double sum = 0.0;
+        for (int k = 0; k < num_experts_; ++k) {
+          size_t idx = i * num_experts_ + k;
+          gate_proba[idx] = (1.0 - lambda) * gate_proba[idx] + lambda * prev_gate_proba[idx];
+          sum += gate_proba[idx];
+        }
+        // Renormalize
+        for (int k = 0; k < num_experts_; ++k) {
+          gate_proba[i * num_experts_ + k] /= sum;
+        }
+      }
+    }
+
+    // Update prev_gate_proba for next iteration (time series shift)
+    for (data_size_t i = num_valid - 1; i > 0; --i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        prev_gate_proba[i * num_experts_ + k] = gate_proba[(i - 1) * num_experts_ + k];
+      }
+    }
+  }
+
+  // Compute combined prediction: yhat[i] = sum_k gate_proba[i,k] * expert_pred[k][i]
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_valid; ++i) {
+    double sum = 0.0;
+    for (int k = 0; k < num_experts_; ++k) {
+      sum += gate_proba[i * num_experts_ + k] * expert_pred[k * num_valid + i];
+    }
+    yhat[i] = sum;
   }
 }
 
@@ -663,6 +744,12 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   MStepGate();
 
   ++iter_;
+
+  // Update validation predictions
+  for (size_t v = 0; v < valid_datas_.size(); ++v) {
+    ForwardValid(static_cast<int>(v));
+  }
+
   Log::Debug("MixtureGBDT::TrainOneIter - completed iteration %d", iter_);
 
   // Check if we should continue
@@ -672,8 +759,15 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
 
 void MixtureGBDT::Train(int snapshot_freq, const std::string& model_output_path) {
   auto start_time = std::chrono::steady_clock::now();
-  for (int iter = 0; iter < config_->num_iterations; ++iter) {
-    TrainOneIter(nullptr, nullptr);
+  bool is_finished = false;
+
+  for (int iter = 0; iter < config_->num_iterations && !is_finished; ++iter) {
+    is_finished = TrainOneIter(nullptr, nullptr);
+
+    // Check early stopping if validation data exists
+    if (!is_finished && !valid_datas_.empty()) {
+      is_finished = EvalAndCheckEarlyStopping();
+    }
 
     auto end_time = std::chrono::steady_clock::now();
     Log::Info("MixtureGBDT: %f seconds elapsed, finished iteration %d",
@@ -707,24 +801,138 @@ const double* MixtureGBDT::GetTrainingScore(int64_t* out_len) {
 }
 
 std::vector<double> MixtureGBDT::GetEvalAt(int data_idx) const {
-  (void)data_idx;
-  Log::Fatal("MixtureGBDT::GetEvalAt is not implemented");
-  return {};
+  CHECK(data_idx >= 0 && data_idx <= static_cast<int>(valid_datas_.size()));
+  std::vector<double> ret;
+
+  if (data_idx == 0) {
+    // Training data metrics
+    for (const auto* metric : training_metrics_) {
+      auto scores = metric->Eval(yhat_.data(), objective_function_);
+      for (double score : scores) {
+        ret.push_back(score);
+      }
+    }
+  } else {
+    // Validation data metrics
+    int valid_idx = data_idx - 1;
+    CHECK(valid_idx < static_cast<int>(valid_metrics_.size()));
+    CHECK(valid_idx < static_cast<int>(yhat_valid_.size()));
+
+    for (const auto* metric : valid_metrics_[valid_idx]) {
+      auto scores = metric->Eval(yhat_valid_[valid_idx].data(), objective_function_);
+      for (double score : scores) {
+        ret.push_back(score);
+      }
+    }
+  }
+  return ret;
 }
 
 int64_t MixtureGBDT::GetNumPredictAt(int data_idx) const {
   if (data_idx == 0) {
     return num_data_;
   }
-  Log::Fatal("MixtureGBDT: Validation data is not supported");
-  return 0;
+  int valid_idx = data_idx - 1;
+  CHECK(valid_idx >= 0 && valid_idx < static_cast<int>(valid_datas_.size()));
+  return valid_datas_[valid_idx]->num_data();
 }
 
 void MixtureGBDT::GetPredictAt(int data_idx, double* result, int64_t* out_len) {
   if (data_idx == 0) {
     std::copy(yhat_.begin(), yhat_.end(), result);
     *out_len = num_data_;
+  } else {
+    int valid_idx = data_idx - 1;
+    CHECK(valid_idx >= 0 && valid_idx < static_cast<int>(yhat_valid_.size()));
+    const auto& yhat = yhat_valid_[valid_idx];
+    std::copy(yhat.begin(), yhat.end(), result);
+    *out_len = static_cast<int64_t>(yhat.size());
   }
+}
+
+std::string MixtureGBDT::OutputMetric(int iter) {
+  bool need_output = (iter % config_->metric_freq) == 0;
+  std::string ret = "";
+  std::stringstream msg_buf;
+  std::vector<std::pair<size_t, size_t>> meet_early_stopping_pairs;
+
+  // Print training metrics
+  if (need_output) {
+    for (const auto* metric : training_metrics_) {
+      auto name = metric->GetName();
+      auto scores = metric->Eval(yhat_.data(), objective_function_);
+      for (size_t k = 0; k < name.size(); ++k) {
+        Log::Info("Iteration:%d, training %s : %f", iter, name[k].c_str(), scores[k]);
+        if (early_stopping_round_ > 0) {
+          msg_buf << "Iteration:" << iter << ", training " << name[k] << " : " << scores[k] << '\n';
+        }
+      }
+    }
+  }
+
+  // Print and check validation metrics
+  if (need_output || early_stopping_round_ > 0) {
+    for (size_t i = 0; i < valid_metrics_.size(); ++i) {
+      for (size_t j = 0; j < valid_metrics_[i].size(); ++j) {
+        auto scores = valid_metrics_[i][j]->Eval(yhat_valid_[i].data(), objective_function_);
+        auto name = valid_metrics_[i][j]->GetName();
+
+        for (size_t k = 0; k < name.size(); ++k) {
+          std::stringstream tmp_buf;
+          tmp_buf << "Iteration:" << iter << ", valid_" << (i + 1) << " " << name[k] << " : " << scores[k];
+          if (need_output) {
+            Log::Info(tmp_buf.str().c_str());
+          }
+          if (early_stopping_round_ > 0) {
+            msg_buf << tmp_buf.str() << '\n';
+          }
+        }
+
+        // Check early stopping
+        if (es_first_metric_only_ && j > 0) {
+          continue;
+        }
+
+        if (ret.empty() && early_stopping_round_ > 0 &&
+            i < best_score_.size() && j < best_score_[i].size()) {
+          double cur_score = valid_metrics_[i][j]->factor_to_bigger_better() * scores.back();
+          if (cur_score - best_score_[i][j] > early_stopping_min_delta_) {
+            // Found a better score
+            best_score_[i][j] = cur_score;
+            best_iter_[i][j] = iter;
+            meet_early_stopping_pairs.emplace_back(i, j);
+          } else if (iter - best_iter_[i][j] >= early_stopping_round_) {
+            // No improvement for early_stopping_round_ iterations
+            ret = best_msg_[i][j];
+          }
+        }
+      }
+    }
+  }
+
+  // Update best messages
+  for (auto& pair : meet_early_stopping_pairs) {
+    best_msg_[pair.first][pair.second] = msg_buf.str();
+  }
+  return ret;
+}
+
+bool MixtureGBDT::EvalAndCheckEarlyStopping() {
+  bool is_met_early_stopping = false;
+  std::string best_msg_str = OutputMetric(iter_);
+
+  is_met_early_stopping = !best_msg_str.empty();
+  if (is_met_early_stopping) {
+    Log::Info("Early stopping at iteration %d, the best iteration round is %d",
+              iter_, iter_ - early_stopping_round_);
+    Log::Info("Output of best iteration round:\n%s", best_msg_str.c_str());
+
+    // Rollback models to best iteration
+    for (int i = 0; i < early_stopping_round_; ++i) {
+      RollbackOneIter();
+    }
+  }
+  return is_met_early_stopping;
 }
 
 int MixtureGBDT::NumPredictOneRow(int start_iteration, int num_iteration,
@@ -990,9 +1198,54 @@ void MixtureGBDT::ResetConfig(const Config* config) {
 
 void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
                                   const std::vector<const Metric*>& valid_metrics) {
-  (void)valid_data;
-  (void)valid_metrics;
-  Log::Fatal("MixtureGBDT::AddValidDataset is not implemented");
+  // Validate dataset alignment with training data
+  if (!train_data_->CheckAlign(*valid_data)) {
+    Log::Fatal("Cannot add validation data, since it has different bin mappers with training data");
+  }
+
+  // Store validation data and metrics
+  valid_datas_.push_back(valid_data);
+  valid_metrics_.push_back(valid_metrics);
+
+  // Get validation data size
+  data_size_t num_valid = valid_data->num_data();
+  size_t nk_valid = static_cast<size_t>(num_valid) * num_experts_;
+
+  // Allocate validation buffers for this dataset
+  expert_pred_valid_.emplace_back(nk_valid, 0.0);
+  gate_proba_valid_.emplace_back(nk_valid, 0.0);
+  yhat_valid_.emplace_back(num_valid, 0.0);
+
+  // Initialize Markov buffers if needed
+  if (use_markov_) {
+    const double uniform_prob = 1.0 / num_experts_;
+    prev_gate_proba_valid_.emplace_back(nk_valid, uniform_prob);
+  }
+
+  // Add validation data to each expert and gate (they will manage their own ScoreUpdaters)
+  for (int k = 0; k < num_experts_; ++k) {
+    experts_[k]->AddValidDataset(valid_data, {});  // No metrics at expert level
+  }
+  gate_->AddValidDataset(valid_data, {});  // No metrics at gate level
+
+  // Compute initial validation predictions if we have trained iterations
+  if (iter_ > 0) {
+    ForwardValid(static_cast<int>(valid_datas_.size()) - 1);
+  }
+
+  // Initialize early stopping tracking if enabled
+  if (early_stopping_round_ > 0) {
+    size_t num_metrics = valid_metrics.size();
+    if (es_first_metric_only_) {
+      num_metrics = std::min(num_metrics, static_cast<size_t>(1));
+    }
+    best_iter_.emplace_back(num_metrics, 0);
+    best_score_.emplace_back(num_metrics, -std::numeric_limits<double>::infinity());
+    best_msg_.emplace_back(num_metrics);
+  }
+
+  Log::Info("MixtureGBDT: Added validation dataset %d with %d samples",
+            static_cast<int>(valid_datas_.size()), num_valid);
 }
 
 void MixtureGBDT::RefitTree(const int* tree_leaf_prediction, const size_t nrow, const size_t ncol) {
@@ -1210,9 +1463,11 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
     max_feature_idx_ = experts_[0]->MaxFeatureIdx();
     feature_names_ = experts_[0]->FeatureNames();
     label_idx_ = experts_[0]->LabelIdx();
+    // Set iteration count from first expert
+    iter_ = experts_[0]->GetCurrentIteration();
   }
 
-  Log::Info("MixtureGBDT: Loaded model with %d experts", num_experts_);
+  Log::Info("MixtureGBDT: Loaded model with %d experts, %d iterations", num_experts_, iter_);
   return true;
 }
 

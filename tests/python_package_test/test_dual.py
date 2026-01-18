@@ -21,7 +21,12 @@ def test_cpu_and_gpu_work():
     X, y = load_breast_cancer(return_X_y=True)
     data = lgb.Dataset(X, y)
 
-    params_cpu = {"verbosity": -1, "num_leaves": 31, "objective": "binary", "device": "cpu"}
+    params_cpu = {
+        "verbosity": -1,
+        "num_leaves": 31,
+        "objective": "binary",
+        "device": "cpu",
+    }
     cpu_bst = lgb.train(params_cpu, data, num_boost_round=10)
     cpu_score = log_loss(y, cpu_bst.predict(X))
 

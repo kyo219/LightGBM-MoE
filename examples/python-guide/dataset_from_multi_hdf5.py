@@ -100,7 +100,9 @@ def main():
     batch_size = 64
     output_basename = "regression"
     hdf_files = generate_hdf(
-        str(Path(__file__).absolute().parents[1] / "regression" / "regression.train"), output_basename, batch_size
+        str(Path(__file__).absolute().parents[1] / "regression" / "regression.train"),
+        output_basename,
+        batch_size,
     )
 
     create_dataset_from_multiple_hdf(hdf_files, batch_size=batch_size)

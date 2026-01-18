@@ -24,10 +24,15 @@ import lightgbm_moe as lgb
 #   single continuous predictor
 rng = np.random.default_rng(seed=0)
 N = 1000
-X = pd.DataFrame({"continuous": range(N), "categorical": np.repeat([0, 1, 2, 3, 4], N / 5)})
+X = pd.DataFrame(
+    {"continuous": range(N), "categorical": np.repeat([0, 1, 2, 3, 4], N / 5)}
+)
 CATEGORICAL_EFFECTS = [-1, -1, -2, -2, 2]
 LINEAR_TERM = np.array(
-    [-0.5 + 0.01 * X["continuous"][k] + CATEGORICAL_EFFECTS[X["categorical"][k]] for k in range(X.shape[0])]
+    [
+        -0.5 + 0.01 * X["continuous"][k] + CATEGORICAL_EFFECTS[X["categorical"][k]]
+        for k in range(X.shape[0])
+    ]
 ) + rng.normal(loc=0, scale=1, size=X.shape[0])
 TRUE_PROB = expit(LINEAR_TERM)
 Y = rng.binomial(n=1, p=TRUE_PROB, size=N)
@@ -67,13 +72,23 @@ def experiment(objective, label_type, data):
     """
     nrounds = 5
     lgb_data = data[f"lgb_with_{label_type}_labels"]
-    params = {"objective": objective, "feature_fraction": 1, "bagging_fraction": 1, "verbose": -1, "seed": 123}
+    params = {
+        "objective": objective,
+        "feature_fraction": 1,
+        "bagging_fraction": 1,
+        "verbose": -1,
+        "seed": 123,
+    }
     time_zero = time.time()
     gbm = lgb.train(params, lgb_data, num_boost_round=nrounds)
     y_fitted = gbm.predict(data["X"])
     y_true = data[f"{label_type}_labels"]
     duration = time.time() - time_zero
-    return {"time": duration, "correlation": np.corrcoef(y_fitted, y_true)[0, 1], "logloss": log_loss(y_fitted, y_true)}
+    return {
+        "time": duration,
+        "correlation": np.corrcoef(y_fitted, y_true)[0, 1],
+        "logloss": log_loss(y_fitted, y_true),
+    }
 
 
 #################

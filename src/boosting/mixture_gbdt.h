@@ -279,6 +279,64 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief Update expert bias based on recent load */
   void UpdateExpertBias();
+
+  /*!
+   * \brief Forward pass for validation data: compute expert predictions and gate probabilities
+   * \param valid_idx Index of validation dataset
+   */
+  void ForwardValid(int valid_idx);
+
+  /*!
+   * \brief Output metrics and check early stopping
+   * \param iter Current iteration
+   * \return Non-empty string if early stopping triggered
+   */
+  std::string OutputMetric(int iter);
+
+  /*!
+   * \brief Evaluate metrics and check early stopping condition
+   * \return true if early stopping triggered
+   */
+  bool EvalAndCheckEarlyStopping();
+
+  // ===== Validation data storage =====
+  /*! \brief Validation datasets */
+  std::vector<const Dataset*> valid_datas_;
+
+  /*! \brief Metrics for each validation dataset */
+  std::vector<std::vector<const Metric*>> valid_metrics_;
+
+  // ===== Validation prediction buffers =====
+  /*! \brief Expert predictions for validation (expert-major: [k * num_valid + i]) */
+  std::vector<std::vector<double>> expert_pred_valid_;
+
+  /*! \brief Gate probabilities for validation (sample-major: [i * K + k]) */
+  std::vector<std::vector<double>> gate_proba_valid_;
+
+  /*! \brief Combined predictions for validation */
+  std::vector<std::vector<double>> yhat_valid_;
+
+  /*! \brief Previous gate probabilities for Markov mode validation */
+  std::vector<std::vector<double>> prev_gate_proba_valid_;
+
+  // ===== Early stopping =====
+  /*! \brief Number of rounds for early stopping (0 = disabled) */
+  int early_stopping_round_;
+
+  /*! \brief Minimum improvement for early stopping */
+  double early_stopping_min_delta_;
+
+  /*! \brief Only use first metric for early stopping */
+  bool es_first_metric_only_;
+
+  /*! \brief Best iteration for each validation dataset and metric */
+  std::vector<std::vector<int>> best_iter_;
+
+  /*! \brief Best score for each validation dataset and metric */
+  std::vector<std::vector<double>> best_score_;
+
+  /*! \brief Output message of best iteration */
+  std::vector<std::vector<std::string>> best_msg_;
 };
 
 }  // namespace LightGBM

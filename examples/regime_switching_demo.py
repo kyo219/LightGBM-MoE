@@ -85,8 +85,8 @@ def train_and_evaluate():
     train_size = 1400
     X_train, X_test = X[:train_size], X[train_size:]
     y_train, y_test = y[:train_size], y[train_size:]
-    t_train, t_test = t[:train_size], t[train_size:]
-    regime_train, regime_test = regime_true[:train_size], regime_true[train_size:]
+    _t_train, t_test = t[:train_size], t[train_size:]
+    _regime_train, regime_test = regime_true[:train_size], regime_true[train_size:]
 
     # Create datasets
     train_data = lgb.Dataset(X_train, label=y_train)
@@ -146,7 +146,9 @@ def train_and_evaluate():
         print(f"  R2:   {m['R2']:.4f}")
 
     improvement = (
-        (metrics["Standard GBDT"]["RMSE"] - metrics["MoE GBDT (K=2)"]["RMSE"]) / metrics["Standard GBDT"]["RMSE"] * 100
+        (metrics["Standard GBDT"]["RMSE"] - metrics["MoE GBDT (K=2)"]["RMSE"])
+        / metrics["Standard GBDT"]["RMSE"]
+        * 100
     )
     print(f"\nRMSE Improvement: {improvement:.1f}%")
 
@@ -161,12 +163,23 @@ def train_and_evaluate():
 
     # Create visualizations
     print("\nCreating visualizations...")
-    create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regime_pred, regime_proba, metrics)
+    create_visualizations(
+        t_test,
+        y_test,
+        pred_std,
+        pred_moe,
+        regime_test,
+        regime_pred,
+        regime_proba,
+        metrics,
+    )
 
     return metrics
 
 
-def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regime_pred, regime_proba, metrics):
+def create_visualizations(
+    t_test, y_test, pred_std, pred_moe, regime_test, regime_pred, regime_proba, metrics
+):
     """Create all comparison visualizations."""
 
     # Color maps for regimes (2 regimes now)
@@ -180,11 +193,26 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regim
     # 1. Actual vs Predicted Scatter Plot
     # ============================================================
     ax1 = fig.add_subplot(3, 2, 1)
-    ax1.scatter(y_test, pred_std, alpha=0.5, label=f"Std GBDT (R²={metrics['Standard GBDT']['R2']:.3f})", s=20)
-    ax1.scatter(y_test, pred_moe, alpha=0.5, label=f"MoE GBDT (R²={metrics['MoE GBDT (K=2)']['R2']:.3f})", s=20)
+    ax1.scatter(
+        y_test,
+        pred_std,
+        alpha=0.5,
+        label=f"Std GBDT (R²={metrics['Standard GBDT']['R2']:.3f})",
+        s=20,
+    )
+    ax1.scatter(
+        y_test,
+        pred_moe,
+        alpha=0.5,
+        label=f"MoE GBDT (R²={metrics['MoE GBDT (K=2)']['R2']:.3f})",
+        s=20,
+    )
 
     # Perfect prediction line
-    lims = [min(y_test.min(), pred_std.min(), pred_moe.min()), max(y_test.max(), pred_std.max(), pred_moe.max())]
+    lims = [
+        min(y_test.min(), pred_std.min(), pred_moe.min()),
+        max(y_test.max(), pred_std.max(), pred_moe.max()),
+    ]
     ax1.plot(lims, lims, "k--", alpha=0.5, label="Perfect")
 
     ax1.set_xlabel("Actual")
@@ -227,12 +255,26 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regim
     # Plot actual values colored by true regime
     for r in range(num_regimes):
         mask = regime_test == r
-        ax4.scatter(t_test[mask], y_test[mask], c=regime_colors[r], alpha=0.6, s=15, label=f"Actual {regime_names[r]}")
+        ax4.scatter(
+            t_test[mask],
+            y_test[mask],
+            c=regime_colors[r],
+            alpha=0.6,
+            s=15,
+            label=f"Actual {regime_names[r]}",
+        )
 
     # Plot predictions colored by predicted regime (with different marker)
     for r in range(num_regimes):
         mask = regime_pred == r
-        ax4.scatter(t_test[mask], pred_moe[mask], c=regime_colors[r], alpha=0.6, s=15, marker="x")
+        ax4.scatter(
+            t_test[mask],
+            pred_moe[mask],
+            c=regime_colors[r],
+            alpha=0.6,
+            s=15,
+            marker="x",
+        )
 
     ax4.set_xlabel("Time")
     ax4.set_ylabel("Value")
@@ -246,7 +288,14 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regim
     ax5 = fig.add_subplot(3, 2, 5)
 
     for r in range(num_regimes):
-        ax5.fill_between(t_test, 0, regime_proba[:, r], alpha=0.5, color=regime_colors[r], label=regime_names[r])
+        ax5.fill_between(
+            t_test,
+            0,
+            regime_proba[:, r],
+            alpha=0.5,
+            color=regime_colors[r],
+            label=regime_names[r],
+        )
 
     # Add true regime boundaries
     regime_changes = np.where(np.diff(regime_test) != 0)[0]
@@ -277,9 +326,21 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regim
     width = 0.35
 
     ax6.bar(
-        x_pos - width / 2, [e.mean() for e in errors_std], width, label="Standard GBDT", color="steelblue", alpha=0.7
+        x_pos - width / 2,
+        [e.mean() for e in errors_std],
+        width,
+        label="Standard GBDT",
+        color="steelblue",
+        alpha=0.7,
     )
-    ax6.bar(x_pos + width / 2, [e.mean() for e in errors_moe], width, label="MoE GBDT", color="forestgreen", alpha=0.7)
+    ax6.bar(
+        x_pos + width / 2,
+        [e.mean() for e in errors_moe],
+        width,
+        label="MoE GBDT",
+        color="forestgreen",
+        alpha=0.7,
+    )
 
     ax6.set_xlabel("True Regime")
     ax6.set_ylabel("Mean Absolute Error")
@@ -290,7 +351,9 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regim
     ax6.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
-    plt.savefig("examples/regime_switching_comparison.png", dpi=150, bbox_inches="tight")
+    plt.savefig(
+        "examples/regime_switching_comparison.png", dpi=150, bbox_inches="tight"
+    )
     print("Saved: examples/regime_switching_comparison.png")
     plt.close()
 
@@ -313,8 +376,13 @@ def create_visualizations(t_test, y_test, pred_std, pred_moe, regime_test, regim
     # Add text annotations
     for i in range(num_regimes):
         for j in range(num_regimes):
-            text = ax.text(
-                j, i, f"{confusion_norm[i, j]:.2f}\n({int(confusion[i, j])})", ha="center", va="center", fontsize=12
+            ax.text(
+                j,
+                i,
+                f"{confusion_norm[i, j]:.2f}\n({int(confusion[i, j])})",
+                ha="center",
+                va="center",
+                fontsize=12,
             )
 
     ax.set_xticks(range(num_regimes))

@@ -46,7 +46,9 @@ def create_data(task: str, n_samples: int = 1_000) -> np.ndarray:
         centers = [[-4, -4], [4, 4]]
         X, y = make_blobs(n_samples, centers=centers, random_state=42)
     elif task == "regression":
-        X, y = make_regression(n_samples, n_features=4, n_informative=2, random_state=42)
+        X, y = make_regression(
+            n_samples, n_features=4, n_informative=2, random_state=42
+        )
     return np.hstack([y.reshape(-1, 1), X])
 
 
