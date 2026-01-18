@@ -297,15 +297,13 @@ def analyze_moe(X, y, regime_true, best_params, config: BenchmarkConfig):
     proba_range = (regime_proba.min(), regime_proba.max())
 
     # Expert differentiation (correlation between experts)
-    if K == 2:
-        expert_corr = np.corrcoef(expert_preds[:, 0], expert_preds[:, 1])[0, 1]
-    else:
-        corrs = []
-        for i in range(K):
-            for j in range(i + 1, K):
-                corrs.append(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1])
-        expert_corr = np.mean(corrs)
-    experts_different = expert_corr < 0.99
+    corrs = []
+    for i in range(K):
+        for j in range(i + 1, K):
+            corrs.append(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1])
+    expert_corr_max = max(corrs)  # Most similar pair (collapse detection)
+    expert_corr_min = min(corrs)  # Most differentiated pair
+    experts_different = expert_corr_max < 0.99
 
     # Regime accuracy (with best permutation)
     # Map predicted experts to true regimes, find best mapping
@@ -322,7 +320,8 @@ def analyze_moe(X, y, regime_true, best_params, config: BenchmarkConfig):
         "gate_working": gate_working,
         "proba_range": proba_range,
         "experts_different": experts_different,
-        "expert_corr": expert_corr,
+        "expert_corr_max": expert_corr_max,
+        "expert_corr_min": expert_corr_min,
         "regime_accuracy": best_acc,
         "regime_pred": regime_pred,
         "regime_proba": regime_proba,
@@ -404,11 +403,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     # Print analysis
     print(f"  MoE:")
     print(f"    Gate working: {'Yes' if analysis_moe['gate_working'] else 'NO!'}")
-    print(f"    Expert correlation: {analysis_moe['expert_corr']:.4f}")
+    print(f"    Expert corr (max/min): {analysis_moe['expert_corr_max']:.2f} / {analysis_moe['expert_corr_min']:.2f}")
     print(f"    Regime accuracy: {analysis_moe['regime_accuracy']:.1%}")
     print(f"  MoE-PE:")
     print(f"    Gate working: {'Yes' if analysis_moe_pe['gate_working'] else 'NO!'}")
-    print(f"    Expert correlation: {analysis_moe_pe['expert_corr']:.4f}")
+    print(f"    Expert corr (max/min): {analysis_moe_pe['expert_corr_max']:.2f} / {analysis_moe_pe['expert_corr_min']:.2f}")
     print(f"    Regime accuracy: {analysis_moe_pe['regime_accuracy']:.1%}")
 
     # Summary
@@ -476,7 +475,7 @@ def create_visualization(all_results: dict, output_path: str):
         ax2.plot(lims, lims, "k--", alpha=0.5)
         ax2.set_xlabel("Expert 0 Prediction")
         ax2.set_ylabel("Expert 1 Prediction")
-        ax2.set_title(f"{name}: Expert Preds\n(corr={analysis['expert_corr']:.2f})")
+        ax2.set_title(f"{name}: Expert Preds\n(corr: {analysis['expert_corr_min']:.2f}~{analysis['expert_corr_max']:.2f})")
 
         # Plot 3: RMSE Comparison
         ax3 = axes[i, 2]
@@ -534,25 +533,27 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
     # Expert Differentiation Table
     lines.append("### Expert Differentiation (Regime Separation)")
     lines.append("")
-    lines.append("| Dataset | MoE Corr | MoE-PE Corr | MoE Regime Acc | MoE-PE Regime Acc |")
-    lines.append("|---------|----------|-------------|----------------|-------------------|")
+    lines.append("| Dataset | MoE Corr (min/max) | MoE-PE Corr (min/max) | MoE Regime Acc | MoE-PE Regime Acc |")
+    lines.append("|---------|--------------------|-----------------------|----------------|-------------------|")
 
     for name, results in all_results.items():
         analysis_moe = results["analysis_moe"]
         analysis_pe = results["analysis_moe_pe"]
 
-        moe_corr = analysis_moe["expert_corr"]
-        pe_corr = analysis_pe["expert_corr"]
+        moe_corr = f"{analysis_moe['expert_corr_min']:.2f}/{analysis_moe['expert_corr_max']:.2f}"
+        pe_corr = f"{analysis_pe['expert_corr_min']:.2f}/{analysis_pe['expert_corr_max']:.2f}"
         moe_acc = analysis_moe["regime_accuracy"]
         pe_acc = analysis_pe["regime_accuracy"]
 
         lines.append(
-            f"| {name} | {moe_corr:.2f} | {pe_corr:.2f} | {moe_acc:.1%} | {pe_acc:.1%} |"
+            f"| {name} | {moe_corr} | {pe_corr} | {moe_acc:.1%} | {pe_acc:.1%} |"
         )
 
     lines.append("")
     lines.append("**Notes**:")
-    lines.append("- **Expert Corr**: Correlation between expert predictions (lower = more differentiated, negative = opposite predictions)")
+    lines.append("- **Expert Corr (min/max)**: Min and max pairwise correlation between expert predictions")
+    lines.append("  - min: Most differentiated pair (lower = better separation)")
+    lines.append("  - max: Most similar pair (if ~1.0, some experts may have collapsed)")
     lines.append("- **Regime Acc**: Classification accuracy of predicted regime vs true regime (with best label permutation)")
     lines.append("")
 
@@ -612,13 +613,13 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
 
 def print_final_summary(all_results: dict):
     """Print final summary table."""
-    print("\n" + "=" * 105)
+    print("\n" + "=" * 120)
     print("FINAL SUMMARY")
-    print("=" * 105)
+    print("=" * 120)
 
     # Results table
-    print(f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>10} {'Best Impr':>10} {'MoE Corr':>9} {'PE Corr':>8} {'MoE Acc':>8} {'PE Acc':>8}")
-    print("-" * 105)
+    print(f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>10} {'Best Impr':>10} {'MoE Corr':>12} {'PE Corr':>12} {'MoE Acc':>8} {'PE Acc':>8}")
+    print("-" * 120)
 
     for name, results in all_results.items():
         std_rmse = results["Standard"]["rmse"]
@@ -629,17 +630,17 @@ def print_final_summary(all_results: dict):
         analysis_moe = results["analysis_moe"]
         analysis_pe = results["analysis_moe_pe"]
 
-        moe_corr = f"{analysis_moe['expert_corr']:.2f}"
-        pe_corr = f"{analysis_pe['expert_corr']:.2f}"
+        moe_corr = f"{analysis_moe['expert_corr_min']:.2f}/{analysis_moe['expert_corr_max']:.2f}"
+        pe_corr = f"{analysis_pe['expert_corr_min']:.2f}/{analysis_pe['expert_corr_max']:.2f}"
         moe_acc = f"{analysis_moe['regime_accuracy']:.1%}"
         pe_acc = f"{analysis_pe['regime_accuracy']:.1%}"
 
-        print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {improvement:>+9.1f}% {moe_corr:>9} {pe_corr:>8} {moe_acc:>8} {pe_acc:>8}")
+        print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {improvement:>+9.1f}% {moe_corr:>12} {pe_corr:>12} {moe_acc:>8} {pe_acc:>8}")
 
-    print("\n" + "=" * 105)
-    print("MoE Corr / PE Corr: Correlation between Expert predictions (lower = more differentiated)")
-    print("MoE Acc / PE Acc: Best regime classification accuracy with label permutation")
-    print("=" * 105)
+    print("\n" + "=" * 120)
+    print("MoE/PE Corr: Expert correlation (min/max) - lower min = better differentiation, max ~1.0 = collapse risk")
+    print("MoE/PE Acc: Best regime classification accuracy with label permutation")
+    print("=" * 120)
 
 
 # =============================================================================
