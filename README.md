@@ -384,42 +384,69 @@ study.optimize(objective_per_expert, n_trials=200)
 
 ## Benchmark
 
-**Setup**: 100 Optuna trials, 5-fold time-series CV, full hyperparameter search.
+**Setup**: 200 Optuna trials, 5-fold time-series CV, early stopping (50 rounds).
 
-| Dataset | Description | Standard | MoE | MoE-PerExp | Best |
-|---------|-------------|----------|-----|------------|------|
-| **Synthetic** | X→Regime | 5.49 | **4.09** | 4.25 | **+25.7%** |
-| Hamilton | Latent Markov | 0.74 | 0.74 | **0.74** | +0.1% |
-| VIX | Latent volatility | **0.012** | 0.012 | 0.012 | +0.0% |
+### RMSE Comparison
 
-- **MoE**: Shared hyperparameters across all experts
-- **MoE-PerExp**: Per-expert tree structure (`mixture_expert_max_depths`, etc.)
+| Dataset | Standard | MoE | MoE-PE | Best Improvement |
+|---------|----------|-----|--------|------------------|
+| Synthetic | 5.1032 | **4.3928** | 5.1410 | +13.9% |
+| Hamilton | 0.7192 | **0.7127** | 0.7173 | +0.9% |
+| VIX | 0.0117 | **0.0116** | 0.0116 | +0.5% |
+
+### Expert Differentiation (Regime Separation)
+
+| Dataset | MoE Corr | MoE-PE Corr | MoE Regime Acc | MoE-PE Regime Acc |
+|---------|----------|-------------|----------------|-------------------|
+| Synthetic | -0.28 | 0.98 | 96.2% | 58.6% |
+| Hamilton | 0.91 | 0.95 | 50.8% | 50.2% |
+| VIX | 0.94 | 0.99 | 52.0% | 52.4% |
+
+- **Expert Corr**: Correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
+- **Regime Acc**: Classification accuracy of predicted regime vs true regime
 
 **Key Findings**:
-- MoE excels when regime is determinable from features (X): **+25.7%** on Synthetic with 99.2% regime accuracy
-- Per-expert hyperparameters add more search dimensions, requiring more trials to converge
-- On latent regime data (Hamilton, VIX), MoE provides little benefit as expected
+- MoE (shared structure) achieves best RMSE and expert differentiation
+- On Synthetic data: Expert correlation of **-0.28** (opposite predictions!) with **96.2%** regime accuracy
+- MoE-PE selects different tree structures per expert, but shared-structure MoE learns better Gate separation
+- Latent regime data (Hamilton, VIX) shows limited improvement as expected
+
+### Selected Hyperparameters (Synthetic Dataset)
+
+**MoE (Shared Tree Structure):**
+- num_experts: 2, max_depth: 6, num_leaves: 10, learning_rate: 0.079
+
+**MoE-PerExpert (Per-Expert Tree Structure):**
+
+| Expert | max_depth | num_leaves | min_data_in_leaf |
+|--------|-----------|------------|------------------|
+| E0 | 7 | 100 | 20 |
+| E1 | 9 | 103 | 5 |
+| E2 | 5 | 96 | 94 |
 
 ### Run Benchmark
 
 ```bash
-# Basic benchmark (Standard vs MoE)
+# Full benchmark (Standard vs MoE vs MoE-PE, 100 trials default)
 python examples/benchmark.py
 
-# Include per-expert hyperparameter search
-python examples/benchmark.py --per-expert
+# More trials for better optimization
+python examples/benchmark.py --trials 200
 
-# Quick test with fewer trials
-python examples/benchmark.py --trials 20 --per-expert
+# Quick test
+python examples/benchmark.py --trials 10
+
+# Output to markdown
+python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
 
 ### Visualization
 
-![Regime Switching Prediction](examples/regime_switching_comparison.png)
+![Benchmark Results](examples/benchmark_results.png)
 
-- **Top**: Actual vs Predicted values with background colored by predicted regime
-- **Bottom**: Gate probability over time (▼▲ = true regime markers)
-- **Result**: 95.8% regime accuracy on synthetic test set
+- **Left**: Regime separation (% samples routed to each expert by true regime)
+- **Center**: Expert prediction scatter (color = true regime)
+- **Right**: RMSE comparison across methods
 
 ---
 
@@ -970,42 +997,69 @@ study.optimize(objective_per_expert, n_trials=200)
 
 ## ベンチマーク
 
-**設定**: 100 Optunaトライアル、5分割時系列CV、完全ハイパーパラメータ探索。
+**設定**: 200 Optunaトライアル、5分割時系列CV、early stopping (50 rounds)。
 
-| データセット | 説明 | Standard | MoE | MoE-PerExp | Best |
-|-------------|------|----------|-----|------------|------|
-| **合成** | X→Regime | 5.49 | **4.09** | 4.25 | **+25.7%** |
-| Hamilton | 潜在マルコフ | 0.74 | 0.74 | **0.74** | +0.1% |
-| VIX | 潜在ボラティリティ | **0.012** | 0.012 | 0.012 | +0.0% |
+### RMSE比較
 
-- **MoE**: 全Expertで共通のハイパーパラメータ
-- **MoE-PerExp**: Expertごとの木構造 (`mixture_expert_max_depths`等)
+| データセット | Standard | MoE | MoE-PE | 改善率 |
+|-------------|----------|-----|--------|--------|
+| Synthetic | 5.1032 | **4.3928** | 5.1410 | +13.9% |
+| Hamilton | 0.7192 | **0.7127** | 0.7173 | +0.9% |
+| VIX | 0.0117 | **0.0116** | 0.0116 | +0.5% |
+
+### Expert分化（レジーム分離）
+
+| データセット | MoE相関 | MoE-PE相関 | MoE Regime精度 | MoE-PE Regime精度 |
+|-------------|---------|-----------|----------------|-------------------|
+| Synthetic | -0.28 | 0.98 | 96.2% | 58.6% |
+| Hamilton | 0.91 | 0.95 | 50.8% | 50.2% |
+| VIX | 0.94 | 0.99 | 52.0% | 52.4% |
+
+- **Expert相関**: Expert間の予測相関（低い=分化している、負=逆の予測）
+- **Regime精度**: 予測regimeと真のregimeの分類精度
 
 **重要な発見**:
-- MoEはレジームが特徴量(X)から決定可能な場合に有効: 合成データで**+25.7%**、regime精度99.2%
-- per-expertハイパラは探索次元が増えるため、収束に多くのtrialが必要
-- 潜在レジームデータ(Hamilton, VIX)ではMoEの効果は限定的（想定通り）
+- MoE（共有構造）が最良のRMSEとExpert分化を達成
+- Syntheticデータ: Expert相関 **-0.28**（逆相関！）、Regime精度 **96.2%**
+- MoE-PEはExpertごとに異なる木構造を選択するが、共有構造MoEの方がGate分離がうまく学習される
+- 潜在レジームデータ（Hamilton, VIX）では改善が限定的（想定通り）
+
+### 選択されたハイパーパラメータ（Syntheticデータセット）
+
+**MoE（共有木構造）:**
+- num_experts: 2, max_depth: 6, num_leaves: 10, learning_rate: 0.079
+
+**MoE-PerExpert（Expertごとの木構造）:**
+
+| Expert | max_depth | num_leaves | min_data_in_leaf |
+|--------|-----------|------------|------------------|
+| E0 | 7 | 100 | 20 |
+| E1 | 9 | 103 | 5 |
+| E2 | 5 | 96 | 94 |
 
 ### ベンチマーク実行
 
 ```bash
-# 基本ベンチマーク (Standard vs MoE)
+# フルベンチマーク (Standard vs MoE vs MoE-PE、デフォルト100 trials)
 python examples/benchmark.py
 
-# per-expertハイパーパラメータも含める
-python examples/benchmark.py --per-expert
+# より多くのtrials
+python examples/benchmark.py --trials 200
 
 # 軽めのテスト
-python examples/benchmark.py --trials 20 --per-expert
+python examples/benchmark.py --trials 10
+
+# Markdown出力
+python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
 
 ### 可視化
 
-![レジームスイッチング予測](examples/regime_switching_comparison.png)
+![ベンチマーク結果](examples/benchmark_results.png)
 
-- **上段**: 実績値 vs 予測値（背景色=予測レジーム）
-- **下段**: 時間経過でのゲート確率（▼▲=真のレジームマーカー）
-- **結果**: 合成テストセットで95.8%のレジーム精度
+- **左**: レジーム分離（真のレジームごとのExpertへのルーティング%）
+- **中央**: Expert予測散布図（色=真のレジーム）
+- **右**: 手法間のRMSE比較
 
 ---
 

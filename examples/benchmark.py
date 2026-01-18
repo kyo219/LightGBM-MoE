@@ -556,6 +556,57 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
     lines.append("- **Regime Acc**: Classification accuracy of predicted regime vs true regime (with best label permutation)")
     lines.append("")
 
+    # Selected Hyperparameters Section
+    lines.append("### Selected Hyperparameters")
+    lines.append("")
+
+    for name, results in all_results.items():
+        lines.append(f"#### {name}")
+        lines.append("")
+
+        # Standard GBDT params
+        std_params = results["Standard"]["params"]
+        lines.append("**Standard GBDT:**")
+        lines.append(f"- max_depth: {std_params.get('max_depth', 'N/A')}")
+        lines.append(f"- num_leaves: {std_params.get('num_leaves', 'N/A')}")
+        lines.append(f"- min_data_in_leaf: {std_params.get('min_data_in_leaf', 'N/A')}")
+        lines.append(f"- learning_rate: {std_params.get('learning_rate', 'N/A'):.4f}")
+        lines.append("")
+
+        # MoE params (shared tree structure)
+        moe_params = results["MoE"]["params"]
+        lines.append("**MoE (Shared Tree Structure):**")
+        lines.append(f"- num_experts: {moe_params.get('mixture_num_experts', 2)}")
+        lines.append(f"- max_depth: {moe_params.get('max_depth', 'N/A')}")
+        lines.append(f"- num_leaves: {moe_params.get('num_leaves', 'N/A')}")
+        lines.append(f"- min_data_in_leaf: {moe_params.get('min_data_in_leaf', 'N/A')}")
+        lines.append(f"- learning_rate: {moe_params.get('learning_rate', 'N/A'):.4f}")
+        lines.append(f"- smoothing: {moe_params.get('mixture_r_smoothing', 'none')}")
+        lines.append("")
+
+        # MoE-PE params (per-expert tree structure)
+        pe_params = results["MoE-PE"]["params"]
+        num_experts = pe_params.get("mixture_num_experts", 2)
+        lines.append("**MoE-PerExpert (Per-Expert Tree Structure):**")
+        lines.append(f"- num_experts: {num_experts}")
+
+        # Extract per-expert tree params
+        max_depths = [pe_params.get(f"max_depth_{k}", "?") for k in range(num_experts)]
+        num_leaves = [pe_params.get(f"num_leaves_{k}", "?") for k in range(num_experts)]
+        min_data = [pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(num_experts)]
+
+        # Create a table for per-expert params
+        lines.append("")
+        lines.append("| Expert | max_depth | num_leaves | min_data_in_leaf |")
+        lines.append("|--------|-----------|------------|------------------|")
+        for k in range(num_experts):
+            lines.append(f"| E{k} | {max_depths[k]} | {num_leaves[k]} | {min_data[k]} |")
+        lines.append("")
+
+        lines.append(f"- learning_rate: {pe_params.get('learning_rate', 'N/A'):.4f}")
+        lines.append(f"- smoothing: {pe_params.get('mixture_r_smoothing', 'none')}")
+        lines.append("")
+
     return "\n".join(lines)
 
 
