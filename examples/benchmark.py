@@ -156,7 +156,7 @@ DATASETS = {
 # Evaluation
 # =============================================================================
 def evaluate_cv(X, y, params, config: BenchmarkConfig):
-    """Time-series cross-validation."""
+    """Time-series cross-validation with early stopping."""
     tscv = TimeSeriesSplit(n_splits=config.n_splits)
     scores = []
 
@@ -165,10 +165,15 @@ def evaluate_cv(X, y, params, config: BenchmarkConfig):
         y_train, y_val = y[train_idx], y[val_idx]
 
         train_data = lgb.Dataset(X_train, label=y_train)
+        valid_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
 
         try:
             model = lgb.train(
-                params, train_data, num_boost_round=config.num_boost_round
+                params,
+                train_data,
+                num_boost_round=config.num_boost_round,
+                valid_sets=[valid_data],
+                callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
             )
             pred = model.predict(X_val)
             rmse = np.sqrt(mean_squared_error(y_val, pred))
