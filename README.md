@@ -384,6 +384,114 @@ study.optimize(objective_per_expert, n_trials=200)
 | `predict_regime_proba(X)` | `(N, K)` | Gate probabilities for each expert (sums to 1) |
 | `predict_expert_pred(X)` | `(N, K)` | Individual prediction from each expert |
 
+### SHAP Analysis for MoE Components
+
+LightGBM-MoE provides APIs to extract individual component models (Gate and Experts) for SHAP analysis. This allows you to understand feature importance for each component separately.
+
+#### Extracting Component Boosters
+
+```python
+import lightgbm_moe as lgb
+
+# Train MoE model
+model = lgb.train(params, train_data, num_boost_round=100)
+
+# Extract individual components as standalone Boosters
+gate_booster = model.get_gate_booster()           # Gate model
+expert_0_booster = model.get_expert_booster(0)    # Expert 0
+expert_1_booster = model.get_expert_booster(1)    # Expert 1
+
+# Or get all components at once
+boosters = model.get_all_boosters()
+# Returns: {'gate': Booster, 'expert_0': Booster, 'expert_1': Booster, ...}
+```
+
+#### SHAP Analysis Example
+
+```python
+import shap
+import lightgbm as standard_lgb  # Standard LightGBM required for SHAP
+import tempfile
+
+# Helper function to convert lightgbm_moe Booster to SHAP-compatible format
+def to_shap_model(booster):
+    """Convert lightgbm_moe Booster to standard lightgbm Booster for SHAP."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write(booster.model_to_string(num_iteration=-1))
+        temp_path = f.name
+    return standard_lgb.Booster(model_file=temp_path)
+
+# Train MoE model
+model = lgb.train(params, train_data, num_boost_round=100)
+
+# Get SHAP values for each component
+boosters = model.get_all_boosters()
+
+for name, booster in boosters.items():
+    shap_model = to_shap_model(booster)
+    explainer = shap.TreeExplainer(shap_model)
+    shap_values = explainer.shap_values(X)
+
+    # Handle multi-output models (Gate has K outputs)
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, 0]  # Use first class
+
+    # Create beeswarm plot
+    shap.summary_plot(shap_values, X, plot_type="dot", show=False)
+    plt.title(f"SHAP: {name}")
+    plt.savefig(f"shap_{name}.png")
+    plt.close()
+```
+
+#### Component Booster APIs
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get_gate_booster()` | `Booster` | Standalone Gate model (K-class classifier) |
+| `get_expert_booster(k)` | `Booster` | Standalone Expert k model (regressor) |
+| `get_all_boosters()` | `dict[str, Booster]` | All components: `{'gate': ..., 'expert_0': ..., ...}` |
+
+#### Notes
+
+- **Gate model**: Multi-class classifier (K outputs). SHAP returns 3D array `(N, features, K)`. Use first class or average.
+- **Expert models**: Regression models. SHAP returns 2D array `(N, features)`.
+- **Standard LightGBM required**: SHAP's `TreeExplainer` expects standard LightGBM Booster. The helper function above converts lightgbm_moe Booster to standard format via temporary file.
+
+#### Benchmark SHAP Visualization
+
+The benchmark script automatically generates SHAP beeswarm plots for the optimized MoE model:
+
+```bash
+python examples/benchmark.py --trials 100
+
+# Skip SHAP visualization
+python examples/benchmark.py --trials 100 --no-shap
+```
+
+Output files:
+- `examples/shap_gate.png` - Gate feature importance
+- `examples/shap_expert_0.png` - Expert 0 feature importance
+- `examples/shap_expert_1.png` - Expert 1 feature importance
+- `examples/moe_shap_beeswarm.png` - Combined comparison
+
+#### SHAP Visualization Results (Synthetic Data)
+
+**Gate Beeswarm Plot:**
+
+![SHAP Gate](examples/shap_gate.png)
+
+The Gate model learns to route samples based on **X1, X2, X3** - which matches the synthetic data's regime definition (`regime_score = 0.5*X1 + 0.3*X2 - 0.2*X3`).
+
+**Component Feature Importance Comparison:**
+
+![MoE SHAP Beeswarm](examples/moe_shap_beeswarm.png)
+
+- **Gate**: X1, X2 are most important for regime classification
+- **Expert 0**: X0 dominates (learns `5*X0 + 3*X0*X2 + 2*sin(2*X3) + 10`)
+- **Expert 1**: X0, X3 are important (learns `-5*X0 - 2*X1² + 3*cos(2*X4) - 10`)
+
+This confirms that the Gate correctly identifies regimes, and each Expert specializes in different functional relationships.
+
 ---
 
 ## Benchmark
@@ -1001,6 +1109,115 @@ study.optimize(objective_per_expert, n_trials=200)
 | `predict_regime(X)` | `(N,)` int | 最も可能性の高いレジーム: `argmax_k(gate_proba)` |
 | `predict_regime_proba(X)` | `(N, K)` | 各エキスパートへのゲート確率（合計1） |
 | `predict_expert_pred(X)` | `(N, K)` | 各エキスパートの個別予測 |
+
+### MoEコンポーネントのSHAP分析
+
+LightGBM-MoEは、SHAP分析のために個別のコンポーネントモデル（GateとExpert）を抽出するAPIを提供します。これにより、各コンポーネントの特徴量重要度を個別に理解できます。
+
+#### コンポーネントBoosterの抽出
+
+```python
+import lightgbm_moe as lgb
+
+# MoEモデルを学習
+model = lgb.train(params, train_data, num_boost_round=100)
+
+# 個別コンポーネントをスタンドアローンBoosterとして抽出
+gate_booster = model.get_gate_booster()           # Gateモデル
+expert_0_booster = model.get_expert_booster(0)    # Expert 0
+expert_1_booster = model.get_expert_booster(1)    # Expert 1
+
+# または全コンポーネントを一度に取得
+boosters = model.get_all_boosters()
+# 戻り値: {'gate': Booster, 'expert_0': Booster, 'expert_1': Booster, ...}
+```
+
+#### SHAP分析の例
+
+```python
+import shap
+import lightgbm as standard_lgb  # SHAPには標準LightGBMが必要
+import tempfile
+
+# lightgbm_moe BoosterをSHAP互換形式に変換するヘルパー関数
+def to_shap_model(booster):
+    """lightgbm_moe Boosterを標準lightgbm Boosterに変換（SHAP用）"""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write(booster.model_to_string(num_iteration=-1))
+        temp_path = f.name
+    return standard_lgb.Booster(model_file=temp_path)
+
+# MoEモデルを学習
+model = lgb.train(params, train_data, num_boost_round=100)
+
+# 各コンポーネントのSHAP値を取得
+boosters = model.get_all_boosters()
+
+for name, booster in boosters.items():
+    shap_model = to_shap_model(booster)
+    explainer = shap.TreeExplainer(shap_model)
+    shap_values = explainer.shap_values(X)
+
+    # 多出力モデルの処理（GateはK個の出力を持つ）
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, 0]  # 最初のクラスを使用
+
+    # beeswarmプロット作成
+    shap.summary_plot(shap_values, X, plot_type="dot", show=False)
+    plt.title(f"SHAP: {name}")
+    plt.savefig(f"shap_{name}.png")
+    plt.close()
+```
+
+#### コンポーネントBooster API
+
+| メソッド | 戻り値 | 説明 |
+|---------|--------|------|
+| `get_gate_booster()` | `Booster` | スタンドアローンGateモデル（K-クラス分類器） |
+| `get_expert_booster(k)` | `Booster` | スタンドアローンExpert kモデル（回帰） |
+| `get_all_boosters()` | `dict[str, Booster]` | 全コンポーネント: `{'gate': ..., 'expert_0': ..., ...}` |
+
+#### 注意事項
+
+- **Gateモデル**: 多クラス分類器（K個の出力）。SHAPは3D配列 `(N, features, K)` を返す。最初のクラスまたは平均を使用。
+- **Expertモデル**: 回帰モデル。SHAPは2D配列 `(N, features)` を返す。
+- **標準LightGBMが必要**: SHAPの `TreeExplainer` は標準LightGBM Boosterを期待。上記のヘルパー関数でlightgbm_moe Boosterを一時ファイル経由で標準形式に変換。
+
+#### ベンチマークでのSHAP可視化
+
+ベンチマークスクリプトは最適化されたMoEモデルのSHAP beeswarmプロットを自動生成します：
+
+```bash
+python examples/benchmark.py --trials 100
+
+# SHAP可視化をスキップ
+python examples/benchmark.py --trials 100 --no-shap
+```
+
+出力ファイル:
+- `examples/shap_gate.png` - Gate特徴量重要度
+- `examples/shap_expert_0.png` - Expert 0特徴量重要度
+- `examples/shap_expert_1.png` - Expert 1特徴量重要度
+- `examples/moe_shap_beeswarm.png` - 統合比較
+
+#### SHAP可視化結果（Syntheticデータ）
+
+**Gate Beeswarmプロット:**
+
+![SHAP Gate](examples/shap_gate.png)
+
+Gateモデルは**X1, X2, X3**に基づいてサンプルをルーティングすることを学習しています。これはSyntheticデータのレジーム定義（`regime_score = 0.5*X1 + 0.3*X2 - 0.2*X3`）と一致しています。
+
+**コンポーネント間の特徴量重要度比較:**
+
+![MoE SHAP Beeswarm](examples/moe_shap_beeswarm.png)
+
+統合プロットから以下が確認できます:
+- **Gate**: レジーム識別特徴量（X1, X2, X3）に焦点
+- **Expert 0**: 異なる特徴量サブセットに特化
+- **Expert 1**: 相補的なパターンに焦点
+
+この結果は、MoEモデルがデータ内の異なるレジームを効果的に分離していることを示しています。
 
 ---
 

@@ -5068,6 +5068,191 @@ class Booster:
         # Weighted sum: prediction = sum_k(proba[k] * expert[k])
         return (regime_proba * expert_preds).sum(axis=1)
 
+    def _extract_gate_model_string(self) -> str:
+        """Extract gate model section from MoE model string.
+
+        Returns
+        -------
+        gate_model_str : str
+            The gate model as a standalone LightGBM model string.
+
+        Raises
+        ------
+        LightGBMError
+            If this is not a MoE model or if parsing fails.
+        """
+        if not self.is_mixture():
+            raise LightGBMError("_extract_gate_model_string can only be used with MoE models")
+
+        model_str = self.model_to_string(num_iteration=-1)
+
+        # Find [gate_model] section
+        gate_marker = "[gate_model]"
+        gate_start = model_str.find(gate_marker)
+        if gate_start == -1:
+            raise LightGBMError("Failed to find [gate_model] section in model string")
+
+        gate_start += len(gate_marker)
+        # Skip newline
+        if gate_start < len(model_str) and model_str[gate_start] == "\n":
+            gate_start += 1
+
+        # Find [expert_model_0] which marks the end of gate section
+        expert0_marker = "[expert_model_0]"
+        expert0_start = model_str.find(expert0_marker)
+        if expert0_start == -1:
+            raise LightGBMError("Failed to find [expert_model_0] section in model string")
+
+        return model_str[gate_start:expert0_start].strip()
+
+    def _extract_expert_model_string(self, expert_index: int) -> str:
+        """Extract expert k model section from MoE model string.
+
+        Parameters
+        ----------
+        expert_index : int
+            Index of the expert to extract (0-based).
+
+        Returns
+        -------
+        expert_model_str : str
+            The expert model as a standalone LightGBM model string.
+
+        Raises
+        ------
+        LightGBMError
+            If this is not a MoE model or if parsing fails.
+        """
+        if not self.is_mixture():
+            raise LightGBMError("_extract_expert_model_string can only be used with MoE models")
+
+        num_experts = self.num_experts()
+        if expert_index < 0 or expert_index >= num_experts:
+            raise LightGBMError(f"expert_index must be in [0, {num_experts}), got {expert_index}")
+
+        model_str = self.model_to_string(num_iteration=-1)
+
+        # Find [expert_model_k] section
+        section_marker = f"[expert_model_{expert_index}]"
+        section_start = model_str.find(section_marker)
+        if section_start == -1:
+            raise LightGBMError(f"Failed to find {section_marker} section in model string")
+
+        section_start += len(section_marker)
+        # Skip newline
+        if section_start < len(model_str) and model_str[section_start] == "\n":
+            section_start += 1
+
+        # Find next section or end
+        if expert_index < num_experts - 1:
+            next_marker = f"[expert_model_{expert_index + 1}]"
+            section_end = model_str.find(next_marker)
+            if section_end == -1:
+                raise LightGBMError(f"Failed to find {next_marker} section in model string")
+        else:
+            section_end = len(model_str)
+
+        return model_str[section_start:section_end].strip()
+
+    def get_gate_booster(self) -> "Booster":
+        """Get standalone Booster for gate model.
+
+        This method extracts the gate model from a Mixture-of-Experts model
+        and returns it as a standalone Booster. This is useful for SHAP analysis.
+
+        Returns
+        -------
+        gate_booster : Booster
+            A standalone Booster containing only the gate model.
+
+        Raises
+        ------
+        LightGBMError
+            If this is not a MoE model.
+
+        Example
+        -------
+        >>> import shap
+        >>> model = lgb.train(params, train_data)
+        >>> gate_booster = model.get_gate_booster()
+        >>> explainer = shap.TreeExplainer(gate_booster)
+        >>> shap_values = explainer.shap_values(X)
+        """
+        gate_model_str = self._extract_gate_model_string()
+        return Booster(model_str=gate_model_str)
+
+    def get_expert_booster(self, expert_index: int) -> "Booster":
+        """Get standalone Booster for expert k.
+
+        This method extracts an expert model from a Mixture-of-Experts model
+        and returns it as a standalone Booster. This is useful for SHAP analysis.
+
+        Parameters
+        ----------
+        expert_index : int
+            Index of the expert to extract (0-based).
+
+        Returns
+        -------
+        expert_booster : Booster
+            A standalone Booster containing only the expert model.
+
+        Raises
+        ------
+        LightGBMError
+            If this is not a MoE model or if expert_index is out of range.
+
+        Example
+        -------
+        >>> import shap
+        >>> model = lgb.train(params, train_data)
+        >>> expert_0_booster = model.get_expert_booster(0)
+        >>> explainer = shap.TreeExplainer(expert_0_booster)
+        >>> shap_values = explainer.shap_values(X)
+        """
+        expert_model_str = self._extract_expert_model_string(expert_index)
+        return Booster(model_str=expert_model_str)
+
+    def get_all_boosters(self) -> Dict[str, "Booster"]:
+        """Get all component Boosters from a MoE model.
+
+        This method extracts the gate and all expert models from a
+        Mixture-of-Experts model and returns them as standalone Boosters.
+        This is useful for SHAP analysis of all components.
+
+        Returns
+        -------
+        boosters : dict of str to Booster
+            Dictionary mapping component names to Boosters.
+            Keys are 'gate', 'expert_0', 'expert_1', etc.
+
+        Raises
+        ------
+        LightGBMError
+            If this is not a MoE model.
+
+        Example
+        -------
+        >>> import shap
+        >>> model = lgb.train(params, train_data)
+        >>> boosters = model.get_all_boosters()
+        >>> for name, booster in boosters.items():
+        ...     explainer = shap.TreeExplainer(booster)
+        ...     shap_values = explainer.shap_values(X)
+        ...     print(f"{name}: computed SHAP values")
+        """
+        if not self.is_mixture():
+            raise LightGBMError("get_all_boosters can only be used with MoE models")
+
+        result: Dict[str, "Booster"] = {}
+        result["gate"] = self.get_gate_booster()
+
+        num_experts = self.num_experts()
+        for k in range(num_experts):
+            result[f"expert_{k}"] = self.get_expert_booster(k)
+
+        return result
+
     def refit(
         self,
         data: _LGBM_TrainDataType,

@@ -23,6 +23,7 @@ from itertools import permutations
 import matplotlib.pyplot as plt
 import numpy as np
 import optuna
+import shap
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -618,6 +619,209 @@ def create_regime_demo(X, y, regime_true, config: BenchmarkConfig, output_path: 
     print(f"[Regime Demo] Regime Accuracy: {regime_acc:.1%}")
 
 
+def _booster_to_shap_compatible(booster):
+    """Convert lightgbm_moe Booster to SHAP-compatible format.
+
+    SHAP's TreeExplainer checks for specific class names like 'lightgbm.basic.Booster'.
+    This function converts our Booster to a format SHAP can understand by saving
+    to a temporary file and loading with standard lightgbm (if available) or
+    creating a compatible wrapper.
+
+    Parameters
+    ----------
+    booster : lightgbm_moe.Booster
+        The booster to convert.
+
+    Returns
+    -------
+    model : object
+        A SHAP-compatible model object.
+    """
+    import tempfile
+
+    # Try to use standard lightgbm if available
+    try:
+        import lightgbm as standard_lgb
+
+        # Save to temp file and reload with standard lightgbm
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            model_str = booster.model_to_string(num_iteration=-1)
+            f.write(model_str)
+            temp_path = f.name
+
+        try:
+            return standard_lgb.Booster(model_file=temp_path)
+        finally:
+            import os
+
+            os.unlink(temp_path)
+    except ImportError:
+        # Standard lightgbm not available, try direct approach
+        # SHAP can sometimes work with the model dump directly
+        pass
+
+    # Fallback: return the booster and hope SHAP's internals handle it
+    # This may not work, but we'll let the error propagate
+    return booster
+
+
+def create_shap_visualization(X, y, config: BenchmarkConfig, best_moe_params: dict, output_dir: str = "examples"):
+    """
+    Create SHAP beeswarm plots for MoE components (Gate and Experts).
+
+    This function trains a MoE model with the optimized parameters from the benchmark
+    and generates SHAP beeswarm plots for each component (gate and experts).
+
+    Parameters
+    ----------
+    X : numpy array
+        Feature matrix.
+    y : numpy array
+        Target values.
+    config : BenchmarkConfig
+        Configuration for training.
+    best_moe_params : dict
+        Best hyperparameters from Optuna optimization for MoE model.
+    output_dir : str
+        Directory to save output PNG files.
+    """
+    print("\n[SHAP] Creating SHAP beeswarm plots for MoE components...")
+    print(f"[SHAP] Using optimized MoE params: num_experts={best_moe_params.get('mixture_num_experts', 2)}")
+
+    # Build full params from optimized hyperparameters
+    params_moe = {
+        "objective": "regression",
+        "boosting": "mixture",
+        "verbose": -1,
+        "num_threads": 4,
+        "seed": config.seed,
+    }
+    params_moe.update(best_moe_params)
+
+    train_data = lgb.Dataset(X, label=y)
+    model = lgb.train(params_moe, train_data, num_boost_round=config.num_boost_round)
+
+    # Get component boosters
+    boosters = model.get_all_boosters()
+    num_experts = model.num_experts()
+
+    # Create feature names
+    feature_names = [f"X{i}" for i in range(X.shape[1])]
+
+    # Generate individual SHAP plots
+    shap_values_dict = {}
+
+    for name, booster in boosters.items():
+        print(f"[SHAP] Computing SHAP values for {name}...")
+
+        # Convert to SHAP-compatible format
+        shap_model = _booster_to_shap_compatible(booster)
+        explainer = shap.TreeExplainer(shap_model)
+        shap_values = explainer.shap_values(X)
+
+        # Handle multi-output models (like gate which outputs probabilities for each expert)
+        # shap_values can be:
+        # - 2D array (n_samples, n_features) for single output
+        # - 3D array (n_samples, n_features, n_classes) for multi-class
+        # - list of 2D arrays for multi-class (older SHAP versions)
+        if isinstance(shap_values, list):
+            # For multi-class, use the first class for simplicity
+            shap_values_for_plot = shap_values[0]
+            print(f"[SHAP] {name} is multi-output ({len(shap_values)} classes), using class 0")
+        elif shap_values.ndim == 3:
+            # 3D array: (n_samples, n_features, n_classes)
+            # Use the first class for plotting
+            shap_values_for_plot = shap_values[:, :, 0]
+            print(f"[SHAP] {name} is multi-output ({shap_values.shape[2]} classes), using class 0")
+        else:
+            shap_values_for_plot = shap_values
+
+        shap_values_dict[name] = shap_values_for_plot
+
+        # Create individual beeswarm plot
+        # shap.summary_plot handles figure creation internally, so we close all first
+        plt.close("all")
+        shap.summary_plot(
+            shap_values_for_plot,
+            X,
+            feature_names=feature_names,
+            plot_type="dot",  # "dot" is the beeswarm-style plot
+            show=False,
+        )
+        plt.gcf().set_size_inches(10, 6)
+        plt.title(f"SHAP Beeswarm: {name}")
+        plt.tight_layout()
+        output_path = f"{output_dir}/shap_{name}.png"
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close("all")
+        print(f"[SHAP] Saved: {output_path}")
+
+    # Create combined figure showing SHAP beeswarm (dot) plots for each component
+    n_components = 1 + num_experts  # gate + experts
+    fig, axes = plt.subplots(1, n_components, figsize=(6 * n_components, 6))
+
+    component_names = ["gate"] + [f"expert_{k}" for k in range(num_experts)]
+
+    for idx, name in enumerate(component_names):
+        shap_vals = shap_values_dict[name]
+        mean_abs_shap = np.abs(shap_vals).mean(axis=0)
+
+        # Sort features by importance
+        sorted_idx = np.argsort(mean_abs_shap)[::-1]
+        sorted_names = [feature_names[i] for i in sorted_idx]
+
+        ax = axes[idx]
+
+        # Create beeswarm-style dot plot
+        n_features = len(feature_names)
+        for feat_rank, feat_idx in enumerate(sorted_idx):
+            shap_feature = shap_vals[:, feat_idx]
+            feature_values = X[:, feat_idx]
+
+            # Normalize feature values for coloring (0 to 1)
+            fv_min, fv_max = feature_values.min(), feature_values.max()
+            if fv_max - fv_min > 1e-10:
+                fv_norm = (feature_values - fv_min) / (fv_max - fv_min)
+            else:
+                fv_norm = np.zeros_like(feature_values)
+
+            # Add jitter to y-axis to create beeswarm effect
+            y_jitter = np.random.normal(0, 0.15, size=len(shap_feature))
+            y_pos = feat_rank + y_jitter
+
+            # Scatter plot with color representing feature value
+            scatter = ax.scatter(
+                shap_feature,
+                y_pos,
+                c=fv_norm,
+                cmap="coolwarm",
+                s=8,
+                alpha=0.6,
+                vmin=0,
+                vmax=1,
+            )
+
+        ax.set_yticks(range(n_features))
+        ax.set_yticklabels(sorted_names)
+        ax.invert_yaxis()
+        ax.set_xlabel("SHAP value")
+        ax.set_title(f"{name}")
+        ax.axvline(x=0, color="gray", linestyle="-", linewidth=0.5)
+
+    # Add colorbar to the last subplot
+    cbar = plt.colorbar(scatter, ax=axes[-1], shrink=0.6)
+    cbar.set_label("Feature value\n(low → high)")
+
+    plt.suptitle("MoE Component SHAP Beeswarm", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    combined_path = f"{output_dir}/moe_shap_beeswarm.png"
+    plt.savefig(combined_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[SHAP] Saved combined plot: {combined_path}")
+
+    print("[SHAP] SHAP visualization complete.")
+
+
 def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
     """Generate markdown report of benchmark results."""
     lines = []
@@ -821,6 +1025,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=100, help="Boosting rounds")
     parser.add_argument("--no-viz", action="store_true", help="Skip visualization")
     parser.add_argument("--no-demo", action="store_true", help="Skip regime demo visualization")
+    parser.add_argument("--no-shap", action="store_true", help="Skip SHAP beeswarm visualization")
     parser.add_argument("--output-md", type=str, help="Output markdown file path (e.g., BENCHMARK.md)")
     args = parser.parse_args()
 
@@ -860,6 +1065,12 @@ def main():
     if not args.no_demo and synthetic_data is not None:
         X, y, regime = synthetic_data
         create_regime_demo(X, y, regime, config, "examples/regime_demo.png")
+
+    # SHAP visualization on Synthetic data using optimized MoE params
+    if not args.no_shap and synthetic_data is not None and "Synthetic" in all_results:
+        X, y, regime = synthetic_data
+        best_moe_params = all_results["Synthetic"]["MoE"]["params"]
+        create_shap_visualization(X, y, config, best_moe_params, output_dir="examples")
 
     if args.output_md:
         md_content = generate_markdown_report(all_results, config)
