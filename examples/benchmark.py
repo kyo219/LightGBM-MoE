@@ -758,10 +758,9 @@ def create_shap_visualization(
         plt.close("all")
         print(f"[SHAP] Saved: {output_path}")
 
-    # Create combined figure showing mean absolute SHAP values (bar chart)
-    # Note: shap.summary_plot doesn't work well with subplots, so we use bar charts
+    # Create combined figure showing SHAP beeswarm (dot) plots for each component
     n_components = 1 + num_experts  # gate + experts
-    fig, axes = plt.subplots(1, n_components, figsize=(5 * n_components, 5))
+    fig, axes = plt.subplots(1, n_components, figsize=(6 * n_components, 6))
 
     component_names = ["gate"] + [f"expert_{k}" for k in range(num_experts)]
 
@@ -769,22 +768,53 @@ def create_shap_visualization(
         shap_vals = shap_values_dict[name]
         mean_abs_shap = np.abs(shap_vals).mean(axis=0)
 
-        # Sort by importance
+        # Sort features by importance
         sorted_idx = np.argsort(mean_abs_shap)[::-1]
         sorted_names = [feature_names[i] for i in sorted_idx]
-        sorted_values = mean_abs_shap[sorted_idx]
 
         ax = axes[idx]
-        y_pos = np.arange(len(feature_names))
-        ax.barh(y_pos, sorted_values, color="steelblue", alpha=0.7)
-        ax.set_yticks(y_pos)
+
+        # Create beeswarm-style dot plot
+        n_features = len(feature_names)
+        for feat_rank, feat_idx in enumerate(sorted_idx):
+            shap_feature = shap_vals[:, feat_idx]
+            feature_values = X[:, feat_idx]
+
+            # Normalize feature values for coloring (0 to 1)
+            fv_min, fv_max = feature_values.min(), feature_values.max()
+            if fv_max - fv_min > 1e-10:
+                fv_norm = (feature_values - fv_min) / (fv_max - fv_min)
+            else:
+                fv_norm = np.zeros_like(feature_values)
+
+            # Add jitter to y-axis to create beeswarm effect
+            y_jitter = np.random.normal(0, 0.15, size=len(shap_feature))
+            y_pos = feat_rank + y_jitter
+
+            # Scatter plot with color representing feature value
+            scatter = ax.scatter(
+                shap_feature,
+                y_pos,
+                c=fv_norm,
+                cmap="coolwarm",
+                s=8,
+                alpha=0.6,
+                vmin=0,
+                vmax=1,
+            )
+
+        ax.set_yticks(range(n_features))
         ax.set_yticklabels(sorted_names)
         ax.invert_yaxis()
-        ax.set_xlabel("Mean |SHAP value|")
+        ax.set_xlabel("SHAP value")
         ax.set_title(f"{name}")
-        ax.grid(axis="x", alpha=0.3)
+        ax.axvline(x=0, color="gray", linestyle="-", linewidth=0.5)
 
-    plt.suptitle("MoE Component Feature Importance (Mean |SHAP|)", fontsize=14, fontweight="bold")
+    # Add colorbar to the last subplot
+    cbar = plt.colorbar(scatter, ax=axes[-1], shrink=0.6)
+    cbar.set_label("Feature value\n(low → high)")
+
+    plt.suptitle("MoE Component SHAP Beeswarm", fontsize=14, fontweight="bold")
     plt.tight_layout()
     combined_path = f"{output_dir}/moe_shap_beeswarm.png"
     plt.savefig(combined_path, dpi=150, bbox_inches="tight")
