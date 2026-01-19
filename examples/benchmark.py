@@ -212,9 +212,8 @@ def create_objective_standard(X, y, config: BenchmarkConfig):
 
 def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False):
     def objective(trial):
-        smoothing = trial.suggest_categorical(
-            "mixture_r_smoothing", ["none", "ema", "markov", "momentum"]
-        )
+        # smoothing=none fixed to prevent expert collapse
+        smoothing = "none"
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
 
         params = {
@@ -260,10 +259,7 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
             params["max_depth"] = trial.suggest_int("max_depth", 3, 12)
             params["min_data_in_leaf"] = trial.suggest_int("min_data_in_leaf", 5, 100)
 
-        if smoothing != "none":
-            params["mixture_smoothing_lambda"] = trial.suggest_float(
-                "mixture_smoothing_lambda", 0.1, 0.9
-            )
+        # smoothing_lambda not needed when smoothing=none
 
         return evaluate_cv(X, y, params, config)
 
