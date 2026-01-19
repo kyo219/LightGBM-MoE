@@ -46,9 +46,7 @@ class BenchmarkConfig:
 # =============================================================================
 # Data Generation
 # =============================================================================
-def generate_synthetic_data(
-    n_samples: int = 2000, noise_level: float = 0.5, seed: int = 42
-):
+def generate_synthetic_data(n_samples: int = 2000, noise_level: float = 0.5, seed: int = 42):
     """
     Synthetic regime-switching data (regime determinable from X).
     MoEが得意とするケース：特徴量からregimeが決まる。
@@ -63,20 +61,10 @@ def generate_synthetic_data(
     y = np.zeros(n_samples)
 
     mask0 = regime_true == 0
-    y[mask0] = (
-        5.0 * X[mask0, 0]
-        + 3.0 * X[mask0, 0] * X[mask0, 2]
-        + 2.0 * np.sin(2 * X[mask0, 3])
-        + 10.0
-    )
+    y[mask0] = 5.0 * X[mask0, 0] + 3.0 * X[mask0, 0] * X[mask0, 2] + 2.0 * np.sin(2 * X[mask0, 3]) + 10.0
 
     mask1 = regime_true == 1
-    y[mask1] = (
-        -5.0 * X[mask1, 0]
-        - 2.0 * X[mask1, 1] ** 2
-        + 3.0 * np.cos(2 * X[mask1, 4])
-        - 10.0
-    )
+    y[mask1] = -5.0 * X[mask1, 0] - 2.0 * X[mask1, 1] ** 2 + 3.0 * np.cos(2 * X[mask1, 4]) - 10.0
 
     y += np.random.randn(n_samples) * noise_level
 
@@ -229,27 +217,16 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
             "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             "mixture_num_experts": num_experts,
-            "mixture_e_step_alpha": trial.suggest_float(
-                "mixture_e_step_alpha", 0.1, 2.0
-            ),
+            "mixture_e_step_alpha": trial.suggest_float("mixture_e_step_alpha", 0.1, 2.0),
             "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 50),
-            "mixture_balance_factor": trial.suggest_int(
-                "mixture_balance_factor", 2, 10
-            ),
+            "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
             "mixture_r_smoothing": smoothing,
         }
 
         if per_expert:
-            max_depths = [
-                trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)
-            ]
-            num_leaves = [
-                trial.suggest_int(f"num_leaves_{k}", 8, 128) for k in range(num_experts)
-            ]
-            min_data = [
-                trial.suggest_int(f"min_data_in_leaf_{k}", 5, 100)
-                for k in range(num_experts)
-            ]
+            max_depths = [trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)]
+            num_leaves = [trial.suggest_int(f"num_leaves_{k}", 8, 128) for k in range(num_experts)]
+            min_data = [trial.suggest_int(f"min_data_in_leaf_{k}", 5, 100) for k in range(num_experts)]
 
             params["mixture_expert_max_depths"] = ",".join(map(str, max_depths))
             params["mixture_expert_num_leaves"] = ",".join(map(str, num_leaves))
@@ -335,9 +312,7 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     print(f"Dataset: {name}")
     print(f"{'=' * 70}")
     print(f"Samples: {len(y)}, Features: {X.shape[1]}")
-    print(
-        f"Regime distribution: {(regime_true == 0).mean():.1%} / {(regime_true == 1).mean():.1%}"
-    )
+    print(f"Regime distribution: {(regime_true == 0).mean():.1%} / {(regime_true == 1).mean():.1%}")
 
     results = {}
 
@@ -397,13 +372,15 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     results["analysis_moe_pe"] = analysis_moe_pe
 
     # Print analysis
-    print(f"  MoE:")
+    print("  MoE:")
     print(f"    Gate working: {'Yes' if analysis_moe['gate_working'] else 'NO!'}")
     print(f"    Expert corr (max/min): {analysis_moe['expert_corr_max']:.2f} / {analysis_moe['expert_corr_min']:.2f}")
     print(f"    Regime accuracy: {analysis_moe['regime_accuracy']:.1%}")
-    print(f"  MoE-PE:")
+    print("  MoE-PE:")
     print(f"    Gate working: {'Yes' if analysis_moe_pe['gate_working'] else 'NO!'}")
-    print(f"    Expert corr (max/min): {analysis_moe_pe['expert_corr_max']:.2f} / {analysis_moe_pe['expert_corr_min']:.2f}")
+    print(
+        f"    Expert corr (max/min): {analysis_moe_pe['expert_corr_max']:.2f} / {analysis_moe_pe['expert_corr_min']:.2f}"
+    )
     print(f"    Regime accuracy: {analysis_moe_pe['regime_accuracy']:.1%}")
 
     # Summary
@@ -413,7 +390,7 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     best_rmse = min(moe_rmse, moe_pe_rmse)
     improvement = (std_rmse - best_rmse) / std_rmse * 100
 
-    print(f"\n  --- Summary ---")
+    print("\n  --- Summary ---")
     print(f"  Standard RMSE:  {std_rmse:.4f}")
     print(f"  MoE RMSE:       {moe_rmse:.4f}")
     print(f"  MoE-PE RMSE:    {moe_pe_rmse:.4f}")
@@ -437,10 +414,8 @@ def create_visualization(all_results: dict, output_path: str):
         # Use best MoE analysis for visualization
         if results["MoE"]["rmse"] <= results["MoE-PE"]["rmse"]:
             analysis = results["analysis_moe"]
-            best_label = "MoE"
         else:
             analysis = results["analysis_moe_pe"]
-            best_label = "MoE-PE"
         regime_true = analysis["regime_true"]
         regime_pred = analysis["regime_pred"]
         expert_preds = analysis["expert_preds"]
@@ -471,7 +446,9 @@ def create_visualization(all_results: dict, output_path: str):
         ax2.plot(lims, lims, "k--", alpha=0.5)
         ax2.set_xlabel("Expert 0 Prediction")
         ax2.set_ylabel("Expert 1 Prediction")
-        ax2.set_title(f"{name}: Expert Preds\n(corr: {analysis['expert_corr_min']:.2f}~{analysis['expert_corr_max']:.2f})")
+        ax2.set_title(
+            f"{name}: Expert Preds\n(corr: {analysis['expert_corr_min']:.2f}~{analysis['expert_corr_max']:.2f})"
+        )
 
         # Plot 3: RMSE Comparison
         ax3 = axes[i, 2]
@@ -480,9 +457,10 @@ def create_visualization(all_results: dict, output_path: str):
         bars = ax3.bar(methods, rmses, color=["gray", "C0", "C2"], alpha=0.7)
         ax3.set_ylabel("RMSE")
         ax3.set_title(f"{name}: RMSE Comparison")
-        for bar, rmse in zip(bars, rmses):
-            ax3.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{rmse:.3f}",
-                    ha="center", va="bottom", fontsize=9)
+        for bar, rmse in zip(bars, rmses, strict=True):
+            ax3.text(
+                bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{rmse:.3f}", ha="center", va="bottom", fontsize=9
+            )
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -558,8 +536,7 @@ def create_regime_demo(X, y, regime_true, config: BenchmarkConfig, output_path: 
     ax1 = fig.add_subplot(2, 3, 1)
     ax1.scatter(y_test, pred_std, alpha=0.5, s=20, label=f"Std (RMSE={rmse_std:.3f})")
     ax1.scatter(y_test, pred_moe, alpha=0.5, s=20, label=f"MoE (RMSE={rmse_moe:.3f})")
-    lims = [min(y_test.min(), pred_std.min(), pred_moe.min()),
-            max(y_test.max(), pred_std.max(), pred_moe.max())]
+    lims = [min(y_test.min(), pred_std.min(), pred_moe.min()), max(y_test.max(), pred_std.max(), pred_moe.max())]
     ax1.plot(lims, lims, "k--", alpha=0.5)
     ax1.set_xlabel("Actual")
     ax1.set_ylabel("Predicted")
@@ -593,8 +570,7 @@ def create_regime_demo(X, y, regime_true, config: BenchmarkConfig, output_path: 
     ax4 = fig.add_subplot(2, 3, 4)
     for r in range(2):
         mask = regime_test == r
-        ax4.scatter(t_test[mask], y_test[mask], c=regime_colors[r], alpha=0.6, s=15,
-                   label=f"Actual {regime_names[r]}")
+        ax4.scatter(t_test[mask], y_test[mask], c=regime_colors[r], alpha=0.6, s=15, label=f"Actual {regime_names[r]}")
     ax4.set_xlabel("Time")
     ax4.set_ylabel("Value")
     ax4.set_title(f"4. Regime Estimation (Acc: {regime_acc:.1%})")
@@ -604,8 +580,7 @@ def create_regime_demo(X, y, regime_true, config: BenchmarkConfig, output_path: 
     # 5. Regime Probability Over Time
     ax5 = fig.add_subplot(2, 3, 5)
     for r in range(2):
-        ax5.fill_between(t_test, 0, regime_proba[:, r], alpha=0.5,
-                        color=regime_colors[r], label=regime_names[r])
+        ax5.fill_between(t_test, 0, regime_proba[:, r], alpha=0.5, color=regime_colors[r], label=regime_names[r])
     regime_changes = np.where(np.diff(regime_test) != 0)[0]
     for rc in regime_changes:
         ax5.axvline(x=t_test[rc], color="black", linestyle="--", alpha=0.5)
@@ -622,8 +597,8 @@ def create_regime_demo(X, y, regime_true, config: BenchmarkConfig, output_path: 
     errors_moe = [np.abs(y_test[regime_test == r] - pred_moe[regime_test == r]).mean() for r in range(2)]
     x_pos = np.arange(2)
     width = 0.35
-    ax6.bar(x_pos - width/2, errors_std, width, label="Standard", color="steelblue", alpha=0.7)
-    ax6.bar(x_pos + width/2, errors_moe, width, label="MoE", color="forestgreen", alpha=0.7)
+    ax6.bar(x_pos - width / 2, errors_std, width, label="Standard", color="steelblue", alpha=0.7)
+    ax6.bar(x_pos + width / 2, errors_moe, width, label="MoE", color="forestgreen", alpha=0.7)
     ax6.set_xlabel("True Regime")
     ax6.set_ylabel("MAE")
     ax6.set_title("6. MAE by Regime")
@@ -694,16 +669,16 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
         moe_acc = analysis_moe["regime_accuracy"]
         pe_acc = analysis_pe["regime_accuracy"]
 
-        lines.append(
-            f"| {name} | {moe_corr} | {pe_corr} | {moe_acc:.1%} | {pe_acc:.1%} |"
-        )
+        lines.append(f"| {name} | {moe_corr} | {pe_corr} | {moe_acc:.1%} | {pe_acc:.1%} |")
 
     lines.append("")
     lines.append("**Notes**:")
     lines.append("- **Expert Corr (min/max)**: Min and max pairwise correlation between expert predictions")
     lines.append("  - min: Most differentiated pair (lower = better separation)")
     lines.append("  - max: Most similar pair (if ~1.0, some experts may have collapsed)")
-    lines.append("- **Regime Acc**: Classification accuracy of predicted regime vs true regime (with best label permutation)")
+    lines.append(
+        "- **Regime Acc**: Classification accuracy of predicted regime vs true regime (with best label permutation)"
+    )
     lines.append("")
 
     # Selected Hyperparameters Section
@@ -767,7 +742,9 @@ def print_final_summary(all_results: dict):
     print("=" * 140)
 
     # Results table with expert count
-    print(f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>10} {'Best Impr':>10} {'MoE K':>6} {'PE K':>5} {'MoE Corr':>12} {'PE Corr':>12} {'MoE Acc':>8} {'PE Acc':>8}")
+    print(
+        f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>10} {'Best Impr':>10} {'MoE K':>6} {'PE K':>5} {'MoE Corr':>12} {'PE Corr':>12} {'MoE Acc':>8} {'PE Acc':>8}"
+    )
     print("-" * 140)
 
     for name, results in all_results.items():
@@ -786,7 +763,9 @@ def print_final_summary(all_results: dict):
         moe_acc = f"{analysis_moe['regime_accuracy']:.1%}"
         pe_acc = f"{analysis_pe['regime_accuracy']:.1%}"
 
-        print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {improvement:>+9.1f}% {moe_k:>6} {pe_k:>5} {moe_corr:>12} {pe_corr:>12} {moe_acc:>8} {pe_acc:>8}")
+        print(
+            f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {improvement:>+9.1f}% {moe_k:>6} {pe_k:>5} {moe_corr:>12} {pe_corr:>12} {moe_acc:>8} {pe_acc:>8}"
+        )
 
     print("\n" + "-" * 140)
     print("K: Number of experts | Corr: Expert correlation (min/max) | Acc: Regime classification accuracy")
@@ -801,15 +780,19 @@ def print_final_summary(all_results: dict):
 
         # Standard GBDT
         std_params = results["Standard"]["params"]
-        print(f"  Standard: depth={std_params.get('max_depth', '?')}, leaves={std_params.get('num_leaves', '?')}, "
-              f"min_data={std_params.get('min_data_in_leaf', '?')}, lr={std_params.get('learning_rate', 0):.4f}")
+        print(
+            f"  Standard: depth={std_params.get('max_depth', '?')}, leaves={std_params.get('num_leaves', '?')}, "
+            f"min_data={std_params.get('min_data_in_leaf', '?')}, lr={std_params.get('learning_rate', 0):.4f}"
+        )
 
         # MoE
         moe_params = results["MoE"]["params"]
         moe_k = moe_params.get("mixture_num_experts", 2)
-        print(f"  MoE:      K={moe_k}, depth={moe_params.get('max_depth', '?')}, leaves={moe_params.get('num_leaves', '?')}, "
-              f"min_data={moe_params.get('min_data_in_leaf', '?')}, lr={moe_params.get('learning_rate', 0):.4f}, "
-              f"alpha={moe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={moe_params.get('mixture_warmup_iters', '?')}")
+        print(
+            f"  MoE:      K={moe_k}, depth={moe_params.get('max_depth', '?')}, leaves={moe_params.get('num_leaves', '?')}, "
+            f"min_data={moe_params.get('min_data_in_leaf', '?')}, lr={moe_params.get('learning_rate', 0):.4f}, "
+            f"alpha={moe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={moe_params.get('mixture_warmup_iters', '?')}"
+        )
 
         # MoE-PE (per-expert)
         pe_params = results["MoE-PE"]["params"]
@@ -817,8 +800,10 @@ def print_final_summary(all_results: dict):
         depths = [pe_params.get(f"max_depth_{k}", "?") for k in range(pe_k)]
         leaves = [pe_params.get(f"num_leaves_{k}", "?") for k in range(pe_k)]
         min_data = [pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(pe_k)]
-        print(f"  MoE-PE:   K={pe_k}, lr={pe_params.get('learning_rate', 0):.4f}, "
-              f"alpha={pe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={pe_params.get('mixture_warmup_iters', '?')}")
+        print(
+            f"  MoE-PE:   K={pe_k}, lr={pe_params.get('learning_rate', 0):.4f}, "
+            f"alpha={pe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={pe_params.get('mixture_warmup_iters', '?')}"
+        )
         for k in range(pe_k):
             print(f"            E{k}: depth={depths[k]}, leaves={leaves[k]}, min_data={min_data[k]}")
 

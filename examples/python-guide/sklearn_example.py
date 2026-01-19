@@ -11,12 +11,8 @@ import lightgbm_moe as lgb
 print("Loading data...")
 # load or create your dataset
 regression_example_dir = Path(__file__).absolute().parents[1] / "regression"
-df_train = pd.read_csv(
-    str(regression_example_dir / "regression.train"), header=None, sep="\t"
-)
-df_test = pd.read_csv(
-    str(regression_example_dir / "regression.test"), header=None, sep="\t"
-)
+df_train = pd.read_csv(str(regression_example_dir / "regression.train"), header=None, sep="\t")
+df_test = pd.read_csv(str(regression_example_dir / "regression.test"), header=None, sep="\t")
 
 y_train = df_train[0]
 y_test = df_test[0]

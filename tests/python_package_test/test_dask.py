@@ -56,41 +56,29 @@ task_to_local_factory = {
 }
 
 pytestmark = [
-    pytest.mark.skipif(
-        getenv("TASK", "") == "mpi", reason="Fails to run with MPI interface"
-    ),
-    pytest.mark.skipif(
-        getenv("TASK", "") == "gpu", reason="Fails to run with GPU interface"
-    ),
-    pytest.mark.skipif(
-        getenv("TASK", "") == "cuda", reason="Fails to run with CUDA interface"
-    ),
+    pytest.mark.skipif(getenv("TASK", "") == "mpi", reason="Fails to run with MPI interface"),
+    pytest.mark.skipif(getenv("TASK", "") == "gpu", reason="Fails to run with GPU interface"),
+    pytest.mark.skipif(getenv("TASK", "") == "cuda", reason="Fails to run with CUDA interface"),
 ]
 
 
 @pytest.fixture(scope="module")
 def cluster():
-    dask_cluster = LocalCluster(
-        n_workers=2, threads_per_worker=2, dashboard_address=None
-    )
+    dask_cluster = LocalCluster(n_workers=2, threads_per_worker=2, dashboard_address=None)
     yield dask_cluster
     dask_cluster.close()
 
 
 @pytest.fixture(scope="module")
 def cluster2():
-    dask_cluster = LocalCluster(
-        n_workers=2, threads_per_worker=2, dashboard_address=None
-    )
+    dask_cluster = LocalCluster(n_workers=2, threads_per_worker=2, dashboard_address=None)
     yield dask_cluster
     dask_cluster.close()
 
 
 @pytest.fixture(scope="module")
 def cluster_three_workers():
-    dask_cluster = LocalCluster(
-        n_workers=3, threads_per_worker=1, dashboard_address=None
-    )
+    dask_cluster = LocalCluster(n_workers=3, threads_per_worker=1, dashboard_address=None)
     yield dask_cluster
     dask_cluster.close()
 
@@ -140,9 +128,7 @@ def _create_ranking_data(n_samples=100, output="array", chunk_size=50, **kwargs)
 
         # encode group identifiers into run-length encoding, the format LightGBMRanker is expecting
         # so that within each partition, sum(g) = n_samples.
-        dg = dg.map_partitions(
-            lambda p: p.groupby("g", sort=False).apply(lambda z: z.shape[0])
-        )
+        dg = dg.map_partitions(lambda p: p.groupby("g", sort=False).apply(lambda z: z.shape[0]))
     elif output == "array":
         # ranking arrays: one chunk per group. Each chunk must include all columns.
         p = X.shape[1]
@@ -159,9 +145,7 @@ def _create_ranking_data(n_samples=100, output="array", chunk_size=50, **kwargs)
         dw = da.concatenate(dw, axis=0)
         dg = da.concatenate(dg, axis=0)
     else:
-        raise ValueError(
-            "Ranking data creation only supported for Dask arrays and dataframes"
-        )
+        raise ValueError("Ranking data creation only supported for Dask arrays and dataframes")
 
     return X, y, w, g_rle, dX, dy, dw, dg
 
@@ -176,13 +160,9 @@ def _create_data(objective, n_samples=1_000, output="array", chunk_size=500, **k
             raise ValueError(f"Unknown classification task '{objective}'")
         X, y = make_blobs(n_samples=n_samples, centers=centers, random_state=42)
     elif objective == "regression":
-        X, y = make_regression(
-            n_samples=n_samples, n_features=4, n_informative=2, random_state=42
-        )
+        X, y = make_regression(n_samples=n_samples, n_features=4, n_informative=2, random_state=42)
     elif objective == "ranking":
-        return _create_ranking_data(
-            n_samples=n_samples, output=output, chunk_size=chunk_size, **kwargs
-        )
+        return _create_ranking_data(n_samples=n_samples, output=output, chunk_size=chunk_size, **kwargs)
     else:
         raise ValueError(f"Unknown objective '{objective}'")
     rnd = np.random.RandomState(42)
@@ -294,9 +274,7 @@ def test_classifier(output, task, boosting_type, tree_learner, cluster):
         dask_classifier = dask_classifier.fit(dX, dy, sample_weight=dw)
         p1 = dask_classifier.predict(dX)
         p1_raw = dask_classifier.predict(dX, raw_score=True).compute()
-        p1_first_iter_raw = dask_classifier.predict(
-            dX, start_iteration=0, num_iteration=1, raw_score=True
-        ).compute()
+        p1_first_iter_raw = dask_classifier.predict(dX, start_iteration=0, num_iteration=1, raw_score=True).compute()
         p1_early_stop_raw = dask_classifier.predict(
             dX,
             pred_early_stop=True,
@@ -365,9 +343,7 @@ def test_classifier_pred_contrib(output, task, cluster):
 
         params = {"n_estimators": 10, "num_leaves": 10}
 
-        dask_classifier = lgb.DaskLGBMClassifier(
-            client=client, time_out=5, tree_learner="data", **params
-        )
+        dask_classifier = lgb.DaskLGBMClassifier(client=client, time_out=5, tree_learner="data", **params)
         dask_classifier = dask_classifier.fit(dX, dy, sample_weight=dw)
         preds_with_contrib = dask_classifier.predict(dX, pred_contrib=True)
 
@@ -397,9 +373,7 @@ def test_classifier_pred_contrib(output, task, cluster):
                 raise ValueError(f"Unrecognized output type: {output}")
             assert isinstance(preds_with_contrib, list)
             assert all(isinstance(arr, da.Array) for arr in preds_with_contrib)
-            assert all(
-                isinstance(arr._meta, expected_type) for arr in preds_with_contrib
-            )
+            assert all(isinstance(arr._meta, expected_type) for arr in preds_with_contrib)
             assert len(preds_with_contrib) == num_classes
             assert len(preds_with_contrib) == len(local_preds_with_contrib)
             for i in range(num_classes):
@@ -410,9 +384,7 @@ def test_classifier_pred_contrib(output, task, cluster):
                 assert len(np.unique(computed_preds[:, -1])) == 1
                 # raw scores will probably be different, but at least check that all predicted classes are the same
                 pred_classes = np.argmax(computed_preds.toarray(), axis=1)
-                local_pred_classes = np.argmax(
-                    local_preds_with_contrib[i].toarray(), axis=1
-                )
+                local_pred_classes = np.argmax(local_preds_with_contrib[i].toarray(), axis=1)
                 np_assert_array_equal(pred_classes, local_pred_classes, strict=True)
             return
 
@@ -470,13 +442,9 @@ def test_classifier_custom_objective(output, task, cluster):
                 }
             )
         elif task == "multiclass-classification":
-            params.update(
-                {"objective": sklearn_multiclass_custom_objective, "num_classes": 3}
-            )
+            params.update({"objective": sklearn_multiclass_custom_objective, "num_classes": 3})
 
-        dask_classifier = lgb.DaskLGBMClassifier(
-            client=client, time_out=5, tree_learner="data", **params
-        )
+        dask_classifier = lgb.DaskLGBMClassifier(client=client, time_out=5, tree_learner="data", **params)
         dask_classifier = dask_classifier.fit(dX, dy, sample_weight=dw)
         dask_classifier_local = dask_classifier.to_local()
         p1_raw = dask_classifier.predict(dX, raw_score=True).compute()
@@ -497,9 +465,7 @@ def test_classifier_custom_objective(output, task, cluster):
         elif task == "multiclass-classification":
             p1_proba = np.exp(p1_raw) / np.sum(np.exp(p1_raw), axis=1).reshape(-1, 1)
             p1_class = p1_proba.argmax(axis=1)
-            p1_proba_local = np.exp(p1_raw_local) / np.sum(
-                np.exp(p1_raw_local), axis=1
-            ).reshape(-1, 1)
+            p1_proba_local = np.exp(p1_raw_local) / np.sum(np.exp(p1_raw_local), axis=1).reshape(-1, 1)
             p1_class_local = p1_proba_local.argmax(axis=1)
             p2_proba = np.exp(p2_raw) / np.sum(np.exp(p2_raw), axis=1).reshape(-1, 1)
             p2_class = p2_proba.argmax(axis=1)
@@ -521,27 +487,19 @@ def test_classifier_custom_objective(output, task, cluster):
 def test_machines_to_worker_map_unparsable_host_names():
     workers = {"0.0.0.1:80": {}, "0.0.0.2:80": {}}
     machines = "0.0.0.1:80,0.0.0.2:80"
-    with pytest.raises(
-        ValueError, match="Could not parse host name from worker address '0.0.0.1:80'"
-    ):
-        lgb.dask._machines_to_worker_map(
-            machines=machines, worker_addresses=workers.keys()
-        )
+    with pytest.raises(ValueError, match="Could not parse host name from worker address '0.0.0.1:80'"):
+        lgb.dask._machines_to_worker_map(machines=machines, worker_addresses=workers.keys())
 
 
 def test_training_does_not_fail_on_port_conflicts(cluster):
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, dw, _ = _create_data(
-            "binary-classification", output="array"
-        )
+        _, _, _, _, dX, dy, dw, _ = _create_data("binary-classification", output="array")
 
         lightgbm_default_port = 12400
         workers_hostname = _get_workers_hostname(cluster)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind((workers_hostname, lightgbm_default_port))
-            dask_classifier = lgb.DaskLGBMClassifier(
-                client=client, time_out=5, n_estimators=5, num_leaves=5
-            )
+            dask_classifier = lgb.DaskLGBMClassifier(client=client, time_out=5, n_estimators=5, num_leaves=5)
             for _ in range(5):
                 dask_classifier.fit(
                     X=dX,
@@ -572,9 +530,7 @@ def test_regressor(output, boosting_type, tree_learner, cluster):
                 }
             )
 
-        dask_regressor = lgb.DaskLGBMRegressor(
-            client=client, time_out=5, tree=tree_learner, **params
-        )
+        dask_regressor = lgb.DaskLGBMRegressor(client=client, time_out=5, tree=tree_learner, **params)
         dask_regressor = dask_regressor.fit(dX, dy, sample_weight=dw)
         p1 = dask_regressor.predict(dX)
         p1_pred_leaf = dask_regressor.predict(dX, pred_leaf=True)
@@ -582,9 +538,7 @@ def test_regressor(output, boosting_type, tree_learner, cluster):
         s1 = _r2_score(dy, p1)
         p1 = p1.compute()
         p1_raw = dask_regressor.predict(dX, raw_score=True).compute()
-        p1_first_iter_raw = dask_regressor.predict(
-            dX, start_iteration=0, num_iteration=1, raw_score=True
-        ).compute()
+        p1_first_iter_raw = dask_regressor.predict(dX, start_iteration=0, num_iteration=1, raw_score=True).compute()
         p1_local = dask_regressor.to_local().predict(X)
         s1_local = dask_regressor.to_local().score(X, y)
 
@@ -632,9 +586,7 @@ def test_regressor_pred_contrib(output, cluster):
 
         params = {"n_estimators": 10, "num_leaves": 10}
 
-        dask_regressor = lgb.DaskLGBMRegressor(
-            client=client, time_out=5, tree_learner="data", **params
-        )
+        dask_regressor = lgb.DaskLGBMRegressor(client=client, time_out=5, tree_learner="data", **params)
         dask_regressor = dask_regressor.fit(dX, dy, sample_weight=dw)
         preds_with_contrib = dask_regressor.predict(dX, pred_contrib=True).compute()
 
@@ -675,9 +627,7 @@ def test_regressor_quantile(output, alpha, cluster):
             "num_leaves": 10,
         }
 
-        dask_regressor = lgb.DaskLGBMRegressor(
-            client=client, tree_learner_type="data_parallel", **params
-        )
+        dask_regressor = lgb.DaskLGBMRegressor(client=client, tree_learner_type="data_parallel", **params)
         dask_regressor = dask_regressor.fit(dX, dy, sample_weight=dw)
         p1 = dask_regressor.predict(dX).compute()
         q1 = np.count_nonzero(y < p1) / y.shape[0]
@@ -712,9 +662,7 @@ def test_regressor_custom_objective(output, cluster):
             "objective": _objective_least_squares,
         }
 
-        dask_regressor = lgb.DaskLGBMRegressor(
-            client=client, time_out=5, tree_learner="data", **params
-        )
+        dask_regressor = lgb.DaskLGBMRegressor(client=client, time_out=5, tree_learner="data", **params)
         dask_regressor = dask_regressor.fit(dX, dy, sample_weight=dw)
         dask_regressor_local = dask_regressor.to_local()
         p1 = dask_regressor.predict(dX)
@@ -767,9 +715,7 @@ def test_ranker(output, group, boosting_type, tree_learner, cluster):
                 n_informative=1,
             )
         else:
-            X, y, w, g, dX, dy, dw, dg = _create_data(
-                objective="ranking", output=output, group=group
-            )
+            X, y, w, g, dX, dy, dw, dg = _create_data(objective="ranking", output=output, group=group)
 
         # rebalance small dask.Array dataset for better performance.
         if output == "array":
@@ -797,17 +743,13 @@ def test_ranker(output, group, boosting_type, tree_learner, cluster):
                 }
             )
 
-        dask_ranker = lgb.DaskLGBMRanker(
-            client=client, time_out=5, tree_learner_type=tree_learner, **params
-        )
+        dask_ranker = lgb.DaskLGBMRanker(client=client, time_out=5, tree_learner_type=tree_learner, **params)
         dask_ranker = dask_ranker.fit(dX, dy, sample_weight=dw, group=dg)
         rnkvec_dask = dask_ranker.predict(dX)
         rnkvec_dask = rnkvec_dask.compute()
         p1_pred_leaf = dask_ranker.predict(dX, pred_leaf=True)
         p1_raw = dask_ranker.predict(dX, raw_score=True).compute()
-        p1_first_iter_raw = dask_ranker.predict(
-            dX, start_iteration=0, num_iteration=1, raw_score=True
-        ).compute()
+        p1_first_iter_raw = dask_ranker.predict(dX, start_iteration=0, num_iteration=1, raw_score=True).compute()
         p1_early_stop_raw = dask_ranker.predict(
             dX,
             pred_early_stop=True,
@@ -865,9 +807,7 @@ def test_ranker_custom_objective(output, cluster):
                 n_informative=1,
             )
         else:
-            X, y, w, g, dX, dy, dw, dg = _create_data(
-                objective="ranking", output=output, group=group_sizes
-            )
+            X, y, w, g, dX, dy, dw, dg = _create_data(objective="ranking", output=output, group=group_sizes)
 
         # rebalance small dask.Array dataset for better performance.
         if output == "array":
@@ -886,9 +826,7 @@ def test_ranker_custom_objective(output, cluster):
             "objective": _objective_least_squares,
         }
 
-        dask_ranker = lgb.DaskLGBMRanker(
-            client=client, time_out=5, tree_learner_type="data", **params
-        )
+        dask_ranker = lgb.DaskLGBMRanker(client=client, time_out=5, tree_learner_type="data", **params)
         dask_ranker = dask_ranker.fit(dX, dy, sample_weight=dw, group=dg)
         rnkvec_dask = dask_ranker.predict(dX).compute()
         dask_ranker_local = dask_ranker.to_local()
@@ -913,9 +851,7 @@ def test_ranker_custom_objective(output, cluster):
 @pytest.mark.parametrize("output", data_output)
 @pytest.mark.parametrize("eval_sizes", [[0.5, 1, 1.5], [0]])
 @pytest.mark.parametrize("eval_names_prefix", ["specified", None])
-def test_eval_set_no_early_stopping(
-    task, output, eval_sizes, eval_names_prefix, cluster
-):
+def test_eval_set_no_early_stopping(task, output, eval_sizes, eval_names_prefix, cluster):
     if task == "ranking" and output == "scipy_csr_matrix":
         pytest.skip("LGBMRanker is not currently tested on sparse matrices")
 
@@ -987,13 +923,9 @@ def test_eval_set_no_early_stopping(
                 eval_class_weight.append({0: n_neg / n_pos, 1: n_pos / n_neg})
                 init_score_value = np.log(np.mean(y_e) / (1 - np.mean(y_e)))
                 if "dataframe" in output:
-                    d_init_score = dy_e.map_partitions(
-                        lambda x, val=init_score_value: pd.Series([val] * x.size)
-                    )
+                    d_init_score = dy_e.map_partitions(lambda x, val=init_score_value: pd.Series([val] * x.size))
                 else:
-                    d_init_score = dy_e.map_blocks(
-                        lambda x, val=init_score_value: np.repeat(val, x.size)
-                    )
+                    d_init_score = dy_e.map_blocks(lambda x, val=init_score_value: np.repeat(val, x.size))
 
                 eval_init_score.append(d_init_score)
 
@@ -1013,9 +945,7 @@ def test_eval_set_no_early_stopping(
             "eval_metric": eval_metrics,
         }
         if task == "ranking":
-            fit_params.update(
-                {"group": dg, "eval_group": eval_group, "eval_at": eval_at}
-            )
+            fit_params.update({"group": dg, "eval_group": eval_group, "eval_at": eval_at})
         elif task == "binary-classification":
             fit_params.update({"eval_class_weight": eval_class_weight})
 
@@ -1124,9 +1054,7 @@ def test_eval_set_with_custom_eval_metric(task, cluster):
 @pytest.mark.parametrize("task", tasks)
 def test_training_works_if_client_not_provided_or_set_after_construction(task, cluster):
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, _, dg = _create_data(
-            objective=task, output="array", group=None
-        )
+        _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output="array", group=None)
         model_factory = task_to_dask_factory[task]
 
         params = {"time_out": 5, "n_estimators": 1, "num_leaves": 2}
@@ -1198,15 +1126,11 @@ def test_model_and_local_version_are_picklable_whether_or_not_client_set_explici
 ):
     with Client(cluster) as client1:
         # data on cluster1
-        X_1, _, _, _, dX_1, dy_1, _, dg_1 = _create_data(
-            objective=task, output="array", group=None
-        )
+        X_1, _, _, _, dX_1, dy_1, _, dg_1 = _create_data(objective=task, output="array", group=None)
 
         with Client(cluster2) as client2:
             # create identical data on cluster2
-            X_2, _, _, _, dX_2, dy_2, _, dg_2 = _create_data(
-                objective=task, output="array", group=None
-            )
+            X_2, _, _, _, dX_2, dy_2, _, dg_2 = _create_data(objective=task, output="array", group=None)
 
             model_factory = task_to_dask_factory[task]
 
@@ -1242,9 +1166,7 @@ def test_model_and_local_version_are_picklable_whether_or_not_client_set_explici
 
             local_tmp_file = tmp_path / "local-model-1.pkl"
             pickle_obj(obj=local_model, filepath=local_tmp_file, serializer=serializer)
-            local_model_from_disk = unpickle_obj(
-                filepath=local_tmp_file, serializer=serializer
-            )
+            local_model_from_disk = unpickle_obj(filepath=local_tmp_file, serializer=serializer)
 
             assert model_from_disk.client is None
 
@@ -1289,15 +1211,11 @@ def test_model_and_local_version_are_picklable_whether_or_not_client_set_explici
 
             tmp_file2 = tmp_path / "model-2.pkl"
             pickle_obj(obj=dask_model, filepath=tmp_file2, serializer=serializer)
-            fitted_model_from_disk = unpickle_obj(
-                filepath=tmp_file2, serializer=serializer
-            )
+            fitted_model_from_disk = unpickle_obj(filepath=tmp_file2, serializer=serializer)
 
             local_tmp_file2 = tmp_path / "local-model-2.pkl"
             pickle_obj(obj=local_model, filepath=local_tmp_file2, serializer=serializer)
-            local_fitted_model_from_disk = unpickle_obj(
-                filepath=local_tmp_file2, serializer=serializer
-            )
+            local_fitted_model_from_disk = unpickle_obj(filepath=local_tmp_file2, serializer=serializer)
 
             if set_client:
                 assert dask_model.client == client1
@@ -1349,9 +1267,7 @@ def test_warns_and_continues_on_unrecognized_tree_learner(cluster):
             n_estimators=1,
             num_leaves=2,
         )
-        with pytest.warns(
-            UserWarning, match="Parameter tree_learner set to some-nonsense-value"
-        ):
+        with pytest.warns(UserWarning, match="Parameter tree_learner set to some-nonsense-value"):
             dask_regressor = dask_regressor.fit(X, y)
 
         assert dask_regressor.fitted_
@@ -1390,9 +1306,7 @@ def test_error_on_feature_parallel_tree_learner(cluster):
             n_estimators=1,
             num_leaves=2,
         )
-        with pytest.raises(
-            lgb.basic.LightGBMError, match="Do not support feature parallel in c api"
-        ):
+        with pytest.raises(lgb.basic.LightGBMError, match="Do not support feature parallel in c api"):
             dask_regressor = dask_regressor.fit(X, y)
 
 
@@ -1417,9 +1331,7 @@ def test_errors(cluster):
 
 @pytest.mark.parametrize("task", tasks)
 @pytest.mark.parametrize("output", data_output)
-def test_training_succeeds_even_if_some_workers_do_not_have_any_data(
-    task, output, cluster_three_workers
-):
+def test_training_succeeds_even_if_some_workers_do_not_have_any_data(task, output, cluster_three_workers):
     if task == "ranking" and output == "scipy_csr_matrix":
         pytest.skip("LGBMRanker is not currently tested on sparse matrices")
 
@@ -1472,9 +1384,7 @@ def test_training_succeeds_even_if_some_workers_do_not_have_any_data(
 @pytest.mark.parametrize("task", tasks)
 def test_network_params_not_required_but_respected_if_given(task, listen_port, cluster):
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, _, dg = _create_data(
-            objective=task, output="array", chunk_size=10, group=None
-        )
+        _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output="array", chunk_size=10, group=None)
 
         dask_model_factory = task_to_dask_factory[task]
 
@@ -1495,17 +1405,13 @@ def test_network_params_not_required_but_respected_if_given(task, listen_port, c
         # model 2 - machines given
         workers = list(client.scheduler_info()["workers"])
         workers_hostname = _get_workers_hostname(cluster)
-        remote_sockets, open_ports = lgb.dask._assign_open_ports_to_workers(
-            client, workers
-        )
+        remote_sockets, open_ports = lgb.dask._assign_open_ports_to_workers(client, workers)
         for s in remote_sockets.values():
             s.release()
         dask_model2 = dask_model_factory(
             n_estimators=5,
             num_leaves=5,
-            machines=",".join(
-                [f"{workers_hostname}:{port}" for port in open_ports.values()]
-            ),
+            machines=",".join([f"{workers_hostname}:{port}" for port in open_ports.values()]),
         )
 
         dask_model2.fit(dX, dy, group=dg)
@@ -1517,9 +1423,7 @@ def test_network_params_not_required_but_respected_if_given(task, listen_port, c
         # model 3 - local_listen_port given
         # training should fail because LightGBM will try to use the same
         # port for multiple worker processes on the same machine
-        dask_model3 = dask_model_factory(
-            n_estimators=5, num_leaves=5, local_listen_port=listen_port
-        )
+        dask_model3 = dask_model_factory(n_estimators=5, num_leaves=5, local_listen_port=listen_port)
         error_msg = "has multiple Dask worker processes running on it"
         with pytest.raises(lgb.basic.LightGBMError, match=error_msg):
             dask_model3.fit(dX, dy, group=dg)
@@ -1527,13 +1431,9 @@ def test_network_params_not_required_but_respected_if_given(task, listen_port, c
 
 @pytest.mark.parametrize("task", tasks)
 def test_machines_should_be_used_if_provided(task, cluster):
-    pytest.skip(
-        "skipping due to timeout issues discussed in https://github.com/microsoft/LightGBM/issues/5390"
-    )
+    pytest.skip("skipping due to timeout issues discussed in https://github.com/microsoft/LightGBM/issues/5390")
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, _, dg = _create_data(
-            objective=task, output="array", chunk_size=10, group=None
-        )
+        _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output="array", chunk_size=10, group=None)
 
         dask_model_factory = task_to_dask_factory[task]
 
@@ -1563,9 +1463,7 @@ def test_machines_should_be_used_if_provided(task, cluster):
 
         # an informative error should be raised if "machines" has duplicates
         one_open_port = lgb.dask._find_n_open_ports(1)
-        dask_model.set_params(
-            machines=",".join([f"127.0.0.1:{one_open_port}" for _ in range(n_workers)])
-        )
+        dask_model.set_params(machines=",".join([f"127.0.0.1:{one_open_port}" for _ in range(n_workers)]))
         with pytest.raises(ValueError, match="Found duplicates in 'machines'"):
             dask_model.fit(dX, dy, group=dg)
 
@@ -1578,9 +1476,7 @@ def test_machines_should_be_used_if_provided(task, cluster):
         (lgb.DaskLGBMRanker, lgb.LGBMRanker),
     ],
 )
-def test_dask_classes_and_sklearn_equivalents_have_identical_constructors_except_client_arg(
-    dask_est, sklearn_est
-):
+def test_dask_classes_and_sklearn_equivalents_have_identical_constructors_except_client_arg(dask_est, sklearn_est):
     dask_spec = inspect.getfullargspec(dask_est)
     sklearn_spec = inspect.getfullargspec(sklearn_est)
 
@@ -1640,13 +1536,9 @@ def test_dask_methods_and_sklearn_equivalents_have_similar_signatures(methods):
 
 
 @pytest.mark.parametrize("task", tasks)
-def test_training_succeeds_when_data_is_dataframe_and_label_is_column_array(
-    task, cluster
-):
+def test_training_succeeds_when_data_is_dataframe_and_label_is_column_array(task, cluster):
     with Client(cluster):
-        _, _, _, _, dX, dy, dw, dg = _create_data(
-            objective=task, output="dataframe", group=None
-        )
+        _, _, _, _, dX, dy, dw, dg = _create_data(objective=task, output="dataframe", group=None)
 
         model_factory = task_to_dask_factory[task]
 
@@ -1668,9 +1560,7 @@ def test_init_score(task, output, cluster, rng):
         pytest.skip("LGBMRanker is not currently tested on sparse matrices")
 
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, dw, dg = _create_data(
-            objective=task, output=output, group=None
-        )
+        _, _, _, _, dX, dy, dw, dg = _create_data(objective=task, output=output, group=None)
 
         model_factory = task_to_dask_factory[task]
 
@@ -1688,13 +1578,9 @@ def test_init_score(task, output, cluster, rng):
             num_classes = 3
 
         if output.startswith("dataframe"):
-            init_scores = dy.map_partitions(
-                lambda x: pd.DataFrame(rng.uniform(size=(x.size, num_classes)))
-            )
+            init_scores = dy.map_partitions(lambda x: pd.DataFrame(rng.uniform(size=(x.size, num_classes))))
         else:
-            init_scores = dy.map_blocks(
-                lambda x: rng.uniform(size=(x.size, num_classes))
-            )
+            init_scores = dy.map_blocks(lambda x: rng.uniform(size=(x.size, num_classes)))
 
         model = model_factory(client=client, **params)
         model.fit(dX, dy, sample_weight=dw, group=dg)
@@ -1750,9 +1636,7 @@ def test_predict_with_raw_score(task, output, cluster):
         pytest.skip("LGBMRanker is not currently tested on sparse matrices")
 
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, _, dg = _create_data(
-            objective=task, output=output, group=None
-        )
+        _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output=output, group=None)
 
         model_factory = task_to_dask_factory[task]
         params = {
@@ -1784,18 +1668,14 @@ def test_predict_with_raw_score(task, output, cluster):
 @pytest.mark.parametrize("use_init_score", [False, True])
 def test_predict_stump(output, use_init_score, cluster, rng):
     with Client(cluster) as client:
-        _, _, _, _, dX, dy, _, _ = _create_data(
-            objective="binary-classification", n_samples=1_000, output=output
-        )
+        _, _, _, _, dX, dy, _, _ = _create_data(objective="binary-classification", n_samples=1_000, output=output)
 
         params = {"objective": "binary", "n_estimators": 5, "min_data_in_leaf": 1_000}
 
         if not use_init_score:
             init_scores = None
         elif output.startswith("dataframe"):
-            init_scores = dy.map_partitions(
-                lambda x: pd.DataFrame(rng.uniform(size=x.size))
-            )
+            init_scores = dy.map_partitions(lambda x: pd.DataFrame(rng.uniform(size=x.size)))
         else:
             init_scores = dy.map_blocks(lambda x: rng.uniform(size=x.size))
 
@@ -1837,9 +1717,7 @@ def test_distributed_quantized_training(tmp_path, cluster):
             "verbose": -1,
         }
 
-        quant_dask_classifier = lgb.DaskLGBMRegressor(
-            client=client, time_out=5, **params
-        )
+        quant_dask_classifier = lgb.DaskLGBMRegressor(client=client, time_out=5, **params)
         quant_dask_classifier = quant_dask_classifier.fit(dX, dy, sample_weight=dw)
         quant_p1 = quant_dask_classifier.predict(dX)
         quant_rmse = np.sqrt(np.mean((quant_p1.compute() - y) ** 2))

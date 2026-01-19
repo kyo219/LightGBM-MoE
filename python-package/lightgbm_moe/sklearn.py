@@ -1100,7 +1100,7 @@ class LGBMModel(_LGBMModelBase):
         pred_contrib: bool = False,
         validate_features: bool = False,
         **kwargs: Any,
-    ):
+    ) -> np.ndarray:
         """Docstring is set after definition, using a template."""
         if not self.__sklearn_is_fitted__():
             raise LGBMNotFittedError("Estimator not fitted, call fit before exploiting the model.")
@@ -1593,7 +1593,7 @@ class LGBMClassifier(_LGBMClassifierBase, LGBMModel):
         pred_contrib: bool = False,
         validate_features: bool = False,
         **kwargs: Any,
-    ):
+    ) -> np.ndarray:
         """Docstring is inherited from the LGBMModel."""
         result = self.predict_proba(
             X=X,
@@ -1623,7 +1623,7 @@ class LGBMClassifier(_LGBMClassifierBase, LGBMModel):
         pred_contrib: bool = False,
         validate_features: bool = False,
         **kwargs: Any,
-    ):
+    ) -> np.ndarray:
         """Docstring is set after definition, using a template."""
         result = super().predict(
             X=X,

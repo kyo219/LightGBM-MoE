@@ -1253,7 +1253,7 @@ class DaskLGBMClassifier(LGBMClassifier, _DaskLGBMModel):
         return _predict(
             model=self.to_local(),
             data=X,
-            dtype=self.classes_.dtype,
+            dtype=self.classes_.dtype.type,
             client=_get_dask_client(self.client),
             raw_score=raw_score,
             start_iteration=start_iteration,

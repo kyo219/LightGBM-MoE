@@ -24,23 +24,17 @@ from .utils import load_breast_cancer, make_synthetic_regression
 
 @pytest.fixture(scope="module")
 def breast_cancer_split():
-    return train_test_split(
-        *load_breast_cancer(return_X_y=True), test_size=0.1, random_state=1
-    )
+    return train_test_split(*load_breast_cancer(return_X_y=True), test_size=0.1, random_state=1)
 
 
 def _categorical_data(category_values_lower_bound, category_values_upper_bound):
     X, y = load_breast_cancer(return_X_y=True)
     X_df = pd.DataFrame()
     rnd = np.random.RandomState(0)
-    n_cat_values = rnd.randint(
-        category_values_lower_bound, category_values_upper_bound, size=X.shape[1]
-    )
+    n_cat_values = rnd.randint(category_values_lower_bound, category_values_upper_bound, size=X.shape[1])
     for i in range(X.shape[1]):
         bins = np.linspace(0, 1, num=n_cat_values[i] + 1)
-        X_df[f"cat_col_{i}"] = pd.qcut(
-            X[:, i], q=bins, labels=range(n_cat_values[i])
-        ).as_unordered()
+        X_df[f"cat_col_{i}"] = pd.qcut(X[:, i], q=bins, labels=range(n_cat_values[i])).as_unordered()
     return X_df, y
 
 
@@ -79,9 +73,7 @@ def test_plot_importance(params, breast_cancer_split, train_data):
     for patch in ax1.patches:
         assert patch.get_facecolor() == (1.0, 0, 0, 1.0)  # red
 
-    ax2 = lgb.plot_importance(
-        gbm0, color=["r", "y", "g", "b"], title=None, xlabel=None, ylabel=None
-    )
+    ax2 = lgb.plot_importance(gbm0, color=["r", "y", "g", "b"], title=None, xlabel=None, ylabel=None)
     assert isinstance(ax2, matplotlib.axes.Axes)
     assert ax2.get_title() == ""
     assert ax2.get_xlabel() == ""
@@ -113,32 +105,20 @@ def test_plot_importance(params, breast_cancer_split, train_data):
     assert len(ax4.patches) <= 30
 
     with pytest.raises(TypeError, match="xlim must be a tuple of 2 elements."):
-        lgb.plot_importance(
-            gbm0, title=None, xlabel=None, ylabel=None, xlim="not a tuple"
-        )
+        lgb.plot_importance(gbm0, title=None, xlabel=None, ylabel=None, xlim="not a tuple")
 
-    gbm2 = lgb.LGBMClassifier(
-        n_estimators=10, num_leaves=3, verbose=-1, importance_type="gain"
-    )
+    gbm2 = lgb.LGBMClassifier(n_estimators=10, num_leaves=3, verbose=-1, importance_type="gain")
     gbm2.fit(X_train, y_train)
 
     def get_bounds_of_first_patch(axes):
         return axes.patches[0].get_extents().bounds
 
     first_bar1 = get_bounds_of_first_patch(lgb.plot_importance(gbm1))
-    first_bar2 = get_bounds_of_first_patch(
-        lgb.plot_importance(gbm1, importance_type="split")
-    )
-    first_bar3 = get_bounds_of_first_patch(
-        lgb.plot_importance(gbm1, importance_type="gain")
-    )
+    first_bar2 = get_bounds_of_first_patch(lgb.plot_importance(gbm1, importance_type="split"))
+    first_bar3 = get_bounds_of_first_patch(lgb.plot_importance(gbm1, importance_type="gain"))
     first_bar4 = get_bounds_of_first_patch(lgb.plot_importance(gbm2))
-    first_bar5 = get_bounds_of_first_patch(
-        lgb.plot_importance(gbm2, importance_type="split")
-    )
-    first_bar6 = get_bounds_of_first_patch(
-        lgb.plot_importance(gbm2, importance_type="gain")
-    )
+    first_bar5 = get_bounds_of_first_patch(lgb.plot_importance(gbm2, importance_type="split"))
+    first_bar6 = get_bounds_of_first_patch(lgb.plot_importance(gbm2, importance_type="gain"))
 
     assert first_bar1 == first_bar2
     assert first_bar1 == first_bar5
@@ -230,9 +210,7 @@ def test_create_tree_digraph(tmp_path, breast_cancer_split):
     X_train, _, y_train, _ = breast_cancer_split
 
     constraints = [-1, 1] * int(X_train.shape[1] / 2)
-    gbm = lgb.LGBMClassifier(
-        n_estimators=10, num_leaves=3, verbose=-1, monotone_constraints=constraints
-    )
+    gbm = lgb.LGBMClassifier(n_estimators=10, num_leaves=3, verbose=-1, monotone_constraints=constraints)
     gbm.fit(X_train, y_train)
 
     with pytest.raises(IndexError, match="tree_index is out of range."):
@@ -427,9 +405,7 @@ def test_example_case_in_tree_digraph():
         while "decision_type" in node:  # iterate through the splits
             split_index = node["split_index"]
 
-            node_in_graph = [
-                n for n in gbody if f"split{split_index}" in n and "->" not in n
-            ]
+            node_in_graph = [n for n in gbody if f"split{split_index}" in n and "->" not in n]
             assert len(node_in_graph) == 1
             seen_indices.add(gbody.index(node_in_graph[0]))
 
@@ -460,22 +436,14 @@ def test_example_case_in_tree_digraph():
         assert "color=blue" in leaf_in_graph[0]
         assert len(edge_to_leaf) == 1
         assert "color=blue" in edge_to_leaf[0]
-        seen_indices.update(
-            [gbody.index(leaf_in_graph[0]), gbody.index(edge_to_leaf[0])]
-        )
+        seen_indices.update([gbody.index(leaf_in_graph[0]), gbody.index(edge_to_leaf[0])])
 
         # check that the rest of the elements have black color
-        remaining_elements = [
-            e
-            for i, e in enumerate(graph.body)
-            if i not in seen_indices and "graph" not in e
-        ]
+        remaining_elements = [e for i, e in enumerate(graph.body) if i not in seen_indices and "graph" not in e]
         assert all("color=black" in e for e in remaining_elements)
 
         # check that we got to the expected leaf
-        expected_leaf = bst.predict(
-            example_case, start_iteration=i, num_iteration=1, pred_leaf=True
-        )[0]
+        expected_leaf = bst.predict(example_case, start_iteration=i, num_iteration=1, pred_leaf=True)[0]
         assert leaf_index == expected_leaf
     assert makes_categorical_splits
 
@@ -512,9 +480,7 @@ def test_plot_metrics(params, breast_cancer_split, train_data):
         num_boost_round=10,
         callbacks=[lgb.record_evaluation(evals_result0)],
     )
-    with pytest.warns(
-        UserWarning, match="More than one metric available, picking one to plot."
-    ):
+    with pytest.warns(UserWarning, match="More than one metric available, picking one to plot."):
         ax0 = lgb.plot_metric(evals_result0)
     assert isinstance(ax0, matplotlib.axes.Axes)
     assert ax0.get_title() == "Metric during training"

@@ -15,9 +15,7 @@ import pytest
 import lightgbm_moe as lgb
 
 
-def make_toy_regression_data(
-    n_samples=500, n_features=10, n_regimes=2, random_state=42
-):
+def make_toy_regression_data(n_samples=500, n_features=10, n_regimes=2, random_state=42):
     """Generate toy regression data with underlying regimes."""
     rng = np.random.RandomState(random_state)
     X = rng.randn(n_samples, n_features)
@@ -142,15 +140,11 @@ class TestMixturePrediction:
         regime_proba = bst.predict_regime_proba(X)
 
         # Check shape
-        assert regime_proba.shape == (200, 3), (
-            f"Expected shape (200, 3), got {regime_proba.shape}"
-        )
+        assert regime_proba.shape == (200, 3), f"Expected shape (200, 3), got {regime_proba.shape}"
 
         # Check rows sum to 1
         row_sums = regime_proba.sum(axis=1)
-        np.testing.assert_allclose(
-            row_sums, 1.0, rtol=1e-6, err_msg="regime_proba rows do not sum to 1"
-        )
+        np.testing.assert_allclose(row_sums, 1.0, rtol=1e-6, err_msg="regime_proba rows do not sum to 1")
 
         # Check all values are in [0, 1]
         assert np.all(regime_proba >= 0), "regime_proba contains negative values"
@@ -174,9 +168,7 @@ class TestMixturePrediction:
         expert_preds = bst.predict_expert_pred(X)
 
         # Check shape
-        assert expert_preds.shape == (200, 3), (
-            f"Expected shape (200, 3), got {expert_preds.shape}"
-        )
+        assert expert_preds.shape == (200, 3), f"Expected shape (200, 3), got {expert_preds.shape}"
 
         # Check no NaN
         assert not np.any(np.isnan(expert_preds)), "expert_pred contains NaN"

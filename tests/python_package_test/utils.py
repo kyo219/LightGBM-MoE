@@ -93,9 +93,7 @@ def make_ranking(
         n_samples = np.sum(group)
 
         for i, gsize in enumerate(group):
-            y_vec = np.concatenate(
-                (y_vec, rnd_generator.choice(relvalues, size=gsize, replace=True))
-            )
+            y_vec = np.concatenate((y_vec, rnd_generator.choice(relvalues, size=gsize, replace=True)))
             group_id_vec = np.concatenate((group_id_vec, [i] * gsize))
 
     # build y/target and group-id vectors according to n_samples, avg_gs, and random_gs.
@@ -107,9 +105,7 @@ def make_ranking(
             if gsize < 1:
                 continue
 
-            y_vec = np.append(
-                y_vec, rnd_generator.choice(relvalues, size=gsize, replace=True)
-            )
+            y_vec = np.append(y_vec, rnd_generator.choice(relvalues, size=gsize, replace=True))
             group_id_vec = np.append(group_id_vec, [gid] * gsize)
             gid += 1
 
@@ -127,9 +123,7 @@ def make_ranking(
 
 
 @lru_cache(maxsize=None)
-def make_synthetic_regression(
-    n_samples=100, n_features=4, n_informative=2, random_state=42
-):
+def make_synthetic_regression(n_samples=100, n_features=4, n_informative=2, random_state=42):
     return sklearn.datasets.make_regression(
         n_samples=n_samples,
         n_features=n_features,
@@ -228,9 +222,7 @@ def assert_silent(capsys) -> None:
 
 # doing this here, at import time, to ensure it only runs once_per import
 # instead of once per assertion
-_numpy_testing_supports_strict_kwarg = (
-    "strict" in getfullargspec(np.testing.assert_array_equal).kwonlyargs
-)
+_numpy_testing_supports_strict_kwarg = "strict" in getfullargspec(np.testing.assert_array_equal).kwonlyargs
 
 
 def np_assert_array_equal(*args, **kwargs):
@@ -280,7 +272,5 @@ def assert_subtree_valid(root):
 
 def assert_all_trees_valid(model_dump):
     for idx, tree in enumerate(model_dump["tree_info"]):
-        assert tree["tree_index"] == idx, (
-            f"tree {idx} should have tree_index={idx}. Full tree: {tree}"
-        )
+        assert tree["tree_index"] == idx, f"tree {idx} should have tree_index={idx}. Full tree: {tree}"
         assert_subtree_valid(tree["tree_structure"])

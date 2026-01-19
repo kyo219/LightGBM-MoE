@@ -24,15 +24,10 @@ import lightgbm_moe as lgb
 #   single continuous predictor
 rng = np.random.default_rng(seed=0)
 N = 1000
-X = pd.DataFrame(
-    {"continuous": range(N), "categorical": np.repeat([0, 1, 2, 3, 4], N / 5)}
-)
+X = pd.DataFrame({"continuous": range(N), "categorical": np.repeat([0, 1, 2, 3, 4], N / 5)})
 CATEGORICAL_EFFECTS = [-1, -1, -2, -2, 2]
 LINEAR_TERM = np.array(
-    [
-        -0.5 + 0.01 * X["continuous"][k] + CATEGORICAL_EFFECTS[X["categorical"][k]]
-        for k in range(X.shape[0])
-    ]
+    [-0.5 + 0.01 * X["continuous"][k] + CATEGORICAL_EFFECTS[X["categorical"][k]] for k in range(X.shape[0])]
 ) + rng.normal(loc=0, scale=1, size=X.shape[0])
 TRUE_PROB = expit(LINEAR_TERM)
 Y = rng.binomial(n=1, p=TRUE_PROB, size=N)

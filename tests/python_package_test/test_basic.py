@@ -23,9 +23,7 @@ def test_basic(tmp_path):
         *load_breast_cancer(return_X_y=True), test_size=0.1, random_state=2
     )
     feature_names = [f"Column_{i}" for i in range(X_train.shape[1])]
-    feature_names[1] = (
-        "a" * 1000
-    )  # set one name to a value longer than default buffer size
+    feature_names[1] = "a" * 1000  # set one name to a value longer than default buffer size
     train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
     valid_data = train_data.create_valid(X_test, label=y_test)
 
@@ -81,16 +79,12 @@ def test_basic(tmp_path):
     }
     pred_early_stopping = bst.predict(X_test, **pred_parameter)
     # scores likely to be different, but prediction should still be the same
-    np_assert_array_equal(
-        np.sign(pred_from_matr), np.sign(pred_early_stopping), strict=True
-    )
+    np_assert_array_equal(np.sign(pred_from_matr), np.sign(pred_early_stopping), strict=True)
 
     # test that shape is checked during prediction
     bad_X_test = X_test[:, 1:]
     bad_shape_error_msg = "The number of features in data*"
-    np.testing.assert_raises_regex(
-        lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, bad_X_test
-    )
+    np.testing.assert_raises_regex(lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, bad_X_test)
     np.testing.assert_raises_regex(
         lgb.basic.LightGBMError,
         bad_shape_error_msg,
@@ -105,14 +99,10 @@ def test_basic(tmp_path):
     )
     with open(tname, "w+b") as f:
         dump_svmlight_file(bad_X_test, y_test, f)
-    np.testing.assert_raises_regex(
-        lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, tname
-    )
+    np.testing.assert_raises_regex(lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, tname)
     with open(tname, "w+b") as f:
         dump_svmlight_file(X_test, y_test, f, zero_based=False)
-    np.testing.assert_raises_regex(
-        lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, tname
-    )
+    np.testing.assert_raises_regex(lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, tname)
 
 
 class NumpySequence(lgb.Sequence):
@@ -127,16 +117,12 @@ class NumpySequence(lgb.Sequence):
             return self.ndarray[idx]
         elif isinstance(idx, slice):
             if not (idx.step is None or idx.step == 1):
-                raise NotImplementedError(
-                    "No need to implement, caller will not set step by now"
-                )
+                raise NotImplementedError("No need to implement, caller will not set step by now")
             return self.ndarray[idx.start : idx.stop]
         elif isinstance(idx, list):
             return self.ndarray[idx]
         else:
-            raise TypeError(
-                f"Sequence Index must be an integer/list/slice, got {type(idx).__name__}"
-            )
+            raise TypeError(f"Sequence Index must be an integer/list/slice, got {type(idx).__name__}")
 
     def __len__(self):
         return len(self.ndarray)
@@ -246,21 +232,11 @@ def test_chunked_dataset():
     )
 
     chunk_size = X_train.shape[0] // 10 + 1
-    X_train = [
-        X_train[i * chunk_size : (i + 1) * chunk_size, :]
-        for i in range(X_train.shape[0] // chunk_size + 1)
-    ]
-    X_test = [
-        X_test[i * chunk_size : (i + 1) * chunk_size, :]
-        for i in range(X_test.shape[0] // chunk_size + 1)
-    ]
+    X_train = [X_train[i * chunk_size : (i + 1) * chunk_size, :] for i in range(X_train.shape[0] // chunk_size + 1)]
+    X_test = [X_test[i * chunk_size : (i + 1) * chunk_size, :] for i in range(X_test.shape[0] // chunk_size + 1)]
 
-    train_data = lgb.Dataset(
-        X_train, label=y_train, params={"bin_construct_sample_cnt": 100}
-    )
-    valid_data = train_data.create_valid(
-        X_test, label=y_test, params={"bin_construct_sample_cnt": 100}
-    )
+    train_data = lgb.Dataset(X_train, label=y_train, params={"bin_construct_sample_cnt": 100})
+    valid_data = train_data.create_valid(X_test, label=y_test, params={"bin_construct_sample_cnt": 100})
     train_data.construct()
     valid_data.construct()
 
@@ -270,14 +246,8 @@ def test_chunked_dataset_linear():
         *load_breast_cancer(return_X_y=True), test_size=0.1, random_state=2
     )
     chunk_size = X_train.shape[0] // 10 + 1
-    X_train = [
-        X_train[i * chunk_size : (i + 1) * chunk_size, :]
-        for i in range(X_train.shape[0] // chunk_size + 1)
-    ]
-    X_test = [
-        X_test[i * chunk_size : (i + 1) * chunk_size, :]
-        for i in range(X_test.shape[0] // chunk_size + 1)
-    ]
+    X_train = [X_train[i * chunk_size : (i + 1) * chunk_size, :] for i in range(X_train.shape[0] // chunk_size + 1)]
+    X_test = [X_test[i * chunk_size : (i + 1) * chunk_size, :] for i in range(X_test.shape[0] // chunk_size + 1)]
     params = {"bin_construct_sample_cnt": 100, "linear_tree": True}
     train_data = lgb.Dataset(X_train, label=y_train, params=params)
     valid_data = train_data.create_valid(X_test, label=y_test, params=params)
@@ -321,9 +291,7 @@ def test_add_features_throws_if_num_data_unequal(rng):
 def test_add_features_throws_if_datasets_unconstructed(rng):
     X1 = rng.uniform(size=(100, 1))
     X2 = rng.uniform(size=(100, 1))
-    err_msg = (
-        "Both source and target Datasets must be constructed before adding features"
-    )
+    err_msg = "Both source and target Datasets must be constructed before adding features"
     d1 = lgb.Dataset(X1)
     d2 = lgb.Dataset(X2)
     with pytest.raises(ValueError, match=err_msg):
@@ -427,9 +395,7 @@ def test_add_features_from_different_sources(rng):
             assert d1.feature_name == res_feature_names
 
 
-def test_add_features_does_not_fail_if_initial_dataset_has_zero_informative_features(
-    capsys, rng
-):
+def test_add_features_does_not_fail_if_initial_dataset_has_zero_informative_features(capsys, rng):
     arr_a = np.zeros((100, 1), dtype=np.float32)
     arr_b = rng.uniform(size=(100, 5))
 
@@ -537,11 +503,7 @@ def test_consistent_state_for_dataset_fields():
         np.testing.assert_allclose(data.init_score, data.get_field("init_score"))
         assert not np.isnan(data.init_score[0])
         assert not np.isinf(data.init_score[1])
-        assert np.all(
-            np.isclose(
-                [data.label[0], data.weight[0], data.init_score[0]], data.label[0]
-            )
-        )
+        assert np.all(np.isclose([data.label[0], data.weight[0], data.init_score[0]], data.label[0]))
         assert data.label[1] == pytest.approx(data.weight[1])
         assert data.feature_name == data.get_feature_name()
 
@@ -550,9 +512,7 @@ def test_consistent_state_for_dataset_fields():
     sequence[0] = np.nan
     sequence[1] = np.inf
     feature_names = [f"f{i}" for i in range(X.shape[1])]
-    lgb_data = lgb.Dataset(
-        X, sequence, weight=sequence, init_score=sequence, feature_name=feature_names
-    ).construct()
+    lgb_data = lgb.Dataset(X, sequence, weight=sequence, init_score=sequence, feature_name=feature_names).construct()
     check_asserts(lgb_data)
     lgb_data = lgb.Dataset(X, y).construct()
     lgb_data.set_label(sequence)
@@ -587,20 +547,14 @@ def test_dataset_construction_overwrites_user_provided_metadata_fields():
     assert dtrain.label == [1, 2]
     assert dtrain.get_label() == [1, 2]
     if getenv("TASK", "") != "cuda":
-        np_assert_array_equal(
-            dtrain.position, np.array([0.0, 1.0], dtype=np.float32), strict=True
-        )
-        np_assert_array_equal(
-            dtrain.get_position(), np.array([0.0, 1.0], dtype=np.float32), strict=True
-        )
+        np_assert_array_equal(dtrain.position, np.array([0.0, 1.0], dtype=np.float32), strict=True)
+        np_assert_array_equal(dtrain.get_position(), np.array([0.0, 1.0], dtype=np.float32), strict=True)
     assert dtrain.weight == [0.5, 1.5]
     assert dtrain.get_weight() == [0.5, 1.5]
 
     # before construction, get_field() should raise an exception
     for field_name in ["group", "init_score", "label", "position", "weight"]:
-        with pytest.raises(
-            Exception, match=f"Cannot get {field_name} before construct Dataset"
-        ):
+        with pytest.raises(Exception, match=f"Cannot get {field_name} before construct Dataset"):
             dtrain.get_field(field_name)
 
     # constructed, get_* methods should return numpy arrays, even when the provided
@@ -610,18 +564,14 @@ def test_dataset_construction_overwrites_user_provided_metadata_fields():
     np_assert_array_equal(dtrain.group, expected_group, strict=True)
     np_assert_array_equal(dtrain.get_group(), expected_group, strict=True)
     # get_field("group") returns a numpy array with boundaries, instead of size
-    np_assert_array_equal(
-        dtrain.get_field("group"), np.array([0, 1, 2], dtype=np.int32), strict=True
-    )
+    np_assert_array_equal(dtrain.get_field("group"), np.array([0, 1, 2], dtype=np.int32), strict=True)
 
     expected_init_score = np.array(
         [0.312, 0.708],
     )
     np_assert_array_equal(dtrain.init_score, expected_init_score, strict=True)
     np_assert_array_equal(dtrain.get_init_score(), expected_init_score, strict=True)
-    np_assert_array_equal(
-        dtrain.get_field("init_score"), expected_init_score, strict=True
-    )
+    np_assert_array_equal(dtrain.get_field("init_score"), expected_init_score, strict=True)
 
     expected_label = np.array([1, 2], dtype=np.float32)
     np_assert_array_equal(dtrain.label, expected_label, strict=True)
@@ -673,17 +623,13 @@ def test_choose_param_value():
 
     # should choose the highest priority alias and set that value on main param
     # if only aliases are used
-    params = lgb.basic._choose_param_value(
-        main_param_name="num_iterations", params=params, default_value=17
-    )
+    params = lgb.basic._choose_param_value(main_param_name="num_iterations", params=params, default_value=17)
     assert params["num_iterations"] == 13
     assert "num_trees" not in params
     assert "n_iter" not in params
 
     # should use the default if main param and aliases are missing
-    params = lgb.basic._choose_param_value(
-        main_param_name="learning_rate", params=params, default_value=0.789
-    )
+    params = lgb.basic._choose_param_value(main_param_name="learning_rate", params=params, default_value=0.789)
     assert params["learning_rate"] == 0.789
 
     # all changes should be made on copies and not modify the original
@@ -727,29 +673,21 @@ def test_choose_param_value_preserves_nones():
 def test_choose_param_value_objective(objective_alias):
     # If callable is found in objective
     params = {objective_alias: dummy_obj}
-    params = lgb.basic._choose_param_value(
-        main_param_name="objective", params=params, default_value=None
-    )
+    params = lgb.basic._choose_param_value(main_param_name="objective", params=params, default_value=None)
     assert params["objective"] == dummy_obj
 
     # Value in params should be preferred to the default_value passed from keyword arguments
     params = {objective_alias: dummy_obj}
-    params = lgb.basic._choose_param_value(
-        main_param_name="objective", params=params, default_value=mse_obj
-    )
+    params = lgb.basic._choose_param_value(main_param_name="objective", params=params, default_value=mse_obj)
     assert params["objective"] == dummy_obj
 
     # None of objective or its aliases in params, but default_value is callable.
     params = {}
-    params = lgb.basic._choose_param_value(
-        main_param_name="objective", params=params, default_value=mse_obj
-    )
+    params = lgb.basic._choose_param_value(main_param_name="objective", params=params, default_value=mse_obj)
     assert params["objective"] == mse_obj
 
 
-@pytest.mark.parametrize(
-    "collection", ["1d_np", "2d_np", "pd_float", "pd_str", "1d_list", "2d_list"]
-)
+@pytest.mark.parametrize("collection", ["1d_np", "2d_np", "pd_float", "pd_str", "1d_list", "2d_list"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_list_to_1d_numpy(collection, dtype, rng):
     collection2y = {
@@ -815,12 +753,7 @@ def test_init_score_for_multiclass_classification(init_score_type, rng):
 
 
 def test_smoke_custom_parser(tmp_path):
-    data_path = (
-        Path(__file__).absolute().parents[2]
-        / "examples"
-        / "binary_classification"
-        / "binary.train"
-    )
+    data_path = Path(__file__).absolute().parents[2] / "examples" / "binary_classification" / "binary.train"
     parser_config_file = tmp_path / "parser.ini"
     with open(parser_config_file, "w") as fout:
         fout.write('{"className": "dummy", "id": "1"}')
@@ -878,21 +811,13 @@ def test_custom_objective_safety(rng):
     ds_multiclass = lgb.Dataset(X, y_multiclass).construct()
     bad_bst_binary = lgb.Booster({"objective": "none"}, ds_binary)
     good_bst_binary = lgb.Booster({"objective": "none"}, ds_binary)
-    bad_bst_multi = lgb.Booster(
-        {"objective": "none", "num_class": nclass}, ds_multiclass
-    )
-    good_bst_multi = lgb.Booster(
-        {"objective": "none", "num_class": nclass}, ds_multiclass
-    )
+    bad_bst_multi = lgb.Booster({"objective": "none", "num_class": nclass}, ds_multiclass)
+    good_bst_multi = lgb.Booster({"objective": "none", "num_class": nclass}, ds_multiclass)
     good_bst_binary.update(fobj=_good_gradients)
-    with pytest.raises(
-        ValueError, match=re.escape("number of models per one iteration (1)")
-    ):
+    with pytest.raises(ValueError, match=re.escape("number of models per one iteration (1)")):
         bad_bst_binary.update(fobj=_bad_gradients)
     good_bst_multi.update(fobj=_good_gradients)
-    with pytest.raises(
-        ValueError, match=re.escape(f"number of models per one iteration ({nclass})")
-    ):
+    with pytest.raises(ValueError, match=re.escape(f"number of models per one iteration ({nclass})")):
         bad_bst_multi.update(fobj=_bad_gradients)
 
 
@@ -917,9 +842,7 @@ def test_no_copy_when_single_float_dtype_dataframe(dtype, feature_name, rng):
 
 @pytest.mark.parametrize("feature_name", [["x1"], [42], "auto"])
 @pytest.mark.parametrize("categories", ["seen", "unseen"])
-def test_categorical_code_conversion_doesnt_modify_original_data(
-    feature_name, categories, rng
-):
+def test_categorical_code_conversion_doesnt_modify_original_data(feature_name, categories, rng):
     pd = pytest.importorskip("pandas")
     X = rng.choice(a=["a", "b"], size=(100, 1))
     column_name = "a" if feature_name == "auto" else feature_name[0]
@@ -1029,9 +952,7 @@ def test_feature_names_are_set_correctly_when_no_feature_names_passed_into_Datas
     ("max_depth", "num_leaves"),
     [(-1, 3), (-1, 50), (5, 3), (5, 31), (5, 32), (8, 3), (8, 31)],
 )
-def test_max_depth_warning_is_not_raised_if_num_leaves_is_also_provided(
-    capsys, num_leaves, max_depth
-):
+def test_max_depth_warning_is_not_raised_if_num_leaves_is_also_provided(capsys, num_leaves, max_depth):
     X, y = make_blobs(n_samples=1_000, n_features=1, centers=2)
     lgb.Booster(
         params={
@@ -1049,9 +970,7 @@ def test_max_depth_warning_is_not_raised_if_num_leaves_is_also_provided(
 # NOTE: max_depth < 5 is significant here because the default for num_leaves=31. With max_depth=5,
 #       a full depth-wise tree would have 2^5 = 32 leaves.
 @pytest.mark.parametrize("max_depth", [1, 2, 3, 4])
-def test_max_depth_warning_is_not_raised_if_max_depth_gt_1_and_lt_5_and_num_leaves_omitted(
-    capsys, max_depth
-):
+def test_max_depth_warning_is_not_raised_if_max_depth_gt_1_and_lt_5_and_num_leaves_omitted(capsys, max_depth):
     X, y = make_blobs(n_samples=1_000, n_features=1, centers=2)
     lgb.Booster(
         params={
@@ -1066,9 +985,7 @@ def test_max_depth_warning_is_not_raised_if_max_depth_gt_1_and_lt_5_and_num_leav
 
 
 @pytest.mark.parametrize("max_depth", [5, 6, 7, 8, 9])
-def test_max_depth_warning_is_raised_if_max_depth_gte_5_and_num_leaves_omitted(
-    capsys, max_depth
-):
+def test_max_depth_warning_is_raised_if_max_depth_gte_5_and_num_leaves_omitted(capsys, max_depth):
     X, y = make_blobs(n_samples=1_000, n_features=1, centers=2)
     lgb.Booster(
         params={
@@ -1125,14 +1042,9 @@ def test_equal_datasets_from_row_major_and_col_major_data(tmp_path):
     assert filecmp.cmp(ds_row_path, ds_col_path)
 
 
-def test_equal_datasets_from_one_and_several_matrices_w_different_layouts(
-    rng, tmp_path
-):
+def test_equal_datasets_from_one_and_several_matrices_w_different_layouts(rng, tmp_path):
     # several matrices
-    mats = [
-        np.require(rng.random(size=(100, 2)), requirements=order)
-        for order in ("C", "F", "F", "C")
-    ]
+    mats = [np.require(rng.random(size=(100, 2)), requirements=order) for order in ("C", "F", "F", "C")]
     several_path = tmp_path / "several.txt"
     lgb.Dataset(mats)._dump_text(several_path)
 
@@ -1171,9 +1083,7 @@ def test_set_field_none_removes_field(rng, field_name):
         expected = np.array([0, 1, 0, 2, 3, 2, 3, 2, 3, 3], dtype=np.int32)
     else:
         field = rng.uniform(size=10)
-        expected = field.astype(
-            np.float64 if field_name == "init_score" else np.float32
-        )
+        expected = field.astype(np.float64 if field_name == "init_score" else np.float32)
 
     out = d.set_field(field_name, field)
     assert out is d

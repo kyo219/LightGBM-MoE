@@ -39,9 +39,7 @@ LIB_PATH = CURR_PATH.parent / "python-package"
 sys.path.insert(0, str(LIB_PATH))
 
 INTERNAL_REF_REGEX = compile(r"(?P<url>\.\/.+)(?P<extension>\.rst)(?P<anchor>$|#)")
-RTD_R_REF_REGEX = compile(
-    r"(?P<begin>https://.+/)(?P<rtd_version>latest)(?P<end>/R/reference/)"
-)
+RTD_R_REF_REGEX = compile(r"(?P<begin>https://.+/)(?P<rtd_version>latest)(?P<end>/R/reference/)")
 
 
 class InternalRefTransform(Transform):
@@ -54,9 +52,7 @@ class InternalRefTransform(Transform):
         """Apply the transform to the document tree."""
         for section in self.document.traverse(reference):
             if section.get("refuri") is not None:
-                section["refuri"] = INTERNAL_REF_REGEX.sub(
-                    r"\g<url>.html\g<anchor>", section["refuri"]
-                )
+                section["refuri"] = INTERNAL_REF_REGEX.sub(r"\g<url>.html\g<anchor>", section["refuri"])
 
 
 class IgnoredDirective(Directive):
@@ -148,12 +144,7 @@ html_favicon = str(CURR_PATH / "_static" / "images" / "favicon.ico")
 # |version| and |release|, also used in various other places throughout the
 # built documents.
 # The short X.Y version.
-version = (
-    (CURR_PATH.parent / "VERSION.txt")
-    .read_text(encoding="utf-8")
-    .strip()
-    .replace("rc", "-rc")
-)
+version = (CURR_PATH.parent / "VERSION.txt").read_text(encoding="utf-8").strip().replace("rc", "-rc")
 # The full version, including alpha/beta/rc tags.
 release = version
 
@@ -260,9 +251,7 @@ def generate_doxygen_xml(app: Sphinx) -> None:
         # /blob/fe7644829057af622e467bb529db6c03a830da99/exhale/deploy.py#L99-L111
         process = Popen(["doxygen", "-"], stdin=PIPE, stdout=PIPE, stderr=PIPE)
         stdout, stderr = process.communicate(doxygen_input)
-        output = "\n".join(
-            [i.decode("utf-8") for i in (stdout, stderr) if i is not None]
-        )
+        output = "\n".join([i.decode("utf-8") for i in (stdout, stderr) if i is not None])
         if process.returncode != 0:
             raise RuntimeError(output)
         print(output)
@@ -308,9 +297,7 @@ def generate_r_docs(app: Sphinx) -> None:
         # Consider suppressing output completely if RTD project silently fails.
         # Refer to https://github.com/svenevs/exhale
         # /blob/fe7644829057af622e467bb529db6c03a830da99/exhale/deploy.py#L99-L111
-        process = Popen(
-            ["/bin/bash"], stdin=PIPE, stdout=PIPE, stderr=PIPE, universal_newlines=True
-        )
+        process = Popen(["/bin/bash"], stdin=PIPE, stdout=PIPE, stderr=PIPE, universal_newlines=True)
         stdout, stderr = process.communicate(commands)
         output = "\n".join([i for i in (stdout, stderr) if i is not None])
         if process.returncode != 0:
@@ -318,9 +305,7 @@ def generate_r_docs(app: Sphinx) -> None:
         print(output)
         print("Done building R-package documentation")
     except BaseException as e:
-        raise Exception(
-            f"An error has occurred while generating documentation for R-package\n{e}"
-        )
+        raise Exception(f"An error has occurred while generating documentation for R-package\n{e}")
 
 
 def replace_reference_to_r_docs(app: Sphinx) -> None:
@@ -359,9 +344,7 @@ def setup(app: Sphinx) -> None:
             app.connect("builder-inited", generate_r_docs)
         app.connect(
             "build-finished",
-            lambda app, _: copytree(
-                CURR_PATH.parent / "lightgbm_r" / "docs", Path(app.outdir) / "R"
-            ),
+            lambda app, _: copytree(CURR_PATH.parent / "lightgbm_r" / "docs", Path(app.outdir) / "R"),
         )
     app.connect("builder-inited", replace_reference_to_r_docs)
     app.add_transform(InternalRefTransform)

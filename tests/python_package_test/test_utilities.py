@@ -26,9 +26,7 @@ def test_register_logger(tmp_path):
     X = np.array([[1, 2, 3], [1, 2, 4], [1, 2, 4], [1, 2, 3]], dtype=np.float32)
     y = np.array([0, 1, 1, 0])
     lgb_train = lgb.Dataset(X, y, categorical_feature=[1])
-    lgb_valid = lgb.Dataset(
-        X, y, categorical_feature=[1]
-    )  # different object for early-stopping
+    lgb_valid = lgb.Dataset(X, y, categorical_feature=[1])  # different object for early-stopping
 
     eval_records = {}
     callbacks = [

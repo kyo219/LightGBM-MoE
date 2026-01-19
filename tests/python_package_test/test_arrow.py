@@ -48,13 +48,9 @@ def generate_simple_arrow_table(empty_chunks: bool = False) -> pa.Table:
         pa.chunked_array(c + [[1, 2, 3]] + c + [[4, 5]] + c, type=pa.int64()),
         pa.chunked_array(c + [[1, 2, 3]] + c + [[4, 5]] + c, type=pa.float32()),
         pa.chunked_array(c + [[1, 2, 3]] + c + [[4, 5]] + c, type=pa.float64()),
-        pa.chunked_array(
-            c + [[True, True, False]] + c + [[False, True]] + c, type=pa.bool_()
-        ),
+        pa.chunked_array(c + [[True, True, False]] + c + [[False, True]] + c, type=pa.bool_()),
     ]
-    return pa.Table.from_arrays(
-        columns, names=[f"col_{i}" for i in range(len(columns))]
-    )
+    return pa.Table.from_arrays(columns, names=[f"col_{i}" for i in range(len(columns))])
 
 
 def generate_nullable_arrow_table(dtype: Any) -> pa.Table:
@@ -64,9 +60,7 @@ def generate_nullable_arrow_table(dtype: Any) -> pa.Table:
         pa.chunked_array([[1, 2, 3, 4, None]], type=dtype),
         pa.chunked_array([[None, None, None, None, None]], type=dtype),
     ]
-    return pa.Table.from_arrays(
-        columns, names=[f"col_{i}" for i in range(len(columns))]
-    )
+    return pa.Table.from_arrays(columns, names=[f"col_{i}" for i in range(len(columns))])
 
 
 def generate_dummy_arrow_table() -> pa.Table:
@@ -83,9 +77,7 @@ def generate_random_arrow_table(
     values: Optional[np.ndarray] = None,
 ) -> pa.Table:
     columns = [
-        generate_random_arrow_array(
-            num_datapoints, seed + i, generate_nulls=generate_nulls, values=values
-        )
+        generate_random_arrow_array(num_datapoints, seed + i, generate_nulls=generate_nulls, values=values)
         for i in range(num_columns)
     ]
     names = [f"col_{i}" for i in range(num_columns)]
@@ -111,14 +103,9 @@ def generate_random_arrow_array(
         data[indices] = None
 
     # Split data into <=2 random chunks
-    split_points = np.sort(
-        generator.choice(np.arange(1, num_datapoints), 2, replace=False)
-    )
+    split_points = np.sort(generator.choice(np.arange(1, num_datapoints), 2, replace=False))
     split_points = np.concatenate([[0], split_points, [num_datapoints]])
-    chunks = [
-        data[split_points[i] : split_points[i + 1]]
-        for i in range(len(split_points) - 1)
-    ]
+    chunks = [data[split_points[i] : split_points[i + 1]] for i in range(len(split_points) - 1)]
     chunks = [chunk for chunk in chunks if len(chunk) > 0]
 
     # Turn chunks into array
@@ -173,13 +160,9 @@ def test_dataset_construct_fuzzy(tmp_path, arrow_table_fn, dataset_params):
 
 
 def test_dataset_construct_fuzzy_boolean(tmp_path):
-    boolean_data = generate_random_arrow_table(
-        10, 10000, 42, generate_nulls=False, values=np.array([True, False])
-    )
+    boolean_data = generate_random_arrow_table(10, 10000, 42, generate_nulls=False, values=np.array([True, False]))
 
-    float_schema = pa.schema(
-        [pa.field(f"col_{i}", pa.float32()) for i in range(len(boolean_data.columns))]
-    )
+    float_schema = pa.schema([pa.field(f"col_{i}", pa.float32()) for i in range(len(boolean_data.columns))])
     float_data = boolean_data.cast(float_schema)
 
     arrow_dataset = lgb.Dataset(boolean_data)
@@ -200,9 +183,7 @@ def test_dataset_construct_fields_fuzzy():
     arrow_weights = generate_random_arrow_array(1000, 42, generate_nulls=False)
     arrow_groups = pa.chunked_array([[300, 400, 50], [250]], type=pa.int32())
 
-    arrow_dataset = lgb.Dataset(
-        arrow_table, label=arrow_labels, weight=arrow_weights, group=arrow_groups
-    )
+    arrow_dataset = lgb.Dataset(arrow_table, label=arrow_labels, weight=arrow_weights, group=arrow_groups)
     arrow_dataset.construct()
 
     pandas_dataset = lgb.Dataset(
@@ -215,15 +196,9 @@ def test_dataset_construct_fields_fuzzy():
 
     # Check for equality
     for field in ("label", "weight", "group"):
-        np_assert_array_equal(
-            arrow_dataset.get_field(field), pandas_dataset.get_field(field), strict=True
-        )
-    np_assert_array_equal(
-        arrow_dataset.get_label(), pandas_dataset.get_label(), strict=True
-    )
-    np_assert_array_equal(
-        arrow_dataset.get_weight(), pandas_dataset.get_weight(), strict=True
-    )
+        np_assert_array_equal(arrow_dataset.get_field(field), pandas_dataset.get_field(field), strict=True)
+    np_assert_array_equal(arrow_dataset.get_label(), pandas_dataset.get_label(), strict=True)
+    np_assert_array_equal(arrow_dataset.get_weight(), pandas_dataset.get_weight(), strict=True)
 
 
 # -------------------------------------------- LABELS ------------------------------------------- #
@@ -336,9 +311,7 @@ def test_dataset_construct_groups(array_type, group_data, arrow_type):
     ],
 )
 @pytest.mark.parametrize("arrow_type", _INTEGER_TYPES + _FLOAT_TYPES)
-def test_dataset_construct_init_scores_array(
-    array_type: Any, init_score_data: Any, arrow_type: Any
-):
+def test_dataset_construct_init_scores_array(array_type: Any, init_score_data: Any, arrow_type: Any):
     data = generate_dummy_arrow_table()
     init_scores = array_type(init_score_data, type=arrow_type)
     dataset = lgb.Dataset(data, init_score=init_scores, params=dummy_dataset_params())
@@ -386,20 +359,14 @@ def assert_equal_predict_arrow_pandas(booster: lgb.Booster, data: pa.Table):
     p_pred_contrib_pandas = booster.predict(data.to_pandas(), pred_contrib=True)
     np_assert_array_equal(p_pred_contrib_arrow, p_pred_contrib_pandas, strict=True)
 
-    p_first_iter_arrow = booster.predict(
-        data, start_iteration=0, num_iteration=1, raw_score=True
-    )
-    p_first_iter_pandas = booster.predict(
-        data.to_pandas(), start_iteration=0, num_iteration=1, raw_score=True
-    )
+    p_first_iter_arrow = booster.predict(data, start_iteration=0, num_iteration=1, raw_score=True)
+    p_first_iter_pandas = booster.predict(data.to_pandas(), start_iteration=0, num_iteration=1, raw_score=True)
     np_assert_array_equal(p_first_iter_arrow, p_first_iter_pandas, strict=True)
 
 
 def test_predict_regression():
     data_float = generate_random_arrow_table(10, 10000, 42)
-    data_bool = generate_random_arrow_table(
-        1, 10000, 42, generate_nulls=False, values=np.array([True, False])
-    )
+    data_bool = generate_random_arrow_table(1, 10000, 42, generate_nulls=False, values=np.array([True, False]))
     data = pa.Table.from_arrays(
         data_float.columns + data_bool.columns,
         names=data_float.schema.names + ["col_bool"],
@@ -422,9 +389,7 @@ def test_predict_binary_classification():
     data = generate_random_arrow_table(10, 10000, 42)
     dataset = lgb.Dataset(
         data,
-        label=generate_random_arrow_array(
-            10000, 43, generate_nulls=False, values=np.arange(2)
-        ),
+        label=generate_random_arrow_array(10000, 43, generate_nulls=False, values=np.arange(2)),
         params=dummy_dataset_params(),
     )
     booster = lgb.train(
@@ -439,9 +404,7 @@ def test_predict_multiclass_classification():
     data = generate_random_arrow_table(10, 10000, 42)
     dataset = lgb.Dataset(
         data,
-        label=generate_random_arrow_array(
-            10000, 43, generate_nulls=False, values=np.arange(5)
-        ),
+        label=generate_random_arrow_array(10000, 43, generate_nulls=False, values=np.arange(5)),
         params=dummy_dataset_params(),
     )
     booster = lgb.train(
@@ -456,9 +419,7 @@ def test_predict_ranking():
     data = generate_random_arrow_table(10, 10000, 42)
     dataset = lgb.Dataset(
         data,
-        label=generate_random_arrow_array(
-            10000, 43, generate_nulls=False, values=np.arange(4)
-        ),
+        label=generate_random_arrow_array(10000, 43, generate_nulls=False, values=np.arange(4)),
         group=np.array([1000, 2000, 3000, 4000]),
         params=dummy_dataset_params(),
     )
@@ -534,16 +495,12 @@ def test_get_data_arrow_table():
 
 
 def test_get_data_arrow_table_subset(rng):
-    original_table = generate_random_arrow_table(
-        num_columns=3, num_datapoints=1000, seed=42
-    )
+    original_table = generate_random_arrow_table(num_columns=3, num_datapoints=1000, seed=42)
     dataset = lgb.Dataset(original_table, free_raw_data=False)
     dataset.construct()
 
     subset_size = 100
-    used_indices = rng.choice(
-        a=original_table.shape[0], size=subset_size, replace=False
-    )
+    used_indices = rng.choice(a=original_table.shape[0], size=subset_size, replace=False)
     used_indices = sorted(used_indices)
 
     subset_dataset = dataset.subset(used_indices).construct()

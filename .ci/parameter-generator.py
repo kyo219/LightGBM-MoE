@@ -221,23 +221,14 @@ def gen_parameter_description(
     """
     params_to_write = []
     lvl_mapper = {1: "-", 2: "~"}
-    for (section_name, section_lvl), section_params in zip(sections, descriptions):
+    for (section_name, section_lvl), section_params in zip(sections, descriptions, strict=True):
         heading_sign = lvl_mapper[section_lvl]
         params_to_write.append(f"{section_name}\n{heading_sign * len(section_name)}")
         for param_desc in section_params:
             name = param_desc["name"][0]
             default_raw = param_desc["default"][0]
-            default = (
-                default_raw.strip('"')
-                if len(default_raw.strip('"')) > 0
-                else default_raw
-            )
-            param_type = (
-                param_desc.get("type", param_desc["inner_type"])[0]
-                .split(":")[-1]
-                .split("<")[-1]
-                .strip(">")
-            )
+            default = default_raw.strip('"') if len(default_raw.strip('"')) > 0 else default_raw
+            param_type = param_desc.get("type", param_desc["inner_type"])[0].split(":")[-1].split("<")[-1].strip(">")
             options = param_desc.get("options", [])
             if len(options) > 0:
                 opts = "``, ``".join([x.strip() for x in options[0].split(",")])
@@ -246,9 +237,7 @@ def gen_parameter_description(
                 options_str = ""
             aliases = param_desc.get("alias", [])
             if len(aliases) > 0:
-                aliases_joined = "``, ``".join(
-                    [x.strip() for x in aliases[0].split(",")]
-                )
+                aliases_joined = "``, ``".join([x.strip() for x in aliases[0].split(",")])
                 aliases_str = f", aliases: ``{aliases_joined}``"
             else:
                 aliases_str = ""
@@ -257,9 +246,7 @@ def gen_parameter_description(
             if checks_len > 1:
                 number1, sign1 = parse_check(checks[0])
                 number2, sign2 = parse_check(checks[1], reverse=True)
-                checks_str = (
-                    f", constraints: ``{number2} {sign2} {name} {sign1} {number1}``"
-                )
+                checks_str = f", constraints: ``{number2} {sign2} {name} {sign1} {number1}``"
             elif checks_len == 1:
                 number, sign = parse_check(checks[0])
                 checks_str = f", constraints: ``{name} {sign} {number}``"
@@ -267,12 +254,7 @@ def gen_parameter_description(
                 checks_str = ""
             main_desc = f'-  ``{name}`` :raw-html:`<a id="{name}" title="Permalink to this parameter" href="#{name}">&#x1F517;&#xFE0E;</a>`, default = ``{default}``, type = {param_type}{options_str}{aliases_str}{checks_str}'
             params_to_write.append(main_desc)
-            params_to_write.extend(
-                [
-                    f"{' ' * 3 * int(desc[0][-1])}-  {desc[1]}"
-                    for desc in param_desc["desc"]
-                ]
-            )
+            params_to_write.extend([f"{' ' * 3 * int(desc[0][-1])}-  {desc[1]}" for desc in param_desc["desc"]])
 
     with open(params_rst) as original_params_file:
         all_lines = original_params_file.read()
@@ -324,9 +306,7 @@ def gen_parameter_code(
     str_to_write += "namespace LightGBM {\n"
 
     # alias table
-    str_to_write += (
-        "const std::unordered_map<std::string, std::string>& Config::alias_table() {\n"
-    )
+    str_to_write += "const std::unordered_map<std::string, std::string>& Config::alias_table() {\n"
     str_to_write += "  static std::unordered_map<std::string, std::string> aliases({\n"
 
     for pair in alias:
@@ -411,9 +391,7 @@ def gen_parameter_code(
             if name in overrides:
                 param_type = overrides[name]
             else:
-                param_type = int_t_pat.sub("int", y["inner_type"][0]).replace(
-                    "std::", ""
-                )
+                param_type = int_t_pat.sub("int", y["inner_type"][0]).replace("std::", "")
             str_to_write += '\n    {"' + name + '", "' + param_type + '"},'
     str_to_write += """
   });
