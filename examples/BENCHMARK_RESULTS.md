@@ -9,20 +9,22 @@
 
 | Dataset | Standard | MoE | MoE-PE | Best Improvement |
 |---------|----------|-----|--------|------------------|
-| Synthetic | 5.1032 |  **4.3928** | 5.1410 | +13.9% |
-| Hamilton | 0.7192 |  **0.7127** | 0.7173 | +0.9% |
-| VIX | 0.0117 |  **0.0116** | 0.0116 | +0.5% |
+| Synthetic | 5.0739 |  **4.3049** | 4.7611 | +15.2% |
+| Hamilton | 0.7205 | 0.7220 |  **0.7204** | +0.0% |
+| VIX | 0.0116 | 0.0116 |  **0.0116** | +0.1% |
 
 ### Expert Differentiation (Regime Separation)
 
-| Dataset | MoE Corr | MoE-PE Corr | MoE Regime Acc | MoE-PE Regime Acc |
-|---------|----------|-------------|----------------|-------------------|
-| Synthetic | -0.28 | 0.98 | 96.2% | 58.6% |
-| Hamilton | 0.91 | 0.95 | 50.8% | 50.2% |
-| VIX | 0.94 | 0.99 | 52.0% | 52.4% |
+| Dataset | MoE Corr (min/max) | MoE-PE Corr (min/max) | MoE Regime Acc | MoE-PE Regime Acc |
+|---------|--------------------|-----------------------|----------------|-------------------|
+| Synthetic | -0.42/-0.42 | -0.29/0.82 | 96.2% | 95.1% |
+| Hamilton | 0.69/0.88 | 0.61/0.67 | 52.6% | 52.6% |
+| VIX | 0.64/0.64 | 0.99/0.99 | 53.0% | 52.1% |
 
 **Notes**:
-- **Expert Corr**: Correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
+- **Expert Corr (min/max)**: Min and max pairwise correlation between expert predictions
+  - min: Most differentiated pair (lower = better separation)
+  - max: Most similar pair (if ~1.0, some experts may have collapsed)
 - **Regime Acc**: Classification accuracy of predicted regime vs true regime (with best label permutation)
 
 ### Selected Hyperparameters
@@ -30,17 +32,17 @@
 #### Synthetic
 
 **Standard GBDT:**
-- max_depth: 12
-- num_leaves: 58
+- max_depth: 8
+- num_leaves: 48
 - min_data_in_leaf: 5
-- learning_rate: 0.0563
+- learning_rate: 0.1232
 
 **MoE (Shared Tree Structure):**
 - num_experts: 2
-- max_depth: 6
-- num_leaves: 10
+- max_depth: 10
+- num_leaves: 20
 - min_data_in_leaf: 5
-- learning_rate: 0.0786
+- learning_rate: 0.0642
 - smoothing: none
 
 **MoE-PerExpert (Per-Expert Tree Structure):**
@@ -48,65 +50,64 @@
 
 | Expert | max_depth | num_leaves | min_data_in_leaf |
 |--------|-----------|------------|------------------|
-| E0 | 7 | 100 | 20 |
-| E1 | 9 | 103 | 5 |
-| E2 | 5 | 96 | 94 |
+| E0 | 3 | 21 | 79 |
+| E1 | 4 | 79 | 66 |
+| E2 | 6 | 12 | 65 |
 
-- learning_rate: 0.2190
-- smoothing: momentum
+- learning_rate: 0.0675
+- smoothing: none
 
 #### Hamilton
 
 **Standard GBDT:**
 - max_depth: 3
-- num_leaves: 73
-- min_data_in_leaf: 14
-- learning_rate: 0.2372
+- num_leaves: 75
+- min_data_in_leaf: 17
+- learning_rate: 0.1273
 
 **MoE (Shared Tree Structure):**
-- num_experts: 2
-- max_depth: 4
-- num_leaves: 115
-- min_data_in_leaf: 14
-- learning_rate: 0.2238
-- smoothing: markov
+- num_experts: 4
+- max_depth: 8
+- num_leaves: 91
+- min_data_in_leaf: 5
+- learning_rate: 0.2723
+- smoothing: none
 
 **MoE-PerExpert (Per-Expert Tree Structure):**
 - num_experts: 3
 
 | Expert | max_depth | num_leaves | min_data_in_leaf |
 |--------|-----------|------------|------------------|
-| E0 | 5 | 57 | 50 |
-| E1 | 3 | 93 | 13 |
-| E2 | 10 | 8 | 90 |
+| E0 | 6 | 86 | 12 |
+| E1 | 4 | 38 | 38 |
+| E2 | 4 | 46 | 87 |
 
-- learning_rate: 0.2556
-- smoothing: ema
+- learning_rate: 0.2801
+- smoothing: none
 
 #### VIX
 
 **Standard GBDT:**
-- max_depth: 8
-- num_leaves: 32
-- min_data_in_leaf: 21
-- learning_rate: 0.1994
+- max_depth: 3
+- num_leaves: 116
+- min_data_in_leaf: 10
+- learning_rate: 0.1266
 
 **MoE (Shared Tree Structure):**
-- num_experts: 4
+- num_experts: 2
 - max_depth: 3
-- num_leaves: 120
-- min_data_in_leaf: 14
-- learning_rate: 0.1082
-- smoothing: markov
+- num_leaves: 33
+- min_data_in_leaf: 12
+- learning_rate: 0.1273
+- smoothing: none
 
 **MoE-PerExpert (Per-Expert Tree Structure):**
-- num_experts: 3
+- num_experts: 2
 
 | Expert | max_depth | num_leaves | min_data_in_leaf |
 |--------|-----------|------------|------------------|
-| E0 | 8 | 37 | 77 |
-| E1 | 5 | 97 | 28 |
-| E2 | 4 | 104 | 32 |
+| E0 | 3 | 64 | 16 |
+| E1 | 3 | 37 | 41 |
 
-- learning_rate: 0.1530
-- smoothing: ema
+- learning_rate: 0.1661
+- smoothing: none

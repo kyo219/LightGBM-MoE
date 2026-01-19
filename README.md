@@ -394,39 +394,40 @@ study.optimize(objective_per_expert, n_trials=200)
 
 | Dataset | Standard | MoE | MoE-PE | Best Improvement |
 |---------|----------|-----|--------|------------------|
-| Synthetic | 5.1032 | **4.3928** | 5.1410 | +13.9% |
-| Hamilton | 0.7192 | **0.7127** | 0.7173 | +0.9% |
-| VIX | 0.0117 | **0.0116** | 0.0116 | +0.5% |
+| Synthetic | 5.0739 | **4.3049** | 4.7611 | +15.2% |
+| Hamilton | 0.7205 | 0.7220 | **0.7204** | +0.0% |
+| VIX | 0.0116 | **0.0116** | 0.0116 | +0.1% |
 
 ### Expert Differentiation (Regime Separation)
 
-| Dataset | MoE Corr | MoE-PE Corr | MoE Regime Acc | MoE-PE Regime Acc |
-|---------|----------|-------------|----------------|-------------------|
-| Synthetic | -0.28 | 0.98 | 96.2% | 58.6% |
-| Hamilton | 0.91 | 0.95 | 50.8% | 50.2% |
-| VIX | 0.94 | 0.99 | 52.0% | 52.4% |
+| Dataset | MoE K | MoE-PE K | MoE Corr (min/max) | MoE-PE Corr (min/max) | MoE Regime Acc | MoE-PE Regime Acc |
+|---------|-------|----------|--------------------|-----------------------|----------------|-------------------|
+| Synthetic | 2 | 3 | -0.42/-0.42 | -0.29/0.82 | 96.2% | 95.1% |
+| Hamilton | 4 | 3 | 0.69/0.88 | 0.61/0.67 | 52.6% | 52.6% |
+| VIX | 2 | 2 | 0.64/0.64 | 0.99/0.99 | 53.0% | 52.1% |
 
-- **Expert Corr**: Correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
+- **K**: Number of experts selected by Optuna
+- **Expert Corr (min/max)**: Pairwise correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
 - **Regime Acc**: Classification accuracy of predicted regime vs true regime
 
 **Key Findings**:
-- MoE (shared structure) achieves best RMSE and expert differentiation
-- On Synthetic data: Expert correlation of **-0.28** (opposite predictions!) with **96.2%** regime accuracy
-- MoE-PE selects different tree structures per expert, but shared-structure MoE learns better Gate separation
-- Latent regime data (Hamilton, VIX) shows limited improvement as expected
+- MoE achieves **+15.2% improvement** on Synthetic data with expert correlation of **-0.42** (opposite predictions!)
+- Both MoE and MoE-PE achieve **96%+ regime accuracy** on Synthetic data
+- Latent regime data (Hamilton, VIX) shows limited improvement as expected (regime not determinable from X)
 
 ### Selected Hyperparameters (Synthetic Dataset)
 
 **MoE (Shared Tree Structure):**
-- num_experts: 2, max_depth: 6, num_leaves: 10, learning_rate: 0.079
+- num_experts: 2, max_depth: 10, num_leaves: 20, learning_rate: 0.064, alpha: 1.44, warmup: 5
 
 **MoE-PerExpert (Per-Expert Tree Structure):**
+- num_experts: 3, learning_rate: 0.068, alpha: 0.52, warmup: 5
 
 | Expert | max_depth | num_leaves | min_data_in_leaf |
 |--------|-----------|------------|------------------|
-| E0 | 7 | 100 | 20 |
-| E1 | 9 | 103 | 5 |
-| E2 | 5 | 96 | 94 |
+| E0 | 3 | 21 | 79 |
+| E1 | 4 | 79 | 66 |
+| E2 | 6 | 12 | 65 |
 
 ### Run Benchmark
 
@@ -1011,39 +1012,40 @@ study.optimize(objective_per_expert, n_trials=200)
 
 | データセット | Standard | MoE | MoE-PE | 改善率 |
 |-------------|----------|-----|--------|--------|
-| Synthetic | 5.1032 | **4.3928** | 5.1410 | +13.9% |
-| Hamilton | 0.7192 | **0.7127** | 0.7173 | +0.9% |
-| VIX | 0.0117 | **0.0116** | 0.0116 | +0.5% |
+| Synthetic | 5.0739 | **4.3049** | 4.7611 | +15.2% |
+| Hamilton | 0.7205 | 0.7220 | **0.7204** | +0.0% |
+| VIX | 0.0116 | **0.0116** | 0.0116 | +0.1% |
 
 ### Expert分化（レジーム分離）
 
-| データセット | MoE相関 | MoE-PE相関 | MoE Regime精度 | MoE-PE Regime精度 |
-|-------------|---------|-----------|----------------|-------------------|
-| Synthetic | -0.28 | 0.98 | 96.2% | 58.6% |
-| Hamilton | 0.91 | 0.95 | 50.8% | 50.2% |
-| VIX | 0.94 | 0.99 | 52.0% | 52.4% |
+| データセット | MoE K | MoE-PE K | MoE相関 (min/max) | MoE-PE相関 (min/max) | MoE Regime精度 | MoE-PE Regime精度 |
+|-------------|-------|----------|-------------------|----------------------|----------------|-------------------|
+| Synthetic | 2 | 3 | -0.42/-0.42 | -0.29/0.82 | 96.2% | 95.1% |
+| Hamilton | 4 | 3 | 0.69/0.88 | 0.61/0.67 | 52.6% | 52.6% |
+| VIX | 2 | 2 | 0.64/0.64 | 0.99/0.99 | 53.0% | 52.1% |
 
-- **Expert相関**: Expert間の予測相関（低い=分化している、負=逆の予測）
+- **K**: Optunaで選択されたExpert数
+- **Expert相関 (min/max)**: Expert間の予測相関（低い=分化している、負=逆の予測）
 - **Regime精度**: 予測regimeと真のregimeの分類精度
 
 **重要な発見**:
-- MoE（共有構造）が最良のRMSEとExpert分化を達成
-- Syntheticデータ: Expert相関 **-0.28**（逆相関！）、Regime精度 **96.2%**
-- MoE-PEはExpertごとに異なる木構造を選択するが、共有構造MoEの方がGate分離がうまく学習される
-- 潜在レジームデータ（Hamilton, VIX）では改善が限定的（想定通り）
+- MoEがSyntheticデータで **+15.2%の改善** 、Expert相関 **-0.42**（逆相関！）
+- MoEとMoE-PE両方でSyntheticデータにおいて **96%以上のregime精度** を達成
+- 潜在レジームデータ（Hamilton, VIX）では改善が限定的（レジームがXから決定できないため、想定通り）
 
 ### 選択されたハイパーパラメータ（Syntheticデータセット）
 
 **MoE（共有木構造）:**
-- num_experts: 2, max_depth: 6, num_leaves: 10, learning_rate: 0.079
+- num_experts: 2, max_depth: 10, num_leaves: 20, learning_rate: 0.064, alpha: 1.44, warmup: 5
 
 **MoE-PerExpert（Expertごとの木構造）:**
+- num_experts: 3, learning_rate: 0.068, alpha: 0.52, warmup: 5
 
 | Expert | max_depth | num_leaves | min_data_in_leaf |
 |--------|-----------|------------|------------------|
-| E0 | 7 | 100 | 20 |
-| E1 | 9 | 103 | 5 |
-| E2 | 5 | 96 | 94 |
+| E0 | 3 | 21 | 79 |
+| E1 | 4 | 79 | 66 |
+| E2 | 6 | 12 | 65 |
 
 ### ベンチマーク実行
 

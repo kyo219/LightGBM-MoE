@@ -490,6 +490,159 @@ def create_visualization(all_results: dict, output_path: str):
     plt.close()
 
 
+def create_regime_demo(X, y, regime_true, config: BenchmarkConfig, output_path: str):
+    """
+    Create regime-switching demo visualization on Synthetic dataset.
+    Shows MoE's ability to detect and separate regimes.
+    """
+    print("\n[Regime Demo] Creating demo visualization on Synthetic data...")
+
+    # Train/Test split (time-based)
+    train_size = int(len(y) * 0.7)
+    X_train, X_test = X[:train_size], X[train_size:]
+    y_train, y_test = y[:train_size], y[train_size:]
+    regime_test = regime_true[train_size:]
+    t_test = np.arange(len(y_test))
+
+    # Train Standard GBDT
+    params_std = {
+        "objective": "regression",
+        "boosting": "gbdt",
+        "verbose": -1,
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "seed": config.seed,
+    }
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model_std = lgb.train(params_std, train_data, num_boost_round=100)
+    pred_std = model_std.predict(X_test)
+
+    # Train MoE GBDT
+    params_moe = {
+        "objective": "regression",
+        "boosting": "mixture",
+        "verbose": -1,
+        "mixture_num_experts": 2,
+        "mixture_e_step_alpha": 1.0,
+        "mixture_warmup_iters": 30,
+        "mixture_r_smoothing": "none",
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "seed": config.seed,
+    }
+    model_moe = lgb.train(params_moe, train_data, num_boost_round=100)
+    pred_moe = model_moe.predict(X_test)
+    regime_pred = model_moe.predict_regime(X_test)
+    regime_proba = model_moe.predict_regime_proba(X_test)
+
+    # Check if regime labels need inversion
+    acc_normal = (regime_pred == regime_test).mean()
+    acc_inverted = ((1 - regime_pred) == regime_test).mean()
+    if acc_inverted > acc_normal:
+        regime_pred = 1 - regime_pred
+        regime_proba = regime_proba[:, ::-1]
+        regime_acc = acc_inverted
+    else:
+        regime_acc = acc_normal
+
+    # Calculate metrics
+    rmse_std = np.sqrt(mean_squared_error(y_test, pred_std))
+    rmse_moe = np.sqrt(mean_squared_error(y_test, pred_moe))
+
+    # Create visualization (6 subplots)
+    fig = plt.figure(figsize=(16, 12))
+    regime_colors = ["#2ecc71", "#e74c3c"]
+    regime_names = ["Regime 0 (Bull)", "Regime 1 (Bear)"]
+
+    # 1. Actual vs Predicted Scatter
+    ax1 = fig.add_subplot(2, 3, 1)
+    ax1.scatter(y_test, pred_std, alpha=0.5, s=20, label=f"Std (RMSE={rmse_std:.3f})")
+    ax1.scatter(y_test, pred_moe, alpha=0.5, s=20, label=f"MoE (RMSE={rmse_moe:.3f})")
+    lims = [min(y_test.min(), pred_std.min(), pred_moe.min()),
+            max(y_test.max(), pred_std.max(), pred_moe.max())]
+    ax1.plot(lims, lims, "k--", alpha=0.5)
+    ax1.set_xlabel("Actual")
+    ax1.set_ylabel("Predicted")
+    ax1.set_title("1. Actual vs Predicted")
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Time Series: Standard GBDT
+    ax2 = fig.add_subplot(2, 3, 2)
+    ax2.plot(t_test, y_test, "k-", alpha=0.7, label="Actual", linewidth=1)
+    ax2.plot(t_test, pred_std, "b-", alpha=0.7, label="Predicted", linewidth=1)
+    ax2.fill_between(t_test, y_test, pred_std, alpha=0.2, color="red")
+    ax2.set_xlabel("Time")
+    ax2.set_ylabel("Value")
+    ax2.set_title(f"2. Standard GBDT (RMSE={rmse_std:.3f})")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    # 3. Time Series: MoE GBDT
+    ax3 = fig.add_subplot(2, 3, 3)
+    ax3.plot(t_test, y_test, "k-", alpha=0.7, label="Actual", linewidth=1)
+    ax3.plot(t_test, pred_moe, "g-", alpha=0.7, label="Predicted", linewidth=1)
+    ax3.fill_between(t_test, y_test, pred_moe, alpha=0.2, color="red")
+    ax3.set_xlabel("Time")
+    ax3.set_ylabel("Value")
+    ax3.set_title(f"3. MoE GBDT (RMSE={rmse_moe:.3f})")
+    ax3.legend(fontsize=8)
+    ax3.grid(True, alpha=0.3)
+
+    # 4. Regime Estimation
+    ax4 = fig.add_subplot(2, 3, 4)
+    for r in range(2):
+        mask = regime_test == r
+        ax4.scatter(t_test[mask], y_test[mask], c=regime_colors[r], alpha=0.6, s=15,
+                   label=f"Actual {regime_names[r]}")
+    ax4.set_xlabel("Time")
+    ax4.set_ylabel("Value")
+    ax4.set_title(f"4. Regime Estimation (Acc: {regime_acc:.1%})")
+    ax4.legend(fontsize=7, loc="upper right")
+    ax4.grid(True, alpha=0.3)
+
+    # 5. Regime Probability Over Time
+    ax5 = fig.add_subplot(2, 3, 5)
+    for r in range(2):
+        ax5.fill_between(t_test, 0, regime_proba[:, r], alpha=0.5,
+                        color=regime_colors[r], label=regime_names[r])
+    regime_changes = np.where(np.diff(regime_test) != 0)[0]
+    for rc in regime_changes:
+        ax5.axvline(x=t_test[rc], color="black", linestyle="--", alpha=0.5)
+    ax5.set_xlabel("Time")
+    ax5.set_ylabel("Probability")
+    ax5.set_title("5. Gate Probabilities Over Time")
+    ax5.legend(fontsize=8, loc="upper right")
+    ax5.set_ylim(0, 1)
+    ax5.grid(True, alpha=0.3)
+
+    # 6. MAE by Regime
+    ax6 = fig.add_subplot(2, 3, 6)
+    errors_std = [np.abs(y_test[regime_test == r] - pred_std[regime_test == r]).mean() for r in range(2)]
+    errors_moe = [np.abs(y_test[regime_test == r] - pred_moe[regime_test == r]).mean() for r in range(2)]
+    x_pos = np.arange(2)
+    width = 0.35
+    ax6.bar(x_pos - width/2, errors_std, width, label="Standard", color="steelblue", alpha=0.7)
+    ax6.bar(x_pos + width/2, errors_moe, width, label="MoE", color="forestgreen", alpha=0.7)
+    ax6.set_xlabel("True Regime")
+    ax6.set_ylabel("MAE")
+    ax6.set_title("6. MAE by Regime")
+    ax6.set_xticks(x_pos)
+    ax6.set_xticklabels(["Regime 0", "Regime 1"])
+    ax6.legend(fontsize=8)
+    ax6.grid(True, alpha=0.3, axis="y")
+
+    plt.suptitle("Regime-Switching Demo: Standard GBDT vs MoE GBDT", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"[Regime Demo] Saved: {output_path}")
+    plt.close()
+
+    improvement = (rmse_std - rmse_moe) / rmse_std * 100
+    print(f"[Regime Demo] Standard RMSE: {rmse_std:.4f}, MoE RMSE: {rmse_moe:.4f} ({improvement:+.1f}%)")
+    print(f"[Regime Demo] Regime Accuracy: {regime_acc:.1%}")
+
+
 def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
     """Generate markdown report of benchmark results."""
     lines = []
@@ -608,14 +761,14 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
 
 
 def print_final_summary(all_results: dict):
-    """Print final summary table."""
-    print("\n" + "=" * 120)
+    """Print final summary table with hyperparameters."""
+    print("\n" + "=" * 140)
     print("FINAL SUMMARY")
-    print("=" * 120)
+    print("=" * 140)
 
-    # Results table
-    print(f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>10} {'Best Impr':>10} {'MoE Corr':>12} {'PE Corr':>12} {'MoE Acc':>8} {'PE Acc':>8}")
-    print("-" * 120)
+    # Results table with expert count
+    print(f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>10} {'Best Impr':>10} {'MoE K':>6} {'PE K':>5} {'MoE Corr':>12} {'PE Corr':>12} {'MoE Acc':>8} {'PE Acc':>8}")
+    print("-" * 140)
 
     for name, results in all_results.items():
         std_rmse = results["Standard"]["rmse"]
@@ -626,17 +779,50 @@ def print_final_summary(all_results: dict):
         analysis_moe = results["analysis_moe"]
         analysis_pe = results["analysis_moe_pe"]
 
+        moe_k = analysis_moe["K"]
+        pe_k = analysis_pe["K"]
         moe_corr = f"{analysis_moe['expert_corr_min']:.2f}/{analysis_moe['expert_corr_max']:.2f}"
         pe_corr = f"{analysis_pe['expert_corr_min']:.2f}/{analysis_pe['expert_corr_max']:.2f}"
         moe_acc = f"{analysis_moe['regime_accuracy']:.1%}"
         pe_acc = f"{analysis_pe['regime_accuracy']:.1%}"
 
-        print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {improvement:>+9.1f}% {moe_corr:>12} {pe_corr:>12} {moe_acc:>8} {pe_acc:>8}")
+        print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>10.4f} {improvement:>+9.1f}% {moe_k:>6} {pe_k:>5} {moe_corr:>12} {pe_corr:>12} {moe_acc:>8} {pe_acc:>8}")
 
-    print("\n" + "=" * 120)
-    print("MoE/PE Corr: Expert correlation (min/max) - lower min = better differentiation, max ~1.0 = collapse risk")
-    print("MoE/PE Acc: Best regime classification accuracy with label permutation")
-    print("=" * 120)
+    print("\n" + "-" * 140)
+    print("K: Number of experts | Corr: Expert correlation (min/max) | Acc: Regime classification accuracy")
+    print("=" * 140)
+
+    # Detailed hyperparameters for each dataset
+    print("\nSELECTED HYPERPARAMETERS")
+    print("=" * 140)
+
+    for name, results in all_results.items():
+        print(f"\n[{name}]")
+
+        # Standard GBDT
+        std_params = results["Standard"]["params"]
+        print(f"  Standard: depth={std_params.get('max_depth', '?')}, leaves={std_params.get('num_leaves', '?')}, "
+              f"min_data={std_params.get('min_data_in_leaf', '?')}, lr={std_params.get('learning_rate', 0):.4f}")
+
+        # MoE
+        moe_params = results["MoE"]["params"]
+        moe_k = moe_params.get("mixture_num_experts", 2)
+        print(f"  MoE:      K={moe_k}, depth={moe_params.get('max_depth', '?')}, leaves={moe_params.get('num_leaves', '?')}, "
+              f"min_data={moe_params.get('min_data_in_leaf', '?')}, lr={moe_params.get('learning_rate', 0):.4f}, "
+              f"alpha={moe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={moe_params.get('mixture_warmup_iters', '?')}")
+
+        # MoE-PE (per-expert)
+        pe_params = results["MoE-PE"]["params"]
+        pe_k = pe_params.get("mixture_num_experts", 2)
+        depths = [pe_params.get(f"max_depth_{k}", "?") for k in range(pe_k)]
+        leaves = [pe_params.get(f"num_leaves_{k}", "?") for k in range(pe_k)]
+        min_data = [pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(pe_k)]
+        print(f"  MoE-PE:   K={pe_k}, lr={pe_params.get('learning_rate', 0):.4f}, "
+              f"alpha={pe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={pe_params.get('mixture_warmup_iters', '?')}")
+        for k in range(pe_k):
+            print(f"            E{k}: depth={depths[k]}, leaves={leaves[k]}, min_data={min_data[k]}")
+
+    print("\n" + "=" * 140)
 
 
 # =============================================================================
@@ -649,6 +835,7 @@ def main():
     parser.add_argument("--splits", type=int, default=5, help="CV splits")
     parser.add_argument("--rounds", type=int, default=100, help="Boosting rounds")
     parser.add_argument("--no-viz", action="store_true", help="Skip visualization")
+    parser.add_argument("--no-demo", action="store_true", help="Skip regime demo visualization")
     parser.add_argument("--output-md", type=str, help="Output markdown file path (e.g., BENCHMARK.md)")
     args = parser.parse_args()
 
@@ -665,6 +852,7 @@ def main():
     print(f"Trials: {config.n_trials}, CV Splits: {config.n_splits}, Boost Rounds: {config.num_boost_round}")
 
     all_results = {}
+    synthetic_data = None  # Store for regime demo
 
     for name, dataset_info in DATASETS.items():
         generator = dataset_info["generator"]
@@ -674,10 +862,19 @@ def main():
         X, y, regime = generator(**params)
         all_results[name] = run_benchmark(name, X, y, regime, config)
 
+        # Store Synthetic data for regime demo
+        if name == "Synthetic":
+            synthetic_data = (X, y, regime)
+
     print_final_summary(all_results)
 
     if not args.no_viz:
         create_visualization(all_results, "examples/benchmark_results.png")
+
+    # Regime demo on Synthetic data
+    if not args.no_demo and synthetic_data is not None:
+        X, y, regime = synthetic_data
+        create_regime_demo(X, y, regime, config, "examples/regime_demo.png")
 
     if args.output_md:
         md_content = generate_markdown_report(all_results, config)
