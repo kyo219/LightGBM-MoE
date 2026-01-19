@@ -5,7 +5,12 @@ import pytest
 from sklearn.model_selection import train_test_split
 
 import lightgbm_moe as lgb
-from lightgbm_moe.compat import GRAPHVIZ_INSTALLED, MATPLOTLIB_INSTALLED, PANDAS_INSTALLED, pd_DataFrame
+from lightgbm_moe.compat import (
+    GRAPHVIZ_INSTALLED,
+    MATPLOTLIB_INSTALLED,
+    PANDAS_INSTALLED,
+    pd_DataFrame,
+)
 
 if MATPLOTLIB_INSTALLED:
     import matplotlib
@@ -80,7 +85,10 @@ def test_plot_importance(params, breast_cancer_split, train_data):
     assert ax2.patches[3].get_facecolor() == (0, 0, 1.0, 1.0)  # b
 
     ax3 = lgb.plot_importance(
-        gbm0, title="t @importance_type@", xlabel="x @importance_type@", ylabel="y @importance_type@"
+        gbm0,
+        title="t @importance_type@",
+        xlabel="x @importance_type@",
+        ylabel="y @importance_type@",
     )
     assert isinstance(ax3, matplotlib.axes.Axes)
     assert ax3.get_title() == "t @importance_type@"
@@ -153,7 +161,13 @@ def test_plot_split_value_histogram(params, breast_cancer_split, train_data):
         assert patch.get_facecolor() == (1.0, 0, 0, 1.0)  # red
 
     ax2 = lgb.plot_split_value_histogram(
-        gbm0, 27, bins=10, color=["r", "y", "g", "b"], title=None, xlabel=None, ylabel=None
+        gbm0,
+        27,
+        bins=10,
+        color=["r", "y", "g", "b"],
+        title=None,
+        xlabel=None,
+        ylabel=None,
     )
     assert isinstance(ax2, matplotlib.axes.Axes)
     assert ax2.get_title() == ""
@@ -166,13 +180,15 @@ def test_plot_split_value_histogram(params, breast_cancer_split, train_data):
     assert ax2.patches[3].get_facecolor() == (0, 0, 1.0, 1.0)  # b
 
     with pytest.raises(
-        ValueError, match="Cannot plot split value histogram, because feature 0 was not used in splitting"
+        ValueError,
+        match="Cannot plot split value histogram, because feature 0 was not used in splitting",
     ):
         lgb.plot_split_value_histogram(gbm0, 0)  # was not used in splitting
 
 
 @pytest.mark.skipif(
-    not MATPLOTLIB_INSTALLED or not GRAPHVIZ_INSTALLED, reason="matplotlib or graphviz is not installed"
+    not MATPLOTLIB_INSTALLED or not GRAPHVIZ_INSTALLED,
+    reason="matplotlib or graphviz is not installed",
 )
 def test_plot_tree(breast_cancer_split):
     X_train, _, y_train, _ = breast_cancer_split
@@ -521,7 +537,12 @@ def test_plot_metrics(params, breast_cancer_split, train_data):
         assert not grid_line.get_visible()
 
     evals_result1 = {}
-    lgb.train(params, train_data, num_boost_round=10, callbacks=[lgb.record_evaluation(evals_result1)])
+    lgb.train(
+        params,
+        train_data,
+        num_boost_round=10,
+        callbacks=[lgb.record_evaluation(evals_result1)],
+    )
     with pytest.raises(ValueError, match="eval results cannot be empty."):
         lgb.plot_metric(evals_result1)
 

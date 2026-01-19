@@ -72,7 +72,11 @@ def test_basic(tmp_path):
     np_assert_array_equal(pred_from_matr, pred_from_model_file, strict=True)
 
     # check early stopping is working. Make it stop very early, so the scores should be very close to zero
-    pred_parameter = {"pred_early_stop": True, "pred_early_stop_freq": 5, "pred_early_stop_margin": 1.5}
+    pred_parameter = {
+        "pred_early_stop": True,
+        "pred_early_stop_freq": 5,
+        "pred_early_stop_margin": 1.5,
+    }
     pred_early_stopping = bst.predict(X_test, **pred_parameter)
     # scores likely to be different, but prediction should still be the same
     np_assert_array_equal(np.sign(pred_from_matr), np.sign(pred_early_stopping), strict=True)
@@ -82,10 +86,16 @@ def test_basic(tmp_path):
     bad_shape_error_msg = "The number of features in data*"
     np.testing.assert_raises_regex(lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, bad_X_test)
     np.testing.assert_raises_regex(
-        lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, sparse.csr_matrix(bad_X_test)
+        lgb.basic.LightGBMError,
+        bad_shape_error_msg,
+        bst.predict,
+        sparse.csr_matrix(bad_X_test),
     )
     np.testing.assert_raises_regex(
-        lgb.basic.LightGBMError, bad_shape_error_msg, bst.predict, sparse.csc_matrix(bad_X_test)
+        lgb.basic.LightGBMError,
+        bad_shape_error_msg,
+        bst.predict,
+        sparse.csc_matrix(bad_X_test),
     )
     with open(tname, "w+b") as f:
         dump_svmlight_file(bad_X_test, y_test, f)
@@ -272,7 +282,8 @@ def test_add_features_throws_if_num_data_unequal(rng):
     d1 = lgb.Dataset(X1).construct()
     d2 = lgb.Dataset(X2).construct()
     with pytest.raises(
-        lgb.basic.LightGBMError, match="Cannot add features from other Dataset with a different number of rows"
+        lgb.basic.LightGBMError,
+        match="Cannot add features from other Dataset with a different number of rows",
     ):
         d1.add_features_from(d2)
 
@@ -353,7 +364,9 @@ def test_add_features_from_different_sources(rng):
     seq = _create_sequence_from_ndarray(X, 1, 30)
     seq_ds = lgb.Dataset(seq, feature_name=names, free_raw_data=False).construct()
     npy_list_ds = lgb.Dataset(
-        [X[: n_row // 2, :], X[n_row // 2 :, :]], feature_name=names, free_raw_data=False
+        [X[: n_row // 2, :], X[n_row // 2 :, :]],
+        feature_name=names,
+        free_raw_data=False,
     ).construct()
     immergeable_dds = [seq_ds, npy_list_ds]
     for x_1 in xxs:
@@ -450,7 +463,10 @@ def test_cegb_scaling_equalities(tmp_path, rng):
         ),
         (
             {"cegb_penalty_feature_lazy": [0.01, 0.02, 0.03, 0.04, 0.05]},
-            {"cegb_penalty_feature_lazy": [0.005, 0.01, 0.015, 0.02, 0.025], "cegb_tradeoff": 2},
+            {
+                "cegb_penalty_feature_lazy": [0.005, 0.01, 0.015, 0.02, 0.025],
+                "cegb_tradeoff": 2,
+            },
         ),
         ({"cegb_penalty_split": 1}, {"cegb_penalty_split": 2, "cegb_tradeoff": 0.5}),
     ]
@@ -567,7 +583,11 @@ def test_dataset_construction_overwrites_user_provided_metadata_fields():
         np_assert_array_equal(dtrain.position, expected_position, strict=True)
         np_assert_array_equal(dtrain.get_position(), expected_position, strict=True)
         # NOTE: "position" is converted to int32 on the C++ side
-        np_assert_array_equal(dtrain.get_field("position"), np.array([0.0, 1.0], dtype=np.int32), strict=True)
+        np_assert_array_equal(
+            dtrain.get_field("position"),
+            np.array([0.0, 1.0], dtype=np.int32),
+            strict=True,
+        )
 
     expected_weight = np.array([0.5, 1.5], dtype=np.float32)
     np_assert_array_equal(dtrain.weight, expected_weight, strict=True)
@@ -634,13 +654,17 @@ def test_choose_param_value_preserves_nones():
 
     # correctly chooses value when only an alias is provided
     params = lgb.basic._choose_param_value(
-        main_param_name="num_threads", params={"n_jobs": None, "objective": "regression"}, default_value=2
+        main_param_name="num_threads",
+        params={"n_jobs": None, "objective": "regression"},
+        default_value=2,
     )
     assert params == {"num_threads": None, "objective": "regression"}
 
     # adds None if that's given as the default and param not found
     params = lgb.basic._choose_param_value(
-        main_param_name="min_data_in_leaf", params={"objective": "regression"}, default_value=None
+        main_param_name="min_data_in_leaf",
+        params={"objective": "regression"},
+        default_value=None,
     )
     assert params == {"objective": "regression", "min_data_in_leaf": None}
 
@@ -689,7 +713,8 @@ def test_list_to_1d_numpy(collection, dtype, rng):
             return
         elif pd.api.types.is_string_dtype(y):
             with pytest.raises(
-                ValueError, match=r"pandas dtypes must be int, float or bool\.\nFields with bad pandas dtypes: 0: str"
+                ValueError,
+                match=r"pandas dtypes must be int, float or bool\.\nFields with bad pandas dtypes: 0: str",
             ):
                 lgb.basic._list_to_1d_numpy(y, dtype=np.float32, name=custom_name)
             return
@@ -735,7 +760,8 @@ def test_smoke_custom_parser(tmp_path):
 
     data = lgb.Dataset(data_path, params={"parser_config_file": parser_config_file})
     with pytest.raises(
-        lgb.basic.LightGBMError, match="Cannot find parser class 'dummy', please register first or check config format"
+        lgb.basic.LightGBMError,
+        match="Cannot find parser class 'dummy', please register first or check config format",
     ):
         data.construct()
 
@@ -747,7 +773,12 @@ def test_param_aliases():
     assert all(isinstance(i, list) for i in aliases.values())
     assert all(len(i) >= 1 for i in aliases.values())
     assert all(k in v for k, v in aliases.items())
-    assert lgb.basic._ConfigAliases.get("config", "task") == {"config", "config_file", "task", "task_type"}
+    assert lgb.basic._ConfigAliases.get("config", "task") == {
+        "config",
+        "config_file",
+        "task",
+        "task_type",
+    }
     assert lgb.basic._ConfigAliases.get_sorted("min_data_in_leaf") == [
         "min_data_in_leaf",
         "min_data",
@@ -800,7 +831,10 @@ def test_no_copy_when_single_float_dtype_dataframe(dtype, feature_name, rng):
     # ref: https://github.com/pandas-dev/pandas/issues/58913
     df = pd.DataFrame(X, copy=False)
     built_data = lgb.basic._data_from_pandas(
-        data=df, feature_name=feature_name, categorical_feature="auto", pandas_categorical=None
+        data=df,
+        feature_name=feature_name,
+        categorical_feature="auto",
+        pandas_categorical=None,
     )[0]
     assert built_data.dtype == dtype
     assert np.shares_memory(X, built_data)
@@ -914,7 +948,10 @@ def test_feature_names_are_set_correctly_when_no_feature_names_passed_into_Datas
 
 
 # NOTE: this intentionally contains values where num_leaves <, ==, and > (max_depth^2)
-@pytest.mark.parametrize(("max_depth", "num_leaves"), [(-1, 3), (-1, 50), (5, 3), (5, 31), (5, 32), (8, 3), (8, 31)])
+@pytest.mark.parametrize(
+    ("max_depth", "num_leaves"),
+    [(-1, 3), (-1, 50), (5, 3), (5, 31), (5, 32), (8, 3), (8, 31)],
+)
 def test_max_depth_warning_is_not_raised_if_num_leaves_is_also_provided(capsys, num_leaves, max_depth):
     X, y = make_blobs(n_samples=1_000, n_features=1, centers=2)
     lgb.Booster(

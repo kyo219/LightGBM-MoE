@@ -182,7 +182,11 @@ def test_booster(tmp_path):
     test = load_from_mat(binary_example_dir / "binary.test", train)
     booster = ctypes.c_void_p()
     model_path = tmp_path / "model.txt"
-    LIB.LGBM_BoosterCreate(train, c_str("app=binary metric=auc num_leaves=31 verbose=0"), ctypes.byref(booster))
+    LIB.LGBM_BoosterCreate(
+        train,
+        c_str("app=binary metric=auc num_leaves=31 verbose=0"),
+        ctypes.byref(booster),
+    )
     LIB.LGBM_BoosterAddValidData(booster, test)
     produced_empty_tree = ctypes.c_int(0)
     for i in range(1, 51):
@@ -190,11 +194,20 @@ def test_booster(tmp_path):
         result = np.array([0.0], dtype=np.float64)
         out_len = ctypes.c_int(0)
         LIB.LGBM_BoosterGetEval(
-            booster, ctypes.c_int(0), ctypes.byref(out_len), result.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            booster,
+            ctypes.c_int(0),
+            ctypes.byref(out_len),
+            result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
         )
         if i % 10 == 0:
             print(f"{i} iteration test AUC {result[0]:.6f}")
-    LIB.LGBM_BoosterSaveModel(booster, ctypes.c_int(0), ctypes.c_int(-1), ctypes.c_int(0), c_str(str(model_path)))
+    LIB.LGBM_BoosterSaveModel(
+        booster,
+        ctypes.c_int(0),
+        ctypes.c_int(-1),
+        ctypes.c_int(0),
+        c_str(str(model_path)),
+    )
     LIB.LGBM_BoosterFree(booster)
     free_dataset(train)
     free_dataset(test)

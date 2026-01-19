@@ -56,7 +56,10 @@ def test_record_evaluation_callback_is_picklable(serializer):
 
 @pytest.mark.parametrize("serializer", SERIALIZERS)
 def test_reset_parameter_callback_is_picklable(serializer):
-    params = {"bagging_fraction": [0.7] * 5 + [0.6] * 5, "feature_fraction": reset_feature_fraction}
+    params = {
+        "bagging_fraction": [0.7] * 5 + [0.6] * 5,
+        "feature_fraction": reset_feature_fraction,
+    }
     callback = lgb.reset_parameter(**params)
     callback_from_disk = pickle_and_unpickle_object(obj=callback, serializer=serializer)
     assert callback_from_disk.order == 10

@@ -136,7 +136,10 @@ def assert_datasets_equal(tmp_path: Path, lhs: lgb.Dataset, rhs: lgb.Dataset):
     ("arrow_table_fn", "dataset_params"),
     [  # Use lambda functions here to minimize memory consumption
         (lambda: generate_simple_arrow_table(), dummy_dataset_params()),
-        (lambda: generate_simple_arrow_table(empty_chunks=True), dummy_dataset_params()),
+        (
+            lambda: generate_simple_arrow_table(empty_chunks=True),
+            dummy_dataset_params(),
+        ),
         (lambda: generate_dummy_arrow_table(), dummy_dataset_params()),
         (lambda: generate_nullable_arrow_table(pa.float32()), dummy_dataset_params()),
         (lambda: generate_nullable_arrow_table(pa.int32()), dummy_dataset_params()),
@@ -364,7 +367,10 @@ def assert_equal_predict_arrow_pandas(booster: lgb.Booster, data: pa.Table):
 def test_predict_regression():
     data_float = generate_random_arrow_table(10, 10000, 42)
     data_bool = generate_random_arrow_table(1, 10000, 42, generate_nulls=False, values=np.array([True, False]))
-    data = pa.Table.from_arrays(data_float.columns + data_bool.columns, names=data_float.schema.names + ["col_bool"])
+    data = pa.Table.from_arrays(
+        data_float.columns + data_bool.columns,
+        names=data_float.schema.names + ["col_bool"],
+    )
 
     dataset = lgb.Dataset(
         data,
@@ -428,7 +434,10 @@ def test_predict_ranking():
 def test_arrow_feature_name_auto():
     data = generate_dummy_arrow_table()
     dataset = lgb.Dataset(
-        data, label=pa.array([0, 1, 0, 0, 1]), params=dummy_dataset_params(), categorical_feature=["a"]
+        data,
+        label=pa.array([0, 1, 0, 0, 1]),
+        params=dummy_dataset_params(),
+        categorical_feature=["a"],
     )
     booster = lgb.train({"num_leaves": 7}, dataset, num_boost_round=5)
     assert booster.feature_name() == ["a", "b"]
@@ -511,9 +520,12 @@ def test_get_data_arrow_table_subset(rng):
         assert pyarrow_array_equal(expected_col, returned_col)
 
 
-def test_dataset_construction_from_pa_table_without_cffi_raises_informative_error(missing_module_cffi):
+def test_dataset_construction_from_pa_table_without_cffi_raises_informative_error(
+    missing_module_cffi,
+):
     with pytest.raises(
-        lgb.basic.LightGBMError, match="Cannot init Dataset from Arrow without 'pyarrow' and 'cffi' installed."
+        lgb.basic.LightGBMError,
+        match="Cannot init Dataset from Arrow without 'pyarrow' and 'cffi' installed.",
     ):
         lgb.Dataset(
             generate_dummy_arrow_table(),
@@ -522,7 +534,9 @@ def test_dataset_construction_from_pa_table_without_cffi_raises_informative_erro
         ).construct()
 
 
-def test_predicting_from_pa_table_without_cffi_raises_informative_error(missing_module_cffi):
+def test_predicting_from_pa_table_without_cffi_raises_informative_error(
+    missing_module_cffi,
+):
     data = generate_random_arrow_table(num_columns=3, num_datapoints=1_000, seed=42)
     labels = generate_random_arrow_array(num_datapoints=data.shape[0], seed=42)
     bst = lgb.train(
@@ -535,6 +549,7 @@ def test_predicting_from_pa_table_without_cffi_raises_informative_error(missing_
     )
 
     with pytest.raises(
-        lgb.basic.LightGBMError, match="Cannot predict from Arrow without 'pyarrow' and 'cffi' installed."
+        lgb.basic.LightGBMError,
+        match="Cannot predict from Arrow without 'pyarrow' and 'cffi' installed.",
     ):
         bst.predict(data)

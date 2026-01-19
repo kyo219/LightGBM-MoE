@@ -220,13 +220,28 @@ class TestMixtureSaveLoad:
         expert_pred_after = bst_loaded.predict_expert_pred(X)
 
         # Check consistency
-        np.testing.assert_allclose(pred_before, pred_after, rtol=1e-6, err_msg="predict differs after save/load")
         np.testing.assert_allclose(
-            regime_proba_before, regime_proba_after, rtol=1e-6, err_msg="predict_regime_proba differs after save/load"
+            pred_before,
+            pred_after,
+            rtol=1e-6,
+            err_msg="predict differs after save/load",
         )
-        np.testing.assert_array_equal(regime_before, regime_after, err_msg="predict_regime differs after save/load")
         np.testing.assert_allclose(
-            expert_pred_before, expert_pred_after, rtol=1e-6, err_msg="predict_expert_pred differs after save/load"
+            regime_proba_before,
+            regime_proba_after,
+            rtol=1e-6,
+            err_msg="predict_regime_proba differs after save/load",
+        )
+        np.testing.assert_array_equal(
+            regime_before,
+            regime_after,
+            err_msg="predict_regime differs after save/load",
+        )
+        np.testing.assert_allclose(
+            expert_pred_before,
+            expert_pred_after,
+            rtol=1e-6,
+            err_msg="predict_expert_pred differs after save/load",
         )
 
         # Check loaded model properties
@@ -267,7 +282,10 @@ class TestMixtureDisabled:
 
         # Predictions should be identical
         np.testing.assert_allclose(
-            pred_std, pred_moe_off, rtol=1e-10, err_msg="mixture_enable=0 differs from standard GBDT"
+            pred_std,
+            pred_moe_off,
+            rtol=1e-10,
+            err_msg="mixture_enable=0 differs from standard GBDT",
         )
 
         # Standard model should not be a mixture

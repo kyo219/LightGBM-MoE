@@ -67,13 +67,23 @@ def experiment(objective, label_type, data):
     """
     nrounds = 5
     lgb_data = data[f"lgb_with_{label_type}_labels"]
-    params = {"objective": objective, "feature_fraction": 1, "bagging_fraction": 1, "verbose": -1, "seed": 123}
+    params = {
+        "objective": objective,
+        "feature_fraction": 1,
+        "bagging_fraction": 1,
+        "verbose": -1,
+        "seed": 123,
+    }
     time_zero = time.time()
     gbm = lgb.train(params, lgb_data, num_boost_round=nrounds)
     y_fitted = gbm.predict(data["X"])
     y_true = data[f"{label_type}_labels"]
     duration = time.time() - time_zero
-    return {"time": duration, "correlation": np.corrcoef(y_fitted, y_true)[0, 1], "logloss": log_loss(y_fitted, y_true)}
+    return {
+        "time": duration,
+        "correlation": np.corrcoef(y_fitted, y_true)[0, 1],
+        "logloss": log_loss(y_fitted, y_true),
+    }
 
 
 #################

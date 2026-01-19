@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 
-def get_parameter_infos(config_hpp: Path) -> Tuple[List[Tuple[str, int]], List[List[Dict[str, List]]]]:
+def get_parameter_infos(
+    config_hpp: Path,
+) -> Tuple[List[Tuple[str, int]], List[List[Dict[str, List]]]]:
     """Parse config header file.
 
     Parameters
@@ -176,7 +178,12 @@ def set_one_var_from_string(name: str, param_type: str, checks: List[str]) -> st
         Lines of auto config file with getting and checks of one parameter value.
     """
     ret = ""
-    univar_mapper = {"int": "GetInt", "double": "GetDouble", "bool": "GetBool", "std::string": "GetString"}
+    univar_mapper = {
+        "int": "GetInt",
+        "double": "GetDouble",
+        "bool": "GetBool",
+        "std::string": "GetString",
+    }
     if "vector" not in param_type:
         ret += f'  {univar_mapper[param_type]}(params, "{name}", &{name});\n'
         if len(checks) > 0:
@@ -197,7 +204,9 @@ def set_one_var_from_string(name: str, param_type: str, checks: List[str]) -> st
 
 
 def gen_parameter_description(
-    sections: List[Tuple[str, int]], descriptions: List[List[Dict[str, List]]], params_rst: Path
+    sections: List[Tuple[str, int]],
+    descriptions: List[List[Dict[str, List]]],
+    params_rst: Path,
 ) -> None:
     """Write descriptions of parameters to the documentation file.
 
@@ -212,7 +221,7 @@ def gen_parameter_description(
     """
     params_to_write = []
     lvl_mapper = {1: "-", 2: "~"}
-    for (section_name, section_lvl), section_params in zip(sections, descriptions):
+    for (section_name, section_lvl), section_params in zip(sections, descriptions, strict=True):
         heading_sign = lvl_mapper[section_lvl]
         params_to_write.append(f"{section_name}\n{heading_sign * len(section_name)}")
         for param_desc in section_params:

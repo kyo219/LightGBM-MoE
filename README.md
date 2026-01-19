@@ -80,6 +80,34 @@ regime_proba = model.predict_regime_proba(X_test)  # Gate probabilities (N, K)
 expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 ```
 
+### Training with Validation & Early Stopping
+
+```python
+import lightgbm_moe as lgb
+
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 2,
+    'objective': 'regression',
+    'metric': 'rmse',
+    'verbose': 1,
+}
+
+train_data = lgb.Dataset(X_train, label=y_train)
+valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+model = lgb.train(
+    params,
+    train_data,
+    num_boost_round=100,
+    valid_sets=[valid_data],
+    valid_names=['valid'],
+    callbacks=[lgb.early_stopping(stopping_rounds=10)]
+)
+
+print(f"Best iteration: {model.best_iteration}")
+```
+
 ---
 
 ## API Reference
@@ -94,8 +122,61 @@ expert_preds = model.predict_expert_pred(X_test)   # Expert predictions (N, K)
 | `mixture_e_step_mode` | string | `"em"` | `"em"`, `"loss_only"` | E-step mode. `"em"`: use gate probability + loss (standard EM). `"loss_only"`: use only loss (simpler, assigns to best-fitting expert). |
 | `mixture_warmup_iters` | int | 10 | 0-50 | Number of warmup iterations. During warmup, responsibilities are uniform (1/K) to allow experts to learn before specialization. |
 | `mixture_balance_factor` | int | 10 | 2-20 | Load balancing aggressiveness. Minimum expert usage = 1/(factor × K). Lower = more aggressive balancing. Recommended: 5-7. |
-| `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | Responsibility smoothing method for time-series stability. |
+| `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | Responsibility smoothing method for time-series stability. **Recommended: `"none"`** (see note below). |
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | Smoothing strength. Only used when `mixture_r_smoothing` is not `"none"`. Higher = more smoothing (slower regime transitions). |
+
+> **Important: Use `mixture_r_smoothing="none"` (default)**
+>
+> Smoothing methods (`ema`, `markov`, `momentum`) can cause **expert collapse** where all experts converge to similar predictions. In benchmarks with Optuna optimization, `smoothing=none` consistently achieves good expert separation (correlation ~0.02, regime accuracy ~98%), while other smoothing methods often collapse (correlation ~0.99, regime accuracy ~50%).
+
+### Early Stopping
+
+MoE supports validation-based early stopping, useful for hyperparameter tuning with Optuna.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `early_stopping_round` | int | 0 | Stop training if validation metric doesn't improve for N rounds. Set via `lgb.early_stopping()` callback. |
+| `first_metric_only` | bool | False | Only use the first metric for early stopping (when multiple metrics specified). |
+
+**Usage with callbacks:**
+
+```python
+model = lgb.train(
+    params,
+    train_data,
+    valid_sets=[valid_data],
+    callbacks=[
+        lgb.early_stopping(stopping_rounds=10),  # Stop after 10 rounds without improvement
+        lgb.log_evaluation(period=10),           # Log every 10 iterations
+    ]
+)
+```
+
+**Usage with Optuna:**
+
+```python
+def objective(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        'objective': 'regression',
+        'metric': 'rmse',
+        'verbose': -1,
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=500,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=20)]
+    )
+
+    return model.best_score['valid_0']['rmse']
+```
 
 ### Per-Expert Hyperparameters (Advanced)
 
@@ -307,42 +388,70 @@ study.optimize(objective_per_expert, n_trials=200)
 
 ## Benchmark
 
-**Setup**: 100 Optuna trials, 5-fold time-series CV, full hyperparameter search.
+**Setup**: 200 Optuna trials, 5-fold time-series CV, early stopping (50 rounds).
 
-| Dataset | Description | Standard | MoE | MoE-PerExp | Best |
-|---------|-------------|----------|-----|------------|------|
-| **Synthetic** | X→Regime | 5.49 | **4.09** | 4.25 | **+25.7%** |
-| Hamilton | Latent Markov | 0.74 | 0.74 | **0.74** | +0.1% |
-| VIX | Latent volatility | **0.012** | 0.012 | 0.012 | +0.0% |
+### RMSE Comparison
 
-- **MoE**: Shared hyperparameters across all experts
-- **MoE-PerExp**: Per-expert tree structure (`mixture_expert_max_depths`, etc.)
+| Dataset | Standard | MoE | MoE-PE | Best Improvement |
+|---------|----------|-----|--------|------------------|
+| Synthetic | 5.0739 | **4.3049** | 4.7611 | +15.2% |
+| Hamilton | 0.7205 | 0.7220 | **0.7204** | +0.0% |
+| VIX | 0.0116 | **0.0116** | 0.0116 | +0.1% |
+
+### Expert Differentiation (Regime Separation)
+
+| Dataset | MoE K | MoE-PE K | MoE Corr (min/max) | MoE-PE Corr (min/max) | MoE Regime Acc | MoE-PE Regime Acc |
+|---------|-------|----------|--------------------|-----------------------|----------------|-------------------|
+| Synthetic | 2 | 3 | -0.42/-0.42 | -0.29/0.82 | 96.2% | 95.1% |
+| Hamilton | 4 | 3 | 0.69/0.88 | 0.61/0.67 | 52.6% | 52.6% |
+| VIX | 2 | 2 | 0.64/0.64 | 0.99/0.99 | 53.0% | 52.1% |
+
+- **K**: Number of experts selected by Optuna
+- **Expert Corr (min/max)**: Pairwise correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
+- **Regime Acc**: Classification accuracy of predicted regime vs true regime
 
 **Key Findings**:
-- MoE excels when regime is determinable from features (X): **+25.7%** on Synthetic with 99.2% regime accuracy
-- Per-expert hyperparameters add more search dimensions, requiring more trials to converge
-- On latent regime data (Hamilton, VIX), MoE provides little benefit as expected
+- MoE achieves **+15.2% improvement** on Synthetic data with expert correlation of **-0.42** (opposite predictions!)
+- Both MoE and MoE-PE achieve **96%+ regime accuracy** on Synthetic data
+- Latent regime data (Hamilton, VIX) shows limited improvement as expected (regime not determinable from X)
+
+### Selected Hyperparameters (Synthetic Dataset)
+
+**MoE (Shared Tree Structure):**
+- num_experts: 2, max_depth: 10, num_leaves: 20, learning_rate: 0.064, alpha: 1.44, warmup: 5
+
+**MoE-PerExpert (Per-Expert Tree Structure):**
+- num_experts: 3, learning_rate: 0.068, alpha: 0.52, warmup: 5
+
+| Expert | max_depth | num_leaves | min_data_in_leaf |
+|--------|-----------|------------|------------------|
+| E0 | 3 | 21 | 79 |
+| E1 | 4 | 79 | 66 |
+| E2 | 6 | 12 | 65 |
 
 ### Run Benchmark
 
 ```bash
-# Basic benchmark (Standard vs MoE)
+# Full benchmark (Standard vs MoE vs MoE-PE, 100 trials default)
 python examples/benchmark.py
 
-# Include per-expert hyperparameter search
-python examples/benchmark.py --per-expert
+# More trials for better optimization
+python examples/benchmark.py --trials 200
 
-# Quick test with fewer trials
-python examples/benchmark.py --trials 20 --per-expert
+# Quick test
+python examples/benchmark.py --trials 10
+
+# Output to markdown
+python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
 
 ### Visualization
 
-![Regime Switching Prediction](examples/regime_switching_comparison.png)
+![Benchmark Results](examples/benchmark_results.png)
 
-- **Top**: Actual vs Predicted values with background colored by predicted regime
-- **Bottom**: Gate probability over time (▼▲ = true regime markers)
-- **Result**: 95.8% regime accuracy on synthetic test set
+- **Left**: Regime separation (% samples routed to each expert by true regime)
+- **Center**: Expert prediction scatter (color = true regime)
+- **Right**: RMSE comparison across methods
 
 ---
 
@@ -589,6 +698,34 @@ regime_proba = model.predict_regime_proba(X_test)  # ゲート確率 (N, K)
 expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測 (N, K)
 ```
 
+### バリデーション & Early Stopping
+
+```python
+import lightgbm_moe as lgb
+
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 2,
+    'objective': 'regression',
+    'metric': 'rmse',
+    'verbose': 1,
+}
+
+train_data = lgb.Dataset(X_train, label=y_train)
+valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+model = lgb.train(
+    params,
+    train_data,
+    num_boost_round=100,
+    valid_sets=[valid_data],
+    valid_names=['valid'],
+    callbacks=[lgb.early_stopping(stopping_rounds=10)]
+)
+
+print(f"Best iteration: {model.best_iteration}")
+```
+
 ---
 
 ## API リファレンス
@@ -603,8 +740,61 @@ expert_preds = model.predict_expert_pred(X_test)   # 各エキスパート予測
 | `mixture_e_step_mode` | string | `"em"` | `"em"`, `"loss_only"` | E-stepモード。`"em"`: ゲート確率+損失（標準EM）。`"loss_only"`: 損失のみ（シンプル、最も適合するExpertに割り当て）。 |
 | `mixture_warmup_iters` | int | 10 | 0-50 | ウォームアップ回数。この期間中、責務は均等 (1/K) で、専門化前にエキスパートが学習できる。 |
 | `mixture_balance_factor` | int | 10 | 2-20 | 負荷分散の強度。最小エキスパート使用率 = 1/(factor × K)。小さいほど積極的なバランシング。推奨: 5-7。 |
-| `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | 時系列安定化のための責務平滑化手法。 |
+| `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | 時系列安定化のための責務平滑化手法。**推奨: `"none"`**（下記注意参照）。 |
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | 平滑化強度。`mixture_r_smoothing` が `"none"` 以外の場合のみ使用。高いほど平滑化が強い（レジーム遷移が遅い）。 |
+
+> **重要: `mixture_r_smoothing="none"`（デフォルト）を推奨**
+>
+> 平滑化手法（`ema`, `markov`, `momentum`）は**Expert collapse**（全Expertが同じ予測に収束）を引き起こす可能性があります。Optuna最適化のベンチマークでは、`smoothing=none`は安定して良好なExpert分離（相関~0.02、regime精度~98%）を達成しますが、他の平滑化手法ではcollapse（相関~0.99、regime精度~50%）が頻発しました。
+
+### Early Stopping
+
+MoEはバリデーションベースのearly stoppingをサポート。Optunaでのハイパーパラメータ最適化に便利です。
+
+| パラメータ | 型 | デフォルト | 説明 |
+|-----------|------|---------|-------------|
+| `early_stopping_round` | int | 0 | N回連続でバリデーション指標が改善しない場合に学習を停止。`lgb.early_stopping()` コールバックで設定。 |
+| `first_metric_only` | bool | False | 複数のmetricを指定した場合、最初のmetricのみでearly stoppingを判定。 |
+
+**コールバックでの使用:**
+
+```python
+model = lgb.train(
+    params,
+    train_data,
+    valid_sets=[valid_data],
+    callbacks=[
+        lgb.early_stopping(stopping_rounds=10),  # 10ラウンド改善なしで停止
+        lgb.log_evaluation(period=10),           # 10イテレーションごとにログ
+    ]
+)
+```
+
+**Optunaでの使用:**
+
+```python
+def objective(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        'objective': 'regression',
+        'metric': 'rmse',
+        'verbose': -1,
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=500,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=20)]
+    )
+
+    return model.best_score['valid_0']['rmse']
+```
 
 ### Expertごとのハイパーパラメータ（上級者向け）
 
@@ -816,42 +1006,70 @@ study.optimize(objective_per_expert, n_trials=200)
 
 ## ベンチマーク
 
-**設定**: 100 Optunaトライアル、5分割時系列CV、完全ハイパーパラメータ探索。
+**設定**: 200 Optunaトライアル、5分割時系列CV、early stopping (50 rounds)。
 
-| データセット | 説明 | Standard | MoE | MoE-PerExp | Best |
-|-------------|------|----------|-----|------------|------|
-| **合成** | X→Regime | 5.49 | **4.09** | 4.25 | **+25.7%** |
-| Hamilton | 潜在マルコフ | 0.74 | 0.74 | **0.74** | +0.1% |
-| VIX | 潜在ボラティリティ | **0.012** | 0.012 | 0.012 | +0.0% |
+### RMSE比較
 
-- **MoE**: 全Expertで共通のハイパーパラメータ
-- **MoE-PerExp**: Expertごとの木構造 (`mixture_expert_max_depths`等)
+| データセット | Standard | MoE | MoE-PE | 改善率 |
+|-------------|----------|-----|--------|--------|
+| Synthetic | 5.0739 | **4.3049** | 4.7611 | +15.2% |
+| Hamilton | 0.7205 | 0.7220 | **0.7204** | +0.0% |
+| VIX | 0.0116 | **0.0116** | 0.0116 | +0.1% |
+
+### Expert分化（レジーム分離）
+
+| データセット | MoE K | MoE-PE K | MoE相関 (min/max) | MoE-PE相関 (min/max) | MoE Regime精度 | MoE-PE Regime精度 |
+|-------------|-------|----------|-------------------|----------------------|----------------|-------------------|
+| Synthetic | 2 | 3 | -0.42/-0.42 | -0.29/0.82 | 96.2% | 95.1% |
+| Hamilton | 4 | 3 | 0.69/0.88 | 0.61/0.67 | 52.6% | 52.6% |
+| VIX | 2 | 2 | 0.64/0.64 | 0.99/0.99 | 53.0% | 52.1% |
+
+- **K**: Optunaで選択されたExpert数
+- **Expert相関 (min/max)**: Expert間の予測相関（低い=分化している、負=逆の予測）
+- **Regime精度**: 予測regimeと真のregimeの分類精度
 
 **重要な発見**:
-- MoEはレジームが特徴量(X)から決定可能な場合に有効: 合成データで**+25.7%**、regime精度99.2%
-- per-expertハイパラは探索次元が増えるため、収束に多くのtrialが必要
-- 潜在レジームデータ(Hamilton, VIX)ではMoEの効果は限定的（想定通り）
+- MoEがSyntheticデータで **+15.2%の改善** 、Expert相関 **-0.42**（逆相関！）
+- MoEとMoE-PE両方でSyntheticデータにおいて **96%以上のregime精度** を達成
+- 潜在レジームデータ（Hamilton, VIX）では改善が限定的（レジームがXから決定できないため、想定通り）
+
+### 選択されたハイパーパラメータ（Syntheticデータセット）
+
+**MoE（共有木構造）:**
+- num_experts: 2, max_depth: 10, num_leaves: 20, learning_rate: 0.064, alpha: 1.44, warmup: 5
+
+**MoE-PerExpert（Expertごとの木構造）:**
+- num_experts: 3, learning_rate: 0.068, alpha: 0.52, warmup: 5
+
+| Expert | max_depth | num_leaves | min_data_in_leaf |
+|--------|-----------|------------|------------------|
+| E0 | 3 | 21 | 79 |
+| E1 | 4 | 79 | 66 |
+| E2 | 6 | 12 | 65 |
 
 ### ベンチマーク実行
 
 ```bash
-# 基本ベンチマーク (Standard vs MoE)
+# フルベンチマーク (Standard vs MoE vs MoE-PE、デフォルト100 trials)
 python examples/benchmark.py
 
-# per-expertハイパーパラメータも含める
-python examples/benchmark.py --per-expert
+# より多くのtrials
+python examples/benchmark.py --trials 200
 
 # 軽めのテスト
-python examples/benchmark.py --trials 20 --per-expert
+python examples/benchmark.py --trials 10
+
+# Markdown出力
+python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
 
 ### 可視化
 
-![レジームスイッチング予測](examples/regime_switching_comparison.png)
+![ベンチマーク結果](examples/benchmark_results.png)
 
-- **上段**: 実績値 vs 予測値（背景色=予測レジーム）
-- **下段**: 時間経過でのゲート確率（▼▲=真のレジームマーカー）
-- **結果**: 合成テストセットで95.8%のレジーム精度
+- **左**: レジーム分離（真のレジームごとのExpertへのルーティング%）
+- **中央**: Expert予測散布図（色=真のレジーム）
+- **右**: 手法間のRMSE比較
 
 ---
 

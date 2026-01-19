@@ -48,7 +48,14 @@ class FileLoader:
 
     def file_load_check(self, lgb_train, name):
         lgb_train_f = lgb.Dataset(self.path(name), params=self.params).construct()
-        for f in ("num_data", "num_feature", "get_label", "get_weight", "get_init_score", "get_group"):
+        for f in (
+            "num_data",
+            "num_feature",
+            "get_label",
+            "get_weight",
+            "get_init_score",
+            "get_group",
+        ):
             a = getattr(lgb_train, f)()
             b = getattr(lgb_train_f, f)()
             if a is None and b is None:

@@ -832,14 +832,16 @@ def _data_from_pandas(
         feature_name = [str(col) for col in data.columns]
 
     # determine categorical features
-    cat_cols = [col for col, dtype in zip(data.columns, data.dtypes) if isinstance(dtype, pd_CategoricalDtype)]
+    cat_cols = [
+        col for col, dtype in zip(data.columns, data.dtypes, strict=False) if isinstance(dtype, pd_CategoricalDtype)
+    ]
     cat_cols_not_ordered: List[str] = [col for col in cat_cols if not data[col].cat.ordered]
     if pandas_categorical is None:  # train dataset
         pandas_categorical = [list(data[col].cat.categories) for col in cat_cols]
     else:
         if len(cat_cols) != len(pandas_categorical):
             raise ValueError("train and valid dataset categorical_feature do not match.")
-        for col, category in zip(cat_cols, pandas_categorical):
+        for col, category in zip(cat_cols, pandas_categorical, strict=False):
             if list(data[col].cat.categories) != list(category):
                 data[col] = data[col].cat.set_categories(category)
     if cat_cols:  # cat_cols is list
@@ -1322,13 +1324,13 @@ class _InnerPredictor:
             sections = np.arange(_MAX_INT32, nrow, _MAX_INT32)
             # __get_num_preds() cannot work with nrow > MAX_INT32, so calculate overall number of predictions piecemeal
             n_preds = [
-                self.__get_num_preds(start_iteration, num_iteration, i, predict_type)
+                self.__get_num_preds(start_iteration, num_iteration, int(i), predict_type)
                 for i in np.diff([0] + list(sections) + [nrow])
             ]
             n_preds_sections = np.array([0] + n_preds, dtype=np.intp).cumsum()
             preds = np.empty(sum(n_preds), dtype=np.float64)
             for chunk, (start_idx_pred, end_idx_pred) in zip(
-                np.array_split(mat, sections), zip(n_preds_sections, n_preds_sections[1:])
+                np.array_split(mat, sections), zip(n_preds_sections, n_preds_sections[1:], strict=False), strict=False
             ):
                 # avoid memory consumption by arrays concatenation operations
                 self.__inner_predict_np2d(
@@ -1524,7 +1526,7 @@ class _InnerPredictor:
         start_iteration: int,
         num_iteration: int,
         predict_type: int,
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[Union[np.ndarray, List[scipy.sparse.csc_matrix], List[scipy.sparse.csr_matrix]], int]:
         """Predict for a CSR data."""
         if predict_type == _C_API_PREDICT_CONTRIB:
             return self.__inner_predict_csr_sparse(
@@ -1537,11 +1539,15 @@ class _InnerPredictor:
         if nrow > _MAX_INT32:
             sections = [0] + list(np.arange(_MAX_INT32, nrow, _MAX_INT32)) + [nrow]
             # __get_num_preds() cannot work with nrow > MAX_INT32, so calculate overall number of predictions piecemeal
-            n_preds = [self.__get_num_preds(start_iteration, num_iteration, i, predict_type) for i in np.diff(sections)]
+            n_preds = [
+                self.__get_num_preds(start_iteration, num_iteration, int(i), predict_type) for i in np.diff(sections)
+            ]
             n_preds_sections = np.array([0] + n_preds, dtype=np.intp).cumsum()
             preds = np.empty(sum(n_preds), dtype=np.float64)
             for (start_idx, end_idx), (start_idx_pred, end_idx_pred) in zip(
-                zip(sections, sections[1:]), zip(n_preds_sections, n_preds_sections[1:])
+                zip(sections, sections[1:], strict=False),
+                zip(n_preds_sections, n_preds_sections[1:], strict=False),
+                strict=False,
             ):
                 # avoid memory consumption by arrays concatenation operations
                 self.__inner_predict_csr(
@@ -1625,7 +1631,7 @@ class _InnerPredictor:
         start_iteration: int,
         num_iteration: int,
         predict_type: int,
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[Union[np.ndarray, List[scipy.sparse.csc_matrix], List[scipy.sparse.csr_matrix]], int]:
         """Predict for a CSC data."""
         nrow = csc.shape[0]
         if nrow > _MAX_INT32:

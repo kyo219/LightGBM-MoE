@@ -17,7 +17,10 @@ import lightgbm_moe as lgb
 from .utils import np_assert_array_equal, sklearn_multiclass_custom_objective
 
 if platform in {"cygwin", "win32"}:
-    pytest.skip("lightgbm_moe.dask is not currently supported on Windows", allow_module_level=True)
+    pytest.skip(
+        "lightgbm_moe.dask is not currently supported on Windows",
+        allow_module_level=True,
+    )
 if not lgb.compat.DASK_INSTALLED:
     pytest.skip("Dask is not installed", allow_module_level=True)
 
@@ -251,7 +254,12 @@ def test_classifier(output, task, boosting_type, tree_learner, cluster):
     with Client(cluster) as client:
         X, y, w, _, dX, dy, dw, _ = _create_data(objective=task, output=output)
 
-        params = {"boosting_type": boosting_type, "tree_learner": tree_learner, "n_estimators": 50, "num_leaves": 31}
+        params = {
+            "boosting_type": boosting_type,
+            "tree_learner": tree_learner,
+            "n_estimators": 50,
+            "num_leaves": 31,
+        }
         if boosting_type == "rf":
             params.update(
                 {
@@ -268,7 +276,11 @@ def test_classifier(output, task, boosting_type, tree_learner, cluster):
         p1_raw = dask_classifier.predict(dX, raw_score=True).compute()
         p1_first_iter_raw = dask_classifier.predict(dX, start_iteration=0, num_iteration=1, raw_score=True).compute()
         p1_early_stop_raw = dask_classifier.predict(
-            dX, pred_early_stop=True, pred_early_stop_margin=1.0, pred_early_stop_freq=2, raw_score=True
+            dX,
+            pred_early_stop=True,
+            pred_early_stop_margin=1.0,
+            pred_early_stop_freq=2,
+            raw_score=True,
         ).compute()
         p1_proba = dask_classifier.predict_proba(dX).compute()
         p1_pred_leaf = dask_classifier.predict(dX, pred_leaf=True)
@@ -305,7 +317,10 @@ def test_classifier(output, task, boosting_type, tree_learner, cluster):
         # pref_leaf values should have the right shape
         # and values that look like valid tree nodes
         pred_leaf_vals = p1_pred_leaf.compute()
-        assert pred_leaf_vals.shape == (X.shape[0], dask_classifier.booster_.num_trees())
+        assert pred_leaf_vals.shape == (
+            X.shape[0],
+            dask_classifier.booster_.num_trees(),
+        )
         assert np.max(pred_leaf_vals) <= params["num_leaves"]
         assert np.min(pred_leaf_vals) >= 0
         assert len(np.unique(pred_leaf_vals)) <= params["num_leaves"]
@@ -604,7 +619,13 @@ def test_regressor_quantile(output, alpha, cluster):
     with Client(cluster) as client:
         X, y, w, _, dX, dy, dw, _ = _create_data(objective="regression", output=output)
 
-        params = {"objective": "quantile", "alpha": alpha, "random_state": 42, "n_estimators": 10, "num_leaves": 10}
+        params = {
+            "objective": "quantile",
+            "alpha": alpha,
+            "random_state": 42,
+            "n_estimators": 10,
+            "num_leaves": 10,
+        }
 
         dask_regressor = lgb.DaskLGBMRegressor(client=client, tree_learner_type="data_parallel", **params)
         dask_regressor = dask_regressor.fit(dX, dy, sample_weight=dw)
@@ -635,7 +656,11 @@ def test_regressor_custom_objective(output, cluster):
     with Client(cluster) as client:
         X, y, w, _, dX, dy, dw, _ = _create_data(objective="regression", output=output)
 
-        params = {"n_estimators": 10, "num_leaves": 10, "objective": _objective_least_squares}
+        params = {
+            "n_estimators": 10,
+            "num_leaves": 10,
+            "objective": _objective_least_squares,
+        }
 
         dask_regressor = lgb.DaskLGBMRegressor(client=client, time_out=5, tree_learner="data", **params)
         dask_regressor = dask_regressor.fit(dX, dy, sample_weight=dw)
@@ -683,7 +708,11 @@ def test_ranker(output, group, boosting_type, tree_learner, cluster):
     with Client(cluster) as client:
         if output == "dataframe-with-categorical":
             X, y, w, g, dX, dy, dw, dg = _create_data(
-                objective="ranking", output=output, group=group, n_features=1, n_informative=1
+                objective="ranking",
+                output=output,
+                group=group,
+                n_features=1,
+                n_informative=1,
             )
         else:
             X, y, w, g, dX, dy, dw, dg = _create_data(objective="ranking", output=output, group=group)
@@ -722,7 +751,11 @@ def test_ranker(output, group, boosting_type, tree_learner, cluster):
         p1_raw = dask_ranker.predict(dX, raw_score=True).compute()
         p1_first_iter_raw = dask_ranker.predict(dX, start_iteration=0, num_iteration=1, raw_score=True).compute()
         p1_early_stop_raw = dask_ranker.predict(
-            dX, pred_early_stop=True, pred_early_stop_margin=1.0, pred_early_stop_freq=2, raw_score=True
+            dX,
+            pred_early_stop=True,
+            pred_early_stop_margin=1.0,
+            pred_early_stop_freq=2,
+            raw_score=True,
         ).compute()
         rnkvec_dask_local = dask_ranker.to_local().predict(X)
 
@@ -767,7 +800,11 @@ def test_ranker_custom_objective(output, cluster):
     with Client(cluster) as client:
         if output == "dataframe-with-categorical":
             X, y, w, g, dX, dy, dw, dg = _create_data(
-                objective="ranking", output=output, group=group_sizes, n_features=1, n_informative=1
+                objective="ranking",
+                output=output,
+                group=group_sizes,
+                n_features=1,
+                n_informative=1,
             )
         else:
             X, y, w, g, dX, dy, dw, dg = _create_data(objective="ranking", output=output, group=group_sizes)
@@ -869,7 +906,10 @@ def test_eval_set_no_early_stopping(task, output, eval_sizes, eval_names_prefix,
             else:
                 n_eval_samples = max(chunk_size, int(n_samples * eval_size))
                 _, y_e, _, _, dX_e, dy_e, dw_e, dg_e = _create_data(
-                    objective=task, n_samples=n_eval_samples, output=output, chunk_size=chunk_size
+                    objective=task,
+                    n_samples=n_eval_samples,
+                    output=output,
+                    chunk_size=chunk_size,
                 )
 
             eval_set.append((dX_e, dy_e))
@@ -960,7 +1000,10 @@ def test_eval_set_with_custom_eval_metric(task, cluster):
             objective=task, n_samples=n_samples, output=output, chunk_size=chunk_size
         )
         _, _, _, _, dX_e, dy_e, _, dg_e = _create_data(
-            objective=task, n_samples=n_eval_samples, output=output, chunk_size=chunk_size
+            objective=task,
+            n_samples=n_eval_samples,
+            output=output,
+            chunk_size=chunk_size,
         )
 
         if task == "ranking":
@@ -969,7 +1012,12 @@ def test_eval_set_with_custom_eval_metric(task, cluster):
             eval_metric_names = [f"ndcg@{k}" for k in eval_at] + ["constant_metric"]
         elif task == "binary-classification":
             eval_metrics = ["binary_error", "auc", _constant_metric]
-            eval_metric_names = ["binary_logloss", "binary_error", "auc", "constant_metric"]
+            eval_metric_names = [
+                "binary_logloss",
+                "binary_error",
+                "auc",
+                "constant_metric",
+            ]
         else:
             eval_metrics = ["l1", _constant_metric]
             eval_metric_names = ["l2", "l1", "constant_metric"]
@@ -980,7 +1028,12 @@ def test_eval_set_with_custom_eval_metric(task, cluster):
         dask_model = model_factory(client=client, **params)
 
         eval_set = [(dX_e, dy_e)]
-        fit_params = {"X": dX, "y": dy, "eval_set": eval_set, "eval_metric": eval_metrics}
+        fit_params = {
+            "X": dX,
+            "y": dy,
+            "eval_set": eval_set,
+            "eval_metric": eval_metrics,
+        }
         if task == "ranking":
             fit_params.update({"group": dg, "eval_group": [dg_e], "eval_at": eval_at})
 
@@ -1009,7 +1062,10 @@ def test_training_works_if_client_not_provided_or_set_after_construction(task, c
         # should be able to use the class without specifying a client
         dask_model = model_factory(**params)
         assert dask_model.client is None
-        with pytest.raises(lgb.compat.LGBMNotFittedError, match="Cannot access property client_ before calling fit"):
+        with pytest.raises(
+            lgb.compat.LGBMNotFittedError,
+            match="Cannot access property client_ before calling fit",
+        ):
             dask_model.client_
 
         dask_model.fit(dX, dy, group=dg)
@@ -1038,7 +1094,10 @@ def test_training_works_if_client_not_provided_or_set_after_construction(task, c
         dask_model.set_params(client=client)
         assert dask_model.client == client
 
-        with pytest.raises(lgb.compat.LGBMNotFittedError, match="Cannot access property client_ before calling fit"):
+        with pytest.raises(
+            lgb.compat.LGBMNotFittedError,
+            match="Cannot access property client_ before calling fit",
+        ):
             dask_model.client_
 
         dask_model.fit(dX, dy, group=dg)
@@ -1093,7 +1152,8 @@ def test_model_and_local_version_are_picklable_whether_or_not_client_set_explici
                 assert dask_model.client is None
 
             with pytest.raises(
-                lgb.compat.LGBMNotFittedError, match="Cannot access property client_ before calling fit"
+                lgb.compat.LGBMNotFittedError,
+                match="Cannot access property client_ before calling fit",
             ):
                 dask_model.client_
 
@@ -1116,7 +1176,8 @@ def test_model_and_local_version_are_picklable_whether_or_not_client_set_explici
                 assert dask_model.client is None
 
             with pytest.raises(
-                lgb.compat.LGBMNotFittedError, match="Cannot access property client_ before calling fit"
+                lgb.compat.LGBMNotFittedError,
+                match="Cannot access property client_ before calling fit",
             ):
                 dask_model.client_
 
@@ -1200,7 +1261,11 @@ def test_warns_and_continues_on_unrecognized_tree_learner(cluster):
         X = da.random.random((1e3, 10))
         y = da.random.random((1e3, 1))
         dask_regressor = lgb.DaskLGBMRegressor(
-            client=client, time_out=5, tree_learner="some-nonsense-value", n_estimators=1, num_leaves=2
+            client=client,
+            time_out=5,
+            tree_learner="some-nonsense-value",
+            n_estimators=1,
+            num_leaves=2,
         )
         with pytest.warns(UserWarning, match="Parameter tree_learner set to some-nonsense-value"):
             dask_regressor = dask_regressor.fit(X, y)
@@ -1214,7 +1279,13 @@ def test_training_respects_tree_learner_aliases(tree_learner, cluster):
         task = "regression"
         _, _, _, _, dX, dy, dw, dg = _create_data(objective=task, output="array")
         dask_factory = task_to_dask_factory[task]
-        dask_model = dask_factory(client=client, tree_learner=tree_learner, time_out=5, n_estimators=10, num_leaves=15)
+        dask_model = dask_factory(
+            client=client,
+            tree_learner=tree_learner,
+            time_out=5,
+            n_estimators=10,
+            num_leaves=15,
+        )
         dask_model.fit(dX, dy, sample_weight=dw, group=dg)
 
         assert dask_model.fitted_
@@ -1229,7 +1300,11 @@ def test_error_on_feature_parallel_tree_learner(cluster):
         _ = wait([X, y])
         client.rebalance()
         dask_regressor = lgb.DaskLGBMRegressor(
-            client=client, time_out=5, tree_learner="feature_parallel", n_estimators=1, num_leaves=2
+            client=client,
+            time_out=5,
+            tree_learner="feature_parallel",
+            n_estimators=1,
+            num_leaves=2,
         )
         with pytest.raises(lgb.basic.LightGBMError, match="Do not support feature parallel in c api"):
             dask_regressor = dask_regressor.fit(X, y)
@@ -1244,7 +1319,13 @@ def test_errors(cluster):
         df = dd.demo.make_timeseries()
         df = df.map_partitions(f, meta=df._meta)
         with pytest.raises(Exception) as info:  # noqa: PT011, PT012 # error message needs to be coerced to a string
-            lgb.dask._train(client=client, data=df, label=df.x, params={}, model_factory=lgb.LGBMClassifier)
+            lgb.dask._train(
+                client=client,
+                data=df,
+                label=df.x,
+                params={},
+                model_factory=lgb.LGBMClassifier,
+            )
             assert "foo" in str(info.value)
 
 
@@ -1515,7 +1596,11 @@ def test_init_score(task, output, cluster, rng):
 
 
 def sklearn_checks_to_run():
-    check_names = ["check_estimator_get_tags_default_keys", "check_get_params_invariance", "check_set_params"]
+    check_names = [
+        "check_estimator_get_tags_default_keys",
+        "check_get_params_invariance",
+        "check_set_params",
+    ]
     for check_name in check_names:
         check_func = getattr(sklearn_checks, check_name, None)
         if check_func:
@@ -1554,7 +1639,13 @@ def test_predict_with_raw_score(task, output, cluster):
         _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output=output, group=None)
 
         model_factory = task_to_dask_factory[task]
-        params = {"client": client, "n_estimators": 1, "num_leaves": 2, "time_out": 5, "min_sum_hessian": 0}
+        params = {
+            "client": client,
+            "n_estimators": 1,
+            "num_leaves": 2,
+            "time_out": 5,
+            "min_sum_hessian": 0,
+        }
         model = model_factory(**params)
         model.fit(dX, dy, group=dg)
         raw_predictions = model.predict(dX, raw_score=True).compute()
@@ -1610,7 +1701,11 @@ def test_distributed_quantized_training(tmp_path, cluster):
     with Client(cluster) as client:
         X, y, w, _, dX, dy, dw, _ = _create_data(objective="regression", output="array")
 
-        np.savetxt(tmp_path / "data_dask.csv", np.hstack([np.array([y]).T, X]), fmt="%f,%f,%f,%f,%f")
+        np.savetxt(
+            tmp_path / "data_dask.csv",
+            np.hstack([np.array([y]).T, X]),
+            fmt="%f,%f,%f,%f,%f",
+        )
 
         params = {
             "boosting_type": "gbdt",

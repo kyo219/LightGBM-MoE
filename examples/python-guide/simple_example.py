@@ -37,7 +37,11 @@ params = {
 print("Starting training...")
 # train
 gbm = lgb.train(
-    params, lgb_train, num_boost_round=20, valid_sets=lgb_eval, callbacks=[lgb.early_stopping(stopping_rounds=5)]
+    params,
+    lgb_train,
+    num_boost_round=20,
+    valid_sets=lgb_eval,
+    callbacks=[lgb.early_stopping(stopping_rounds=5)],
 )
 
 print("Saving model...")

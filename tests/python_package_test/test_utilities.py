@@ -29,7 +29,11 @@ def test_register_logger(tmp_path):
     lgb_valid = lgb.Dataset(X, y, categorical_feature=[1])  # different object for early-stopping
 
     eval_records = {}
-    callbacks = [lgb.record_evaluation(eval_records), lgb.log_evaluation(2), lgb.early_stopping(10)]
+    callbacks = [
+        lgb.record_evaluation(eval_records),
+        lgb.log_evaluation(2),
+        lgb.early_stopping(10),
+    ]
     lgb.train(
         {"objective": "binary", "metric": ["auc", "binary_error"], "verbose": 1},
         lgb_train,
@@ -144,7 +148,11 @@ def test_register_custom_logger():
             logged_messages.append(msg)
 
     custom_logger = CustomLogger()
-    lgb.register_logger(custom_logger, info_method_name="custom_info", warning_method_name="custom_warning")
+    lgb.register_logger(
+        custom_logger,
+        info_method_name="custom_info",
+        warning_method_name="custom_warning",
+    )
 
     lgb.basic._log_info("info message")
     lgb.basic._log_warning("warning message")
