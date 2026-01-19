@@ -665,9 +665,7 @@ def _booster_to_shap_compatible(booster):
     return booster
 
 
-def create_shap_visualization(
-    X, y, config: BenchmarkConfig, best_moe_params: dict, output_dir: str = "examples"
-):
+def create_shap_visualization(X, y, config: BenchmarkConfig, best_moe_params: dict, output_dir: str = "examples"):
     """
     Create SHAP beeswarm plots for MoE components (Gate and Experts).
 
