@@ -366,6 +366,74 @@ study.optimize(objective_per_expert, n_trials=200)
 
 **Tip**: Start with standard MoE. Per-expert requires more trials to converge due to larger search space.
 
+#### Model Quality Filtering (Pruning Collapsed Models)
+
+MoE models can fail in two ways: **Expert collapse** (all experts predict the same thing) and **Gate confusion** (gate can't decide which expert to use). Filter these out during Optuna optimization:
+
+```python
+import numpy as np
+
+def compute_model_quality(model, X_val):
+    """Compute quality metrics for MoE model (no labels needed)."""
+    gate_proba = model.predict_regime_proba(X_val)      # (N, K)
+    expert_preds = model.predict_expert_pred(X_val)     # (N, K)
+    K = gate_proba.shape[1]
+
+    # 1. Expert correlation (collapse detection)
+    correlations = []
+    for i in range(K):
+        for j in range(i + 1, K):
+            corr = np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1]
+            correlations.append(corr)
+    max_corr = max(correlations) if correlations else 0.0
+
+    # 2. Gate entropy (routing confidence)
+    eps = 1e-10
+    entropy = -np.sum(gate_proba * np.log(gate_proba + eps), axis=1)
+    normalized_entropy = entropy / np.log(K)
+    mean_entropy = normalized_entropy.mean()
+
+    return {'expert_corr_max': max_corr, 'gate_entropy': mean_entropy}
+
+def objective_with_quality_filter(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        # ... other params ...
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+
+    # Quality check (no labels needed - can use on live data)
+    quality = compute_model_quality(model, X_val)
+
+    # Prune collapsed or confused models
+    if quality['expert_corr_max'] > 0.8:  # Experts too similar
+        raise optuna.TrialPruned("Expert collapse detected")
+    if quality['gate_entropy'] > 0.6:     # Gate can't decide
+        raise optuna.TrialPruned("Gate confusion detected")
+
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
+```
+
+**Quality Thresholds:**
+
+| Metric | Threshold | Interpretation |
+|--------|-----------|----------------|
+| `expert_corr_max` | < 0.8 (strict: < 0.7) | Experts should predict differently |
+| `gate_entropy` | < 0.6 (strict: < 0.5) | Gate should route with confidence |
+
+**Interpretation of normalized entropy (K-independent):**
+
+| Entropy | Gate Probability (K=2) | Meaning |
+|---------|------------------------|---------|
+| 0.3 | [0.88, 0.12] | High confidence |
+| 0.5 | [0.77, 0.23] | Moderate confidence |
+| 0.6 | [0.70, 0.30] | Acceptable |
+| 0.8 | [0.57, 0.43] | Low confidence |
+
 ### Smoothing Methods
 
 | Method | Formula | Use Case |
@@ -1091,6 +1159,74 @@ study.optimize(objective_per_expert, n_trials=200)
 ```
 
 **Tip**: まず標準MoEを試す。Per-expertは探索空間が大きいため収束に多くのtrialが必要。
+
+#### モデル品質フィルタリング（崩壊モデルの除外）
+
+MoEモデルは2つの失敗モードがあります：**Expert collapse**（全Expertが同じ予測）と**Gate confusion**（Gateがどのexpertを使うか決められない）。Optuna最適化時にこれらをフィルタリングできます：
+
+```python
+import numpy as np
+
+def compute_model_quality(model, X_val):
+    """MoEモデルの品質指標を計算（正解ラベル不要）"""
+    gate_proba = model.predict_regime_proba(X_val)      # (N, K)
+    expert_preds = model.predict_expert_pred(X_val)     # (N, K)
+    K = gate_proba.shape[1]
+
+    # 1. Expert相関（collapse検出）
+    correlations = []
+    for i in range(K):
+        for j in range(i + 1, K):
+            corr = np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1]
+            correlations.append(corr)
+    max_corr = max(correlations) if correlations else 0.0
+
+    # 2. Gateエントロピー（ルーティング確信度）
+    eps = 1e-10
+    entropy = -np.sum(gate_proba * np.log(gate_proba + eps), axis=1)
+    normalized_entropy = entropy / np.log(K)
+    mean_entropy = normalized_entropy.mean()
+
+    return {'expert_corr_max': max_corr, 'gate_entropy': mean_entropy}
+
+def objective_with_quality_filter(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        # ... その他のパラメータ ...
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+
+    # 品質チェック（正解ラベル不要 - ライブデータでも使用可能）
+    quality = compute_model_quality(model, X_val)
+
+    # collapseまたはconfusionモデルを除外
+    if quality['expert_corr_max'] > 0.8:  # Expertが似すぎ
+        raise optuna.TrialPruned("Expert collapse detected")
+    if quality['gate_entropy'] > 0.6:     # Gateが決められない
+        raise optuna.TrialPruned("Gate confusion detected")
+
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
+```
+
+**品質閾値:**
+
+| 指標 | 閾値 | 解釈 |
+|------|------|------|
+| `expert_corr_max` | < 0.8（厳しめ: < 0.7） | Expertは異なる予測をすべき |
+| `gate_entropy` | < 0.6（厳しめ: < 0.5） | Gateは確信を持ってルーティングすべき |
+
+**正規化エントロピーの解釈（K非依存）:**
+
+| エントロピー | Gate確率 (K=2) | 意味 |
+|-------------|----------------|------|
+| 0.3 | [0.88, 0.12] | 高確信 |
+| 0.5 | [0.77, 0.23] | 中程度の確信 |
+| 0.6 | [0.70, 0.30] | 許容範囲 |
+| 0.8 | [0.57, 0.43] | 低確信 |
 
 ### 平滑化手法
 
