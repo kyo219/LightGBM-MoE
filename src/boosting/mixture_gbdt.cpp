@@ -203,6 +203,10 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // Initialize expert bias for loss-free load balancing
   expert_bias_.resize(num_experts_, 0.0);
 
+  // Initialize expert dropout RNG
+  dropout_rng_.seed(config_->seed + 12345);  // Different seed from other RNGs
+  dropout_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
+
   // Initialize early stopping parameters
   early_stopping_round_ = config_->early_stopping_round;
   early_stopping_min_delta_ = config_->early_stopping_min_delta;
@@ -619,9 +623,57 @@ void MixtureGBDT::MStepExperts() {
   // Gradient for expert k: r_ik * d_L(y_i, f_k(x_i)) / d_f_k(x_i)
   // This ensures experts specialize on different parts of the data
 
+  // Expert Dropout: randomly skip some experts to prevent collapse
+  // This forces all experts to be useful by ensuring no single expert
+  // can dominate. Dropped experts receive zero gradients for this iteration.
+  const double dropout_rate = config_->mixture_expert_dropout_rate;
+  std::vector<bool> expert_active(num_experts_, true);
+  int num_active = num_experts_;
+
+  if (dropout_rate > 0.0) {
+    // Determine which experts to drop
+    for (int k = 0; k < num_experts_; ++k) {
+      if (dropout_dist_(dropout_rng_) < dropout_rate) {
+        expert_active[k] = false;
+        --num_active;
+      }
+    }
+
+    // Ensure at least one expert is active
+    // If all would be dropped, randomly select one to keep
+    if (num_active == 0) {
+      std::uniform_int_distribution<int> expert_dist(0, num_experts_ - 1);
+      int keep_expert = expert_dist(dropout_rng_);
+      expert_active[keep_expert] = true;
+      num_active = 1;
+    }
+
+    // Log dropout info occasionally
+    if (iter_ % 10 == 0) {
+      std::string active_str = "";
+      for (int k = 0; k < num_experts_; ++k) {
+        active_str += (expert_active[k] ? "1" : "0");
+        if (k < num_experts_ - 1) active_str += ",";
+      }
+      Log::Debug("MixtureGBDT: Expert dropout active (rate=%.2f), "
+                 "active experts=[%s] (%d/%d)",
+                 dropout_rate, active_str.c_str(), num_active, num_experts_);
+    }
+  }
+
   // Train each expert with responsibility-weighted gradients
   // computed from the expert's OWN prediction (not mixture yhat)
   for (int k = 0; k < num_experts_; ++k) {
+    // Skip dropped experts (they receive zero gradients)
+    if (!expert_active[k]) {
+      // Still need to call TrainOneIter with zero gradients to maintain iteration count
+      // But the tree will be a trivial no-split tree
+      std::vector<score_t> zero_grad(num_data_, 0.0);
+      std::vector<score_t> zero_hess(num_data_, kMixtureEpsilon);  // Small hessian to avoid numerical issues
+      experts_[k]->TrainOneIter(zero_grad.data(), zero_hess.data());
+      continue;
+    }
+
     std::vector<score_t> grad_k(num_data_);
     std::vector<score_t> hess_k(num_data_);
 
@@ -684,20 +736,66 @@ void MixtureGBDT::MStepGate() {
   std::vector<score_t> gate_grad(static_cast<size_t>(num_data_) * num_experts_);
   std::vector<score_t> gate_hess(static_cast<size_t>(num_data_) * num_experts_);
 
+  // Gate Entropy Regularization:
+  // Encourages gate to produce more uniform (uncertain) predictions
+  // This helps prevent premature expert collapse where gate assigns all samples to one expert
+  //
+  // Entropy H(g) = -Σ g_k log(g_k) is maximized when g_k = 1/K (uniform)
+  // We add a regularization term that pushes probabilities toward uniform:
+  // grad_reg = λ * (p_k - 1/K)
+  // This makes the gate less confident early in training, allowing experts to differentiate
+  const double entropy_lambda = config_->mixture_gate_entropy_lambda;
+  const double uniform_prob = 1.0 / num_experts_;
+
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     int label = static_cast<int>(pseudo_labels[i]);
     for (int k = 0; k < num_experts_; ++k) {
       size_t idx = i + k * num_data_;  // Gate uses class-major order
       double p = gate_proba_[i * num_experts_ + k];
+
+      // Base gradient: softmax cross-entropy
+      double base_grad;
       if (k == label) {
-        gate_grad[idx] = static_cast<score_t>(p - 1.0);
+        base_grad = p - 1.0;
       } else {
-        gate_grad[idx] = static_cast<score_t>(p);
+        base_grad = p;
       }
+
+      // Entropy regularization: push toward uniform distribution
+      // grad_reg = λ * (p - 1/K)
+      // When p > 1/K (over-confident), this adds positive gradient to reduce p
+      // When p < 1/K (under-confident), this adds negative gradient to increase p
+      double entropy_reg = entropy_lambda * (p - uniform_prob);
+
+      gate_grad[idx] = static_cast<score_t>(base_grad + entropy_reg);
+
       // Hessian for softmax cross-entropy: p * (1 - p)
+      // Note: We don't modify hessian for entropy regularization (would be λ, constant)
+      // The constant hessian is implicitly absorbed into the learning rate
       gate_hess[idx] = static_cast<score_t>(std::max(p * (1.0 - p), kMixtureEpsilon));
     }
+  }
+
+  // Log entropy regularization effect (occasionally)
+  if (entropy_lambda > 0.0 && iter_ % 10 == 0) {
+    // Compute average entropy for monitoring
+    double total_entropy = 0.0;
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double sample_entropy = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        double p = gate_proba_[i * num_experts_ + k];
+        if (p > kMixtureEpsilon) {
+          sample_entropy -= p * std::log(p);
+        }
+      }
+      total_entropy += sample_entropy;
+    }
+    double avg_entropy = total_entropy / num_data_;
+    double max_entropy = std::log(static_cast<double>(num_experts_));
+    double normalized_entropy = avg_entropy / max_entropy;
+    Log::Debug("MixtureGBDT: Gate entropy regularization active (lambda=%.3f), "
+               "avg normalized entropy=%.3f", entropy_lambda, normalized_entropy);
   }
 
   // Train gate for specified iterations

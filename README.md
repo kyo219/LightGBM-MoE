@@ -124,10 +124,52 @@ print(f"Best iteration: {model.best_iteration}")
 | `mixture_balance_factor` | int | 10 | 2-20 | Load balancing aggressiveness. Minimum expert usage = 1/(factor × K). Lower = more aggressive balancing. Recommended: 5-7. |
 | `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | Responsibility smoothing method for time-series stability. **Recommended: `"none"`** (see note below). |
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | Smoothing strength. Only used when `mixture_r_smoothing` is not `"none"`. Higher = more smoothing (slower regime transitions). |
+| `mixture_gate_entropy_lambda` | float | 0.0 | 0.0-1.0 | Gate entropy regularization. Encourages gate to produce more uncertain predictions, preventing premature expert collapse. **Recommended: 0.01-0.1**. |
+| `mixture_expert_dropout_rate` | float | 0.0 | 0.0-1.0 | Expert dropout rate. Randomly drops experts during training to force all experts to be useful. **Recommended: 0.1-0.3**. |
 
 > **Important: Use `mixture_r_smoothing="none"` (default)**
 >
 > Smoothing methods (`ema`, `markov`, `momentum`) can cause **expert collapse** where all experts converge to similar predictions. In benchmarks with Optuna optimization, `smoothing=none` consistently achieves good expert separation (correlation ~0.02, regime accuracy ~98%), while other smoothing methods often collapse (correlation ~0.99, regime accuracy ~50%).
+
+### Expert Collapse Prevention (Advanced)
+
+If experts are collapsing (all producing similar predictions), try these new parameters:
+
+| Parameter | When to Use | Effect |
+|-----------|-------------|--------|
+| `mixture_gate_entropy_lambda` | Gate assigns all samples to one expert early | Forces gate to be less confident, giving experts time to differentiate |
+| `mixture_expert_dropout_rate` | One expert dominates and others stop learning | Forces all experts to be useful by randomly disabling them during training |
+
+**Example: Preventing collapse**
+
+```python
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 2,
+    'objective': 'regression',
+
+    # Collapse prevention
+    'mixture_gate_entropy_lambda': 0.05,  # Encourage uncertain gate predictions
+    'mixture_expert_dropout_rate': 0.2,   # 20% chance to drop each expert per iteration
+
+    # Other recommended settings
+    'mixture_warmup_iters': 20,           # Allow experts to differentiate first
+    'mixture_balance_factor': 5,          # More aggressive load balancing
+}
+```
+
+**How these work:**
+
+1. **Gate Entropy Regularization** (`mixture_gate_entropy_lambda`):
+   - Adds a penalty when gate is too confident: `grad += λ * (p - 1/K)`
+   - Pushes gate probabilities toward uniform distribution (1/K)
+   - Effect decreases as experts become genuinely specialized
+
+2. **Expert Dropout** (`mixture_expert_dropout_rate`):
+   - Each iteration, randomly drops experts (they receive zero gradients)
+   - Dropped experts don't update, forcing others to cover their samples
+   - At least one expert is always kept
+   - Similar to dropout in neural networks
 
 ### Early Stopping
 
@@ -918,10 +960,52 @@ print(f"Best iteration: {model.best_iteration}")
 | `mixture_balance_factor` | int | 10 | 2-20 | 負荷分散の強度。最小エキスパート使用率 = 1/(factor × K)。小さいほど積極的なバランシング。推奨: 5-7。 |
 | `mixture_r_smoothing` | string | `"none"` | `"none"`, `"ema"`, `"markov"`, `"momentum"` | 時系列安定化のための責務平滑化手法。**推奨: `"none"`**（下記注意参照）。 |
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | 平滑化強度。`mixture_r_smoothing` が `"none"` 以外の場合のみ使用。高いほど平滑化が強い（レジーム遷移が遅い）。 |
+| `mixture_gate_entropy_lambda` | float | 0.0 | 0.0-1.0 | Gateエントロピー正則化。Gateがより不確実な予測を出すよう促し、早期のExpert collapseを防止。**推奨: 0.01-0.1**。 |
+| `mixture_expert_dropout_rate` | float | 0.0 | 0.0-1.0 | Expertドロップアウト率。学習中にランダムにExpertを無効化し、全Expertが有用であることを強制。**推奨: 0.1-0.3**。 |
 
 > **重要: `mixture_r_smoothing="none"`（デフォルト）を推奨**
 >
 > 平滑化手法（`ema`, `markov`, `momentum`）は**Expert collapse**（全Expertが同じ予測に収束）を引き起こす可能性があります。Optuna最適化のベンチマークでは、`smoothing=none`は安定して良好なExpert分離（相関~0.02、regime精度~98%）を達成しますが、他の平滑化手法ではcollapse（相関~0.99、regime精度~50%）が頻発しました。
+
+### Expert Collapse防止（上級者向け）
+
+Expertがcollapseしている場合（全て同じような予測を出す）、以下の新パラメータを試してください：
+
+| パラメータ | 使用場面 | 効果 |
+|-----------|---------|------|
+| `mixture_gate_entropy_lambda` | Gateが早期に全サンプルを1つのExpertに割り当てる | Gateの確信度を下げ、Expertが分化する時間を確保 |
+| `mixture_expert_dropout_rate` | 1つのExpertが支配的で他が学習を停止 | 学習中にランダムに無効化し、全Expertを有用に保つ |
+
+**例: Collapse防止**
+
+```python
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 2,
+    'objective': 'regression',
+
+    # Collapse防止
+    'mixture_gate_entropy_lambda': 0.05,  # Gate予測を不確実にする
+    'mixture_expert_dropout_rate': 0.2,   # 各イテレーションで20%の確率でExpertを無効化
+
+    # 他の推奨設定
+    'mixture_warmup_iters': 20,           # Expertの分化を先に許可
+    'mixture_balance_factor': 5,          # より積極的な負荷分散
+}
+```
+
+**動作原理:**
+
+1. **Gateエントロピー正則化** (`mixture_gate_entropy_lambda`):
+   - Gateが確信を持ちすぎる場合にペナルティを追加: `grad += λ * (p - 1/K)`
+   - Gate確率をuniform分布（1/K）に近づける
+   - Expertが本当に専門化すると効果が減少
+
+2. **Expertドロップアウト** (`mixture_expert_dropout_rate`):
+   - 各イテレーションでランダムにExpertを無効化（勾配がゼロに）
+   - 無効化されたExpertは更新されず、他のExpertがカバーを強制
+   - 少なくとも1つのExpertは常に有効
+   - ニューラルネットワークのdropoutに類似
 
 ### Early Stopping
 

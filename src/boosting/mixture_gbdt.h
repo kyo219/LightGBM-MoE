@@ -11,6 +11,7 @@
 #include <LightGBM/objective_function.h>
 
 #include <memory>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -279,6 +280,13 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief Update expert bias based on recent load */
   void UpdateExpertBias();
+
+  // Expert dropout members
+  /*! \brief Random number generator for expert dropout */
+  mutable std::mt19937 dropout_rng_;
+
+  /*! \brief Uniform distribution for dropout probability */
+  mutable std::uniform_real_distribution<double> dropout_dist_;
 
   /*!
    * \brief Forward pass for validation data: compute expert predictions and gate probabilities

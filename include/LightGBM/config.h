@@ -1269,6 +1269,27 @@ struct Config {
   // desc = example: "0.1,0.01,0.0" for conservative-to-aggressive experts
   std::vector<double> mixture_expert_min_gain_to_split;
 
+  // check = >=0.0
+  // check = <=1.0
+  // desc = entropy regularization coefficient for gate output
+  // desc = encourages gate to produce more uncertain (uniform) predictions
+  // desc = helps prevent premature expert collapse where gate assigns all samples to one expert
+  // desc = higher values produce more uniform gate probabilities
+  // desc = 0.0 means no regularization (default)
+  // desc = recommended range: 0.01-0.1
+  double mixture_gate_entropy_lambda = 0.0;
+
+  // check = >=0.0
+  // check = <1.0
+  // desc = dropout rate for experts during training
+  // desc = at each iteration, experts are randomly dropped with this probability
+  // desc = dropped experts receive zero gradients (not updated) for that iteration
+  // desc = helps prevent expert collapse by forcing all experts to be useful
+  // desc = 0.0 means no dropout (default)
+  // desc = recommended range: 0.1-0.3
+  // desc = note: at least one expert is always kept (never drops all experts)
+  double mixture_expert_dropout_rate = 0.0;
+
   #ifndef __NVCC__
   #pragma endregion
 
