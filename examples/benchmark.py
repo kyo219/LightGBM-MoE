@@ -222,6 +222,7 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
             "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 50),
             "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
             "mixture_r_smoothing": smoothing,
+            "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
         }
 
         if per_expert:
