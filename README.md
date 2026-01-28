@@ -431,6 +431,7 @@ def suggest_moe_expert_params(
     depth_range: tuple = (2, 15),
     leaves_range: tuple = (4, 128),
     min_data_range: tuple = (5, 100),
+    use_extra_trees: bool = True,
 ):
     """
     Assign distinct "roles" to each expert while searching concrete values with Optuna.
@@ -439,6 +440,7 @@ def suggest_moe_expert_params(
     - Guarantees diversity: each expert has a different (depth, leaves) combination
     - Full range search: all experts can be "deep" or "shallow", but within each trial
       they are constrained to have relative differences (low < high)
+    - Extra trees: shallow experts use extra_trees for diversity, deep experts don't
     """
 
     # Search from full range, but constrain low < high within each trial
@@ -469,18 +471,23 @@ def suggest_moe_expert_params(
     def interp(low, high, t):
         return round(low + t * (high - low))
 
-    depths, leaves_list, min_datas = [], [], []
+    depths, leaves_list, min_datas, extra_trees = [], [], [], []
     for d_level, l_level in patterns:
         depths.append(interp(depth_low, depth_high, d_level))
         leaves_list.append(interp(leaves_low, leaves_high, l_level))
         # min_data inversely correlated with depth (deep → small min_data)
         min_datas.append(interp(min_data_range[1], min_data_range[0], d_level))
+        # extra_trees for shallow experts (more randomness), off for deep (precision)
+        extra_trees.append(1 if d_level < 0.5 else 0)
 
-    return {
+    result = {
         'mixture_expert_max_depths': ','.join(map(str, depths)),
         'mixture_expert_num_leaves': ','.join(map(str, leaves_list)),
         'mixture_expert_min_data_in_leaf': ','.join(map(str, min_datas)),
     }
+    if use_extra_trees:
+        result['mixture_expert_extra_trees'] = ','.join(map(str, extra_trees))
+    return result
 
 
 def objective_role_based(trial):
@@ -518,10 +525,10 @@ study.optimize(objective_role_based, n_trials=100)
 ```
 Search result: depth_low=3, depth_high=10, leaves_low=8, leaves_high=64
 
-E0: depth=3,  leaves=8,  min_data=100  (shallow × few)   → trend/coarse patterns
-E1: depth=3,  leaves=64, min_data=100  (shallow × many)  → wide but shallow
-E2: depth=10, leaves=8,  min_data=5    (deep × few)      → narrow but deep
-E3: depth=10, leaves=64, min_data=5    (deep × many)     → fine-grained details
+E0: depth=3,  leaves=8,  min_data=100, extra_trees=1  (shallow × few)   → fast, randomized
+E1: depth=3,  leaves=64, min_data=100, extra_trees=1  (shallow × many)  → wide, randomized
+E2: depth=10, leaves=8,  min_data=5,   extra_trees=0  (deep × few)      → narrow, precise
+E3: depth=10, leaves=64, min_data=5,   extra_trees=0  (deep × many)     → complex, precise
 ```
 
 **Benefits:**
@@ -1388,6 +1395,7 @@ def suggest_moe_expert_params(
     depth_range: tuple = (2, 15),
     leaves_range: tuple = (4, 128),
     min_data_range: tuple = (5, 100),
+    use_extra_trees: bool = True,
 ):
     """
     各Expertに異なる「役割」を割り当てつつ、具体的な値はOptunaで探索。
@@ -1396,6 +1404,7 @@ def suggest_moe_expert_params(
     - 多様性を保証: 各Expertは異なる (depth, leaves) の組み合わせを持つ
     - 全範囲探索: 全Expertが「深い」または「浅い」になりうるが、各trial内では
       相対的な差を保証 (low < high)
+    - Extra trees: 浅いExpertにはextra_trees（多様性）、深いExpertには通常の木（精度）
     """
 
     # 全範囲から探索、ただしtrial内で low < high を保証
@@ -1426,18 +1435,23 @@ def suggest_moe_expert_params(
     def interp(low, high, t):
         return round(low + t * (high - low))
 
-    depths, leaves_list, min_datas = [], [], []
+    depths, leaves_list, min_datas, extra_trees = [], [], [], []
     for d_level, l_level in patterns:
         depths.append(interp(depth_low, depth_high, d_level))
         leaves_list.append(interp(leaves_low, leaves_high, l_level))
         # min_dataはdepthと逆相関（深い → 小さいmin_data）
         min_datas.append(interp(min_data_range[1], min_data_range[0], d_level))
+        # 浅いExpertにはextra_trees（ランダム性）、深いExpertには精度重視
+        extra_trees.append(1 if d_level < 0.5 else 0)
 
-    return {
+    result = {
         'mixture_expert_max_depths': ','.join(map(str, depths)),
         'mixture_expert_num_leaves': ','.join(map(str, leaves_list)),
         'mixture_expert_min_data_in_leaf': ','.join(map(str, min_datas)),
     }
+    if use_extra_trees:
+        result['mixture_expert_extra_trees'] = ','.join(map(str, extra_trees))
+    return result
 
 
 def objective_role_based(trial):
@@ -1475,10 +1489,10 @@ study.optimize(objective_role_based, n_trials=100)
 ```
 探索結果: depth_low=3, depth_high=10, leaves_low=8, leaves_high=64
 
-E0: depth=3,  leaves=8,  min_data=100  (浅い × 少ない) → トレンド/粗いパターン
-E1: depth=3,  leaves=64, min_data=100  (浅い × 多い)   → 広いが浅い
-E2: depth=10, leaves=8,  min_data=5    (深い × 少ない) → 狭いが深い
-E3: depth=10, leaves=64, min_data=5    (深い × 多い)   → 細かい詳細
+E0: depth=3,  leaves=8,  min_data=100, extra_trees=1  (浅い × 少ない) → 高速、ランダム
+E1: depth=3,  leaves=64, min_data=100, extra_trees=1  (浅い × 多い)   → 広い、ランダム
+E2: depth=10, leaves=8,  min_data=5,   extra_trees=0  (深い × 少ない) → 狭い、精密
+E3: depth=10, leaves=64, min_data=5,   extra_trees=0  (深い × 多い)   → 複雑、精密
 ```
 
 **メリット:**
