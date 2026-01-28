@@ -230,6 +230,7 @@ These parameters allow each expert to have different tree **structural** configu
 | `mixture_expert_num_leaves` | string | `""` | Comma-separated num_leaves for each expert. Must have exactly K values if specified. |
 | `mixture_expert_min_data_in_leaf` | string | `""` | Comma-separated min_data_in_leaf for each expert. Controls tree granularity. |
 | `mixture_expert_min_gain_to_split` | string | `""` | Comma-separated min_gain_to_split for each expert. Controls split aggressiveness. |
+| `mixture_expert_extra_trees` | string | `""` | Comma-separated 0/1 for each expert. Enables extremely randomized trees per expert. |
 
 #### Same Hyperparameters for All Experts (Default)
 
@@ -407,6 +408,133 @@ study.optimize(objective_per_expert, n_trials=200)
 ```
 
 **Tip**: Start with standard MoE. Per-expert requires more trials to converge due to larger search space.
+
+#### Role-based Per-Expert (Recommended for Optuna)
+
+The naive per-expert approach has a problem: **each expert's parameters are independent**, so you might end up with similar experts (e.g., all with similar depth and leaves). This wastes the MoE's potential for specialization.
+
+**Solution**: Assign each expert a distinct "role" (personality) and constrain the search space accordingly.
+
+```
+             num_leaves
+              Low    High
+max_depth Low  E0     E1    ← E1: shallow but wide
+          High E2     E3    ← E2: deep but narrow
+```
+
+This ensures diversity: E1 (shallow × many leaves) captures different patterns than E2 (deep × few leaves).
+
+```python
+def suggest_moe_expert_params(
+    trial,
+    num_experts: int,
+    depth_range: tuple = (2, 15),
+    leaves_range: tuple = (4, 128),
+    min_data_range: tuple = (5, 100),
+    use_extra_trees: bool = True,
+):
+    """
+    Assign distinct "roles" to each expert while searching concrete values with Optuna.
+
+    - Reduces search space: K×3 params → 4 params (depth_low/high, leaves_low/high)
+    - Guarantees diversity: each expert has a different (depth, leaves) combination
+    - Full range search: all experts can be "deep" or "shallow", but within each trial
+      they are constrained to have relative differences (low < high)
+    - Extra trees: shallow experts use extra_trees for diversity, deep experts don't
+    """
+
+    # Search from full range, but constrain low < high within each trial
+    # This allows: Trial A (3 vs 12), Trial B (10 vs 14), Trial C (2 vs 4)
+    depth_low = trial.suggest_int('depth_low', depth_range[0], depth_range[1] - 1)
+    depth_high = trial.suggest_int('depth_high', depth_low + 1, depth_range[1])
+
+    leaves_low = trial.suggest_int('leaves_low', leaves_range[0], leaves_range[1] - 1)
+    leaves_high = trial.suggest_int('leaves_high', leaves_low + 1, leaves_range[1])
+
+    # Role patterns based on K
+    # (depth_level, leaves_level): 0=low, 1=high, 0.5=mid
+    PATTERNS = {
+        2: [(0, 0), (1, 1)],                                  # diagonal: simple vs complex
+        3: [(0, 0), (0, 1), (1, 1)],                          # simple, shallow×wide, complex
+        4: [(0, 0), (0, 1), (1, 0), (1, 1)],                  # all 4 quadrants
+        5: [(0, 0), (0, 1), (1, 0), (1, 1), (0.5, 0.5)],      # 4 quadrants + center
+        6: [(0, 0), (0, 1), (1, 0), (1, 1), (0, 0.5), (1, 0.5)],
+    }
+
+    if num_experts in PATTERNS:
+        patterns = PATTERNS[num_experts]
+    else:
+        # K > 6: cycle through 4 quadrants + interpolations
+        base = [(0, 0), (0, 1), (1, 0), (1, 1)]
+        patterns = (base * ((num_experts // 4) + 1))[:num_experts]
+
+    def interp(low, high, t):
+        return round(low + t * (high - low))
+
+    depths, leaves_list, min_datas, extra_trees = [], [], [], []
+    for d_level, l_level in patterns:
+        depths.append(interp(depth_low, depth_high, d_level))
+        leaves_list.append(interp(leaves_low, leaves_high, l_level))
+        # min_data inversely correlated with depth (deep → small min_data)
+        min_datas.append(interp(min_data_range[1], min_data_range[0], d_level))
+        # extra_trees for shallow experts (more randomness), off for deep (precision)
+        extra_trees.append(1 if d_level < 0.5 else 0)
+
+    result = {
+        'mixture_expert_max_depths': ','.join(map(str, depths)),
+        'mixture_expert_num_leaves': ','.join(map(str, leaves_list)),
+        'mixture_expert_min_data_in_leaf': ','.join(map(str, min_datas)),
+    }
+    if use_extra_trees:
+        result['mixture_expert_extra_trees'] = ','.join(map(str, extra_trees))
+    return result
+
+
+def objective_role_based(trial):
+    num_experts = trial.suggest_int('num_experts', 2, 4)
+
+    # Get role-based expert params (only 4 search params instead of K×3)
+    expert_params = suggest_moe_expert_params(
+        trial,
+        num_experts=num_experts,
+        depth_range=(2, 15),
+        leaves_range=(4, 128),
+    )
+
+    params = {
+        'boosting': 'mixture',
+        'objective': 'regression',
+        'verbose': -1,
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'mixture_num_experts': num_experts,
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        **expert_params,  # role-based expert structure
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective_role_based, n_trials=100)
+```
+
+**Example output (K=4):**
+```
+Search result: depth_low=3, depth_high=10, leaves_low=8, leaves_high=64
+
+E0: depth=3,  leaves=8,  min_data=100, extra_trees=1  (shallow × few)   → fast, randomized
+E1: depth=3,  leaves=64, min_data=100, extra_trees=1  (shallow × many)  → wide, randomized
+E2: depth=10, leaves=8,  min_data=5,   extra_trees=0  (deep × few)      → narrow, precise
+E3: depth=10, leaves=64, min_data=5,   extra_trees=0  (deep × many)     → complex, precise
+```
+
+**Benefits:**
+- Search space: K×3 parameters → 4 parameters (dramatic reduction)
+- Diversity guaranteed: each expert has a distinct structural "personality"
+- Interpretable: you know what each expert is designed to capture
 
 #### Model Quality Filtering (Pruning Collapsed Models)
 
@@ -1066,6 +1194,7 @@ def objective(trial):
 | `mixture_expert_num_leaves` | string | `""` | カンマ区切りの各Expertのnum_leaves。指定する場合はK個の値が必要。 |
 | `mixture_expert_min_data_in_leaf` | string | `""` | カンマ区切りの各Expertのmin_data_in_leaf。木の粒度を制御。 |
 | `mixture_expert_min_gain_to_split` | string | `""` | カンマ区切りの各Expertのmin_gain_to_split。分割の積極性を制御。 |
+| `mixture_expert_extra_trees` | string | `""` | カンマ区切りの各Expertの0/1。Expertごとにextremely randomized treesを有効化。 |
 
 #### 全Expertで同じハイパーパラメータ（デフォルト）
 
@@ -1243,6 +1372,133 @@ study.optimize(objective_per_expert, n_trials=200)
 ```
 
 **Tip**: まず標準MoEを試す。Per-expertは探索空間が大きいため収束に多くのtrialが必要。
+
+#### 役割ベースPer-Expert（Optuna推奨）
+
+素朴なPer-Expertアプローチには問題があります：**各Expertのパラメータが独立**のため、似たようなExpert（例：全て同じようなdepthとleaves）が生まれやすくなります。これではMoEの専門化の利点が活かせません。
+
+**解決策**: 各Expertに異なる「役割」（性格）を割り当て、それに応じて探索空間を制限します。
+
+```
+             num_leaves
+              少     多
+max_depth 浅  E0     E1    ← E1: 浅いが広い
+          深  E2     E3    ← E2: 深いが狭い
+```
+
+これにより多様性が保証されます：E1（浅い×多い葉）はE2（深い×少ない葉）とは異なるパターンを捕捉します。
+
+```python
+def suggest_moe_expert_params(
+    trial,
+    num_experts: int,
+    depth_range: tuple = (2, 15),
+    leaves_range: tuple = (4, 128),
+    min_data_range: tuple = (5, 100),
+    use_extra_trees: bool = True,
+):
+    """
+    各Expertに異なる「役割」を割り当てつつ、具体的な値はOptunaで探索。
+
+    - 探索空間を削減: K×3パラメータ → 4パラメータ (depth_low/high, leaves_low/high)
+    - 多様性を保証: 各Expertは異なる (depth, leaves) の組み合わせを持つ
+    - 全範囲探索: 全Expertが「深い」または「浅い」になりうるが、各trial内では
+      相対的な差を保証 (low < high)
+    - Extra trees: 浅いExpertにはextra_trees（多様性）、深いExpertには通常の木（精度）
+    """
+
+    # 全範囲から探索、ただしtrial内で low < high を保証
+    # これにより: Trial A (3 vs 12), Trial B (10 vs 14), Trial C (2 vs 4) が可能
+    depth_low = trial.suggest_int('depth_low', depth_range[0], depth_range[1] - 1)
+    depth_high = trial.suggest_int('depth_high', depth_low + 1, depth_range[1])
+
+    leaves_low = trial.suggest_int('leaves_low', leaves_range[0], leaves_range[1] - 1)
+    leaves_high = trial.suggest_int('leaves_high', leaves_low + 1, leaves_range[1])
+
+    # Kに応じた役割パターン
+    # (depth_level, leaves_level): 0=low, 1=high, 0.5=mid
+    PATTERNS = {
+        2: [(0, 0), (1, 1)],                                  # 対角: simple vs complex
+        3: [(0, 0), (0, 1), (1, 1)],                          # simple, 浅×広, complex
+        4: [(0, 0), (0, 1), (1, 0), (1, 1)],                  # 全4象限
+        5: [(0, 0), (0, 1), (1, 0), (1, 1), (0.5, 0.5)],      # 4象限 + 中央
+        6: [(0, 0), (0, 1), (1, 0), (1, 1), (0, 0.5), (1, 0.5)],
+    }
+
+    if num_experts in PATTERNS:
+        patterns = PATTERNS[num_experts]
+    else:
+        # K > 6: 4象限を繰り返し + 補間
+        base = [(0, 0), (0, 1), (1, 0), (1, 1)]
+        patterns = (base * ((num_experts // 4) + 1))[:num_experts]
+
+    def interp(low, high, t):
+        return round(low + t * (high - low))
+
+    depths, leaves_list, min_datas, extra_trees = [], [], [], []
+    for d_level, l_level in patterns:
+        depths.append(interp(depth_low, depth_high, d_level))
+        leaves_list.append(interp(leaves_low, leaves_high, l_level))
+        # min_dataはdepthと逆相関（深い → 小さいmin_data）
+        min_datas.append(interp(min_data_range[1], min_data_range[0], d_level))
+        # 浅いExpertにはextra_trees（ランダム性）、深いExpertには精度重視
+        extra_trees.append(1 if d_level < 0.5 else 0)
+
+    result = {
+        'mixture_expert_max_depths': ','.join(map(str, depths)),
+        'mixture_expert_num_leaves': ','.join(map(str, leaves_list)),
+        'mixture_expert_min_data_in_leaf': ','.join(map(str, min_datas)),
+    }
+    if use_extra_trees:
+        result['mixture_expert_extra_trees'] = ','.join(map(str, extra_trees))
+    return result
+
+
+def objective_role_based(trial):
+    num_experts = trial.suggest_int('num_experts', 2, 4)
+
+    # 役割ベースのExpertパラメータを取得（K×3ではなく4パラメータのみ）
+    expert_params = suggest_moe_expert_params(
+        trial,
+        num_experts=num_experts,
+        depth_range=(2, 15),
+        leaves_range=(4, 128),
+    )
+
+    params = {
+        'boosting': 'mixture',
+        'objective': 'regression',
+        'verbose': -1,
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'mixture_num_experts': num_experts,
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        **expert_params,  # 役割ベースのExpert構造
+    }
+
+    train_data = lgb.Dataset(X_train, label=y_train)
+    model = lgb.train(params, train_data, num_boost_round=100)
+    pred = model.predict(X_val)
+    return mean_squared_error(y_val, pred)
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective_role_based, n_trials=100)
+```
+
+**出力例 (K=4):**
+```
+探索結果: depth_low=3, depth_high=10, leaves_low=8, leaves_high=64
+
+E0: depth=3,  leaves=8,  min_data=100, extra_trees=1  (浅い × 少ない) → 高速、ランダム
+E1: depth=3,  leaves=64, min_data=100, extra_trees=1  (浅い × 多い)   → 広い、ランダム
+E2: depth=10, leaves=8,  min_data=5,   extra_trees=0  (深い × 少ない) → 狭い、精密
+E3: depth=10, leaves=64, min_data=5,   extra_trees=0  (深い × 多い)   → 複雑、精密
+```
+
+**メリット:**
+- 探索空間: K×3パラメータ → 4パラメータ（大幅削減）
+- 多様性保証: 各Expertが異なる構造的「性格」を持つ
+- 解釈性: 各Expertが何を捕捉するよう設計されているかが明確
 
 #### モデル品質フィルタリング（崩壊モデルの除外）
 
