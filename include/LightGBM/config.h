@@ -1269,6 +1269,14 @@ struct Config {
   // desc = example: "0.1,0.01,0.0" for conservative-to-aggressive experts
   std::vector<double> mixture_expert_min_gain_to_split;
 
+  // default = ""
+  // desc = per-expert extra_trees setting (comma-separated list of 0 or 1)
+  // desc = if empty, all experts use the global extra_trees setting
+  // desc = if provided, must have exactly mixture_num_experts values
+  // desc = example: "0,1,0,1" to enable extra_trees for experts 1 and 3 only
+  // desc = useful for mixing precise trees with randomized trees
+  std::vector<int> mixture_expert_extra_trees;
+
   // check = >=0.0
   // check = <=1.0
   // desc = entropy regularization coefficient for gate output

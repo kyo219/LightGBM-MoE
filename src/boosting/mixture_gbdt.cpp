@@ -110,6 +110,7 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   const bool use_per_expert_num_leaves = !config_->mixture_expert_num_leaves.empty();
   const bool use_per_expert_min_data_in_leaf = !config_->mixture_expert_min_data_in_leaf.empty();
   const bool use_per_expert_min_gain_to_split = !config_->mixture_expert_min_gain_to_split.empty();
+  const bool use_per_expert_extra_trees = !config_->mixture_expert_extra_trees.empty();
 
   if (use_per_expert_max_depth &&
       static_cast<int>(config_->mixture_expert_max_depths.size()) != num_experts_) {
@@ -130,6 +131,11 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
       static_cast<int>(config_->mixture_expert_min_gain_to_split.size()) != num_experts_) {
     Log::Fatal("mixture_expert_min_gain_to_split must have exactly %d values (one per expert), got %d",
                num_experts_, static_cast<int>(config_->mixture_expert_min_gain_to_split.size()));
+  }
+  if (use_per_expert_extra_trees &&
+      static_cast<int>(config_->mixture_expert_extra_trees.size()) != num_experts_) {
+    Log::Fatal("mixture_expert_extra_trees must have exactly %d values (one per expert), got %d",
+               num_experts_, static_cast<int>(config_->mixture_expert_extra_trees.size()));
   }
 
   experts_.clear();
@@ -155,12 +161,15 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
     if (use_per_expert_min_gain_to_split) {
       expert_configs_[k]->min_gain_to_split = config_->mixture_expert_min_gain_to_split[k];
     }
+    if (use_per_expert_extra_trees) {
+      expert_configs_[k]->extra_trees = (config_->mixture_expert_extra_trees[k] != 0);
+    }
 
     experts_.emplace_back(new GBDT());
-    Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d, max_depth=%d, num_leaves=%d, min_data=%d, min_gain=%.4f",
+    Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d, max_depth=%d, num_leaves=%d, min_data=%d, min_gain=%.4f, extra_trees=%d",
                k, expert_configs_[k]->seed, expert_configs_[k]->max_depth,
                expert_configs_[k]->num_leaves, expert_configs_[k]->min_data_in_leaf,
-               expert_configs_[k]->min_gain_to_split);
+               expert_configs_[k]->min_gain_to_split, expert_configs_[k]->extra_trees ? 1 : 0);
     experts_[k]->Init(expert_configs_[k].get(), train_data_, nullptr, {});
     Log::Debug("MixtureGBDT::Init - expert %d initialized", k);
   }

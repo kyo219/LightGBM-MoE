@@ -348,6 +348,7 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_expert_num_leaves",
   "mixture_expert_min_data_in_leaf",
   "mixture_expert_min_gain_to_split",
+  "mixture_expert_extra_trees",
   "mixture_gate_entropy_lambda",
   "mixture_expert_dropout_rate",
   });
@@ -756,6 +757,10 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
     mixture_expert_min_gain_to_split = Common::StringToArray<double>(tmp_str, ',');
   }
 
+  if (GetString(params, "mixture_expert_extra_trees", &tmp_str)) {
+    mixture_expert_extra_trees = Common::StringToArray<int>(tmp_str, ',');
+  }
+
   GetDouble(params, "mixture_gate_entropy_lambda", &mixture_gate_entropy_lambda);
   CHECK_GE(mixture_gate_entropy_lambda, 0.0);
   CHECK_LE(mixture_gate_entropy_lambda, 1.0);
@@ -902,6 +907,7 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_expert_num_leaves: " << Common::Join(mixture_expert_num_leaves, ",") << "]\n";
   str_buf << "[mixture_expert_min_data_in_leaf: " << Common::Join(mixture_expert_min_data_in_leaf, ",") << "]\n";
   str_buf << "[mixture_expert_min_gain_to_split: " << Common::Join(mixture_expert_min_gain_to_split, ",") << "]\n";
+  str_buf << "[mixture_expert_extra_trees: " << Common::Join(mixture_expert_extra_trees, ",") << "]\n";
   str_buf << "[mixture_gate_entropy_lambda: " << mixture_gate_entropy_lambda << "]\n";
   str_buf << "[mixture_expert_dropout_rate: " << mixture_expert_dropout_rate << "]\n";
   return str_buf.str();
@@ -1069,6 +1075,7 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_expert_num_leaves", {}},
     {"mixture_expert_min_data_in_leaf", {}},
     {"mixture_expert_min_gain_to_split", {}},
+    {"mixture_expert_extra_trees", {}},
     {"mixture_gate_entropy_lambda", {}},
     {"mixture_expert_dropout_rate", {}},
   });
@@ -1236,6 +1243,7 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_expert_num_leaves", "vector<int>"},
     {"mixture_expert_min_data_in_leaf", "vector<int>"},
     {"mixture_expert_min_gain_to_split", "vector<double>"},
+    {"mixture_expert_extra_trees", "vector<int>"},
     {"mixture_gate_entropy_lambda", "double"},
     {"mixture_expert_dropout_rate", "double"},
   });
