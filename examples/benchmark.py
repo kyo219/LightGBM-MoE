@@ -34,6 +34,92 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
 # =============================================================================
+# Expert Collapse Early Stopping
+# =============================================================================
+def expert_collapse_stopper(
+    X_sample: np.ndarray,
+    check_every: int = 20,
+    corr_threshold: float = 0.95,
+    regime_imbalance_threshold: float = 0.95,
+    min_iters: int = 50,
+    verbose: bool = False,
+):
+    """
+    Expert collapseを検知したら学習を打ち切るcallback。
+
+    Parameters
+    ----------
+    X_sample : np.ndarray
+        チェック用のサンプルデータ（全データだと重いのでサブセット推奨）
+    check_every : int
+        何iteration毎にチェックするか
+    corr_threshold : float
+        Expert間の相関がこの値を超えたらcollapse判定（max pairwise）
+    regime_imbalance_threshold : float
+        1つのregimeへの割り当て率がこの値を超えたらcollapse判定
+    min_iters : int
+        最低限このiteration数は回す（初期は相関高くなりがち）
+    verbose : bool
+        検知時にログを出力するか
+
+    Returns
+    -------
+    callback : callable
+        lgb.train()に渡すcallback関数
+    """
+
+    def callback(env):
+        iteration = env.iteration
+
+        # 最低限のiterationは回す & 定期チェック
+        if iteration < min_iters or iteration % check_every != 0:
+            return
+
+        try:
+            model = env.model
+
+            # Expert予測を取得
+            expert_preds = model.predict_expert_pred(X_sample)
+            K = expert_preds.shape[1]
+
+            # 1. Expert間の相関をチェック（max pairwise）
+            max_corr = 0.0
+            for i in range(K):
+                for j in range(i + 1, K):
+                    corr = abs(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1])
+                    max_corr = max(max_corr, corr)
+
+            if max_corr > corr_threshold:
+                if verbose:
+                    print(
+                        f"[iter {iteration}] Expert collapse detected: "
+                        f"max_corr={max_corr:.3f} > {corr_threshold}"
+                    )
+                raise lgb.EarlyStopException(iteration, [])
+
+            # 2. Regime偏りをチェック
+            regime_pred = model.predict_regime(X_sample)
+            unique, counts = np.unique(regime_pred, return_counts=True)
+            max_ratio = counts.max() / len(regime_pred)
+
+            if max_ratio > regime_imbalance_threshold:
+                if verbose:
+                    print(
+                        f"[iter {iteration}] Regime imbalance detected: "
+                        f"max_ratio={max_ratio:.1%} > {regime_imbalance_threshold:.1%}"
+                    )
+                raise lgb.EarlyStopException(iteration, [])
+
+        except lgb.EarlyStopException:
+            raise  # Re-raise early stop exception
+        except Exception:
+            # predict_expert_pred等が失敗した場合は無視（非MoEモデルなど）
+            pass
+
+    return callback
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
 @dataclass
@@ -144,10 +230,36 @@ DATASETS = {
 # =============================================================================
 # Evaluation
 # =============================================================================
-def evaluate_cv(X, y, params, config: BenchmarkConfig):
-    """Time-series cross-validation with early stopping."""
+def evaluate_cv(
+    X,
+    y,
+    params,
+    config: BenchmarkConfig,
+    use_collapse_stopper: bool = False,
+    collapse_stopper_kwargs: dict = None,
+):
+    """Time-series cross-validation with early stopping.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix
+    y : np.ndarray
+        Target values
+    params : dict
+        LightGBM parameters
+    config : BenchmarkConfig
+        Benchmark configuration
+    use_collapse_stopper : bool
+        Whether to use expert collapse early stopping (for MoE models)
+    collapse_stopper_kwargs : dict
+        Arguments for expert_collapse_stopper (corr_threshold, regime_imbalance_threshold, etc.)
+    """
     tscv = TimeSeriesSplit(n_splits=config.n_splits)
     scores = []
+
+    if collapse_stopper_kwargs is None:
+        collapse_stopper_kwargs = {}
 
     for train_idx, val_idx in tscv.split(X):
         X_train, X_val = X[train_idx], X[val_idx]
@@ -156,17 +268,33 @@ def evaluate_cv(X, y, params, config: BenchmarkConfig):
         train_data = lgb.Dataset(X_train, label=y_train)
         valid_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
 
+        # Build callbacks
+        callbacks = [lgb.early_stopping(stopping_rounds=50, verbose=False)]
+
+        if use_collapse_stopper:
+            # Use a sample of training data for collapse detection
+            sample_size = min(500, len(X_train))
+            sample_idx = np.random.choice(len(X_train), sample_size, replace=False)
+            X_sample = X_train[sample_idx]
+
+            callbacks.append(
+                expert_collapse_stopper(X_sample, **collapse_stopper_kwargs)
+            )
+
         try:
             model = lgb.train(
                 params,
                 train_data,
                 num_boost_round=config.num_boost_round,
                 valid_sets=[valid_data],
-                callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+                callbacks=callbacks,
             )
             pred = model.predict(X_val)
             rmse = np.sqrt(mean_squared_error(y_val, pred))
             scores.append(rmse)
+        except lgb.EarlyStopException:
+            # Collapse detected - treat as failed trial
+            scores.append(float("inf"))
         except Exception:
             scores.append(float("inf"))
 
@@ -199,7 +327,30 @@ def create_objective_standard(X, y, config: BenchmarkConfig):
     return objective
 
 
-def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False):
+def create_objective_moe(
+    X,
+    y,
+    config: BenchmarkConfig,
+    per_expert: bool = False,
+    use_collapse_stopper: bool = False,
+    collapse_stopper_kwargs: dict = None,
+):
+    """Create MoE objective for Optuna.
+
+    Parameters
+    ----------
+    use_collapse_stopper : bool
+        If True, stop training early when expert collapse is detected.
+    collapse_stopper_kwargs : dict
+        Arguments for expert_collapse_stopper:
+        - corr_threshold: float (default 0.95)
+        - regime_imbalance_threshold: float (default 0.95)
+        - check_every: int (default 20)
+        - min_iters: int (default 50)
+    """
+    if collapse_stopper_kwargs is None:
+        collapse_stopper_kwargs = {}
+
     def objective(trial):
         # smoothing=none fixed to prevent expert collapse
         smoothing = "none"
@@ -240,13 +391,34 @@ def create_objective_moe(X, y, config: BenchmarkConfig, per_expert: bool = False
 
         # smoothing_lambda not needed when smoothing=none
 
-        return evaluate_cv(X, y, params, config)
+        return evaluate_cv(
+            X, y, params, config,
+            use_collapse_stopper=use_collapse_stopper,
+            collapse_stopper_kwargs=collapse_stopper_kwargs,
+        )
 
     return objective
 
 
-def create_objective_moe_expert_choice(X, y, config: BenchmarkConfig):
-    """MoE with Expert Choice Routing objective for Optuna."""
+def create_objective_moe_expert_choice(
+    X,
+    y,
+    config: BenchmarkConfig,
+    use_collapse_stopper: bool = False,
+    collapse_stopper_kwargs: dict = None,
+):
+    """MoE with Expert Choice Routing objective for Optuna.
+
+    Parameters
+    ----------
+    use_collapse_stopper : bool
+        If True, stop training early when expert collapse is detected.
+    collapse_stopper_kwargs : dict
+        Arguments for expert_collapse_stopper.
+    """
+    if collapse_stopper_kwargs is None:
+        collapse_stopper_kwargs = {}
+
     def objective(trial):
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
 
@@ -277,7 +449,11 @@ def create_objective_moe_expert_choice(X, y, config: BenchmarkConfig):
             "mixture_expert_choice_boost": trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0),
         }
 
-        return evaluate_cv(X, y, params, config)
+        return evaluate_cv(
+            X, y, params, config,
+            use_collapse_stopper=use_collapse_stopper,
+            collapse_stopper_kwargs=collapse_stopper_kwargs,
+        )
 
     return objective
 
@@ -345,13 +521,32 @@ def analyze_moe(X, y, regime_true, best_params, config: BenchmarkConfig):
 # =============================================================================
 # Benchmark Runner
 # =============================================================================
-def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
-    """Run benchmark for one dataset."""
+def run_benchmark(
+    name: str,
+    X,
+    y,
+    regime_true,
+    config: BenchmarkConfig,
+    use_collapse_stopper: bool = False,
+    collapse_stopper_kwargs: dict = None,
+):
+    """Run benchmark for one dataset.
+
+    Parameters
+    ----------
+    use_collapse_stopper : bool
+        If True, enable expert collapse early stopping for MoE models.
+    collapse_stopper_kwargs : dict
+        Arguments for expert_collapse_stopper.
+    """
     print(f"\n{'=' * 70}")
     print(f"Dataset: {name}")
     print(f"{'=' * 70}")
     print(f"Samples: {len(y)}, Features: {X.shape[1]}")
     print(f"Regime distribution: {(regime_true == 0).mean():.1%} / {(regime_true == 1).mean():.1%}")
+
+    if use_collapse_stopper:
+        print(f"Expert Collapse Stopper: ENABLED {collapse_stopper_kwargs}")
 
     results = {}
 
@@ -376,7 +571,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     start = time.time()
     study_moe = optuna.create_study(direction="minimize")
     study_moe.optimize(
-        create_objective_moe(X, y, config, per_expert=False),
+        create_objective_moe(
+            X, y, config, per_expert=False,
+            use_collapse_stopper=use_collapse_stopper,
+            collapse_stopper_kwargs=collapse_stopper_kwargs,
+        ),
         n_trials=config.n_trials,
         show_progress_bar=True,
     )
@@ -392,7 +591,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     start = time.time()
     study_moe_pe = optuna.create_study(direction="minimize")
     study_moe_pe.optimize(
-        create_objective_moe(X, y, config, per_expert=True),
+        create_objective_moe(
+            X, y, config, per_expert=True,
+            use_collapse_stopper=use_collapse_stopper,
+            collapse_stopper_kwargs=collapse_stopper_kwargs,
+        ),
         n_trials=config.n_trials,
         show_progress_bar=True,
     )
@@ -408,7 +611,11 @@ def run_benchmark(name: str, X, y, regime_true, config: BenchmarkConfig):
     start = time.time()
     study_moe_ec = optuna.create_study(direction="minimize")
     study_moe_ec.optimize(
-        create_objective_moe_expert_choice(X, y, config),
+        create_objective_moe_expert_choice(
+            X, y, config,
+            use_collapse_stopper=use_collapse_stopper,
+            collapse_stopper_kwargs=collapse_stopper_kwargs,
+        ),
         n_trials=config.n_trials,
         show_progress_bar=True,
     )
@@ -1130,6 +1337,27 @@ def main():
     parser.add_argument("--no-demo", action="store_true", help="Skip regime demo visualization")
     parser.add_argument("--no-shap", action="store_true", help="Skip SHAP beeswarm visualization")
     parser.add_argument("--output-md", type=str, help="Output markdown file path (e.g., BENCHMARK.md)")
+    # Expert collapse stopper options
+    parser.add_argument(
+        "--collapse-stopper", action="store_true",
+        help="Enable expert collapse early stopping for MoE models"
+    )
+    parser.add_argument(
+        "--corr-threshold", type=float, default=0.95,
+        help="Expert correlation threshold for collapse detection (default: 0.95)"
+    )
+    parser.add_argument(
+        "--regime-imbalance-threshold", type=float, default=0.95,
+        help="Regime imbalance threshold (e.g., 0.95 = 95:5 split) (default: 0.95)"
+    )
+    parser.add_argument(
+        "--check-every", type=int, default=20,
+        help="Check for collapse every N iterations (default: 20)"
+    )
+    parser.add_argument(
+        "--min-iters", type=int, default=50,
+        help="Minimum iterations before collapse checking (default: 50)"
+    )
     args = parser.parse_args()
 
     config = BenchmarkConfig(
@@ -1144,6 +1372,19 @@ def main():
     print("=" * 70)
     print(f"Trials: {config.n_trials}, CV Splits: {config.n_splits}, Boost Rounds: {config.num_boost_round}")
 
+    # Collapse stopper settings
+    collapse_stopper_kwargs = {
+        "corr_threshold": args.corr_threshold,
+        "regime_imbalance_threshold": args.regime_imbalance_threshold,
+        "check_every": args.check_every,
+        "min_iters": args.min_iters,
+        "verbose": True,
+    }
+    if args.collapse_stopper:
+        print(f"Expert Collapse Stopper: ENABLED")
+        print(f"  corr_threshold={args.corr_threshold}, regime_imbalance={args.regime_imbalance_threshold}")
+        print(f"  check_every={args.check_every}, min_iters={args.min_iters}")
+
     all_results = {}
     synthetic_data = None  # Store for regime demo
 
@@ -1153,7 +1394,11 @@ def main():
         params["seed"] = config.seed
 
         X, y, regime = generator(**params)
-        all_results[name] = run_benchmark(name, X, y, regime, config)
+        all_results[name] = run_benchmark(
+            name, X, y, regime, config,
+            use_collapse_stopper=args.collapse_stopper,
+            collapse_stopper_kwargs=collapse_stopper_kwargs,
+        )
 
         # Store Synthetic data for regime demo
         if name == "Synthetic":
