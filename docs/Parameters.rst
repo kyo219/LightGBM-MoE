@@ -1550,6 +1550,80 @@ Mixture-of-Experts Parameters
 
    -  example: "0.1,0.01,0.0" for conservative-to-aggressive experts
 
+-  ``mixture_expert_extra_trees`` :raw-html:`<a id="mixture_expert_extra_trees" title="Permalink to this parameter" href="#mixture_expert_extra_trees">&#x1F517;&#xFE0E;</a>`, default = ``""``, type = int
+
+   -  per-expert extra_trees setting (comma-separated list of 0 or 1)
+
+   -  if empty, all experts use the global extra_trees setting
+
+   -  if provided, must have exactly mixture_num_experts values
+
+   -  example: "0,1,0,1" to enable extra_trees for experts 1 and 3 only
+
+   -  useful for mixing precise trees with randomized trees
+
+-  ``mixture_gate_entropy_lambda`` :raw-html:`<a id="mixture_gate_entropy_lambda" title="Permalink to this parameter" href="#mixture_gate_entropy_lambda">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_gate_entropy_lambda <= 1.0``
+
+   -  entropy regularization coefficient for gate output
+
+   -  encourages gate to produce more uncertain (uniform) predictions
+
+   -  helps prevent premature expert collapse where gate assigns all samples to one expert
+
+   -  higher values produce more uniform gate probabilities
+
+   -  0.0 means no regularization (default)
+
+   -  recommended range: 0.01-0.1
+
+-  ``mixture_expert_dropout_rate`` :raw-html:`<a id="mixture_expert_dropout_rate" title="Permalink to this parameter" href="#mixture_expert_dropout_rate">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_expert_dropout_rate < 1.0``
+
+   -  dropout rate for experts during training
+
+   -  at each iteration, experts are randomly dropped with this probability
+
+   -  dropped experts receive zero gradients (not updated) for that iteration
+
+   -  helps prevent expert collapse by forcing all experts to be useful
+
+   -  0.0 means no dropout (default)
+
+   -  recommended range: 0.1-0.3
+
+   -  note: at least one expert is always kept (never drops all experts)
+
+-  ``mixture_routing_mode`` :raw-html:`<a id="mixture_routing_mode" title="Permalink to this parameter" href="#mixture_routing_mode">&#x1F517;&#xFE0E;</a>`, default = ``token_choice``, type = enum, options: ``token_choice``, ``expert_choice``
+
+   -  routing strategy for Mixture-of-Experts
+
+   -  ``token_choice``: each sample selects experts (current EM-based)
+
+   -  ``expert_choice``: each expert selects samples (better load balance)
+
+-  ``mixture_expert_capacity_factor`` :raw-html:`<a id="mixture_expert_capacity_factor" title="Permalink to this parameter" href="#mixture_expert_capacity_factor">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``0.0 < mixture_expert_capacity_factor <= 3.0``
+
+   -  capacity multiplier for expert_choice routing
+
+   -  each expert selects (N/K) * capacity_factor samples
+
+   -  1.0 means exact balanced capacity, >1.0 allows overlap
+
+-  ``mixture_expert_choice_score`` :raw-html:`<a id="mixture_expert_choice_score" title="Permalink to this parameter" href="#mixture_expert_choice_score">&#x1F517;&#xFE0E;</a>`, default = ``combined``, type = enum, options: ``gate``, ``loss``, ``combined``
+
+   -  score function for expert sample selection
+
+   -  ``gate``: use gate probability as affinity
+
+   -  ``loss``: use negative loss as affinity
+
+   -  ``combined``: gate + alpha * (-loss)
+
+-  ``mixture_expert_choice_boost`` :raw-html:`<a id="mixture_expert_choice_boost" title="Permalink to this parameter" href="#mixture_expert_choice_boost">&#x1F517;&#xFE0E;</a>`, default = ``10.0``, type = double, constraints: ``1.0 < mixture_expert_choice_boost <= 100.0``
+
+   -  multiplier for responsibility of selected samples
+
+   -  higher values create sharper distinction
+
 .. end params list
 
 Others

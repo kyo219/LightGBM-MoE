@@ -288,6 +288,39 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Uniform distribution for dropout probability */
   mutable std::uniform_real_distribution<double> dropout_dist_;
 
+  // Expert Choice Routing members
+  /*! \brief Expert capacity (samples per expert) */
+  int expert_capacity_;
+
+  /*! \brief Whether to use expert choice routing */
+  bool use_expert_choice_;
+
+  /*! \brief Affinity scores for expert choice (N x K, sample-major) */
+  std::vector<double> affinity_scores_;
+
+  /*! \brief Selection mask for expert choice (N x K, sample-major) */
+  std::vector<int> expert_selection_mask_;
+
+  /*!
+   * \brief E-step using Expert Choice Routing
+   */
+  void EStepExpertChoice();
+
+  /*!
+   * \brief Compute affinity scores for expert choice
+   */
+  void ComputeAffinityScores();
+
+  /*!
+   * \brief Each expert selects top-C samples
+   */
+  void SelectTopSamplesPerExpert();
+
+  /*!
+   * \brief Convert selection mask to soft responsibilities
+   */
+  void ConvertSelectionToResponsibilities();
+
   /*!
    * \brief Forward pass for validation data: compute expert predictions and gate probabilities
    * \param valid_idx Index of validation dataset

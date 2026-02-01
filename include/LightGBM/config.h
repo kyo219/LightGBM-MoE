@@ -1298,6 +1298,34 @@ struct Config {
   // desc = note: at least one expert is always kept (never drops all experts)
   double mixture_expert_dropout_rate = 0.0;
 
+  // type = enum
+  // options = token_choice, expert_choice
+  // desc = routing strategy for Mixture-of-Experts
+  // desc = ``token_choice``: each sample selects experts (current EM-based)
+  // desc = ``expert_choice``: each expert selects samples (better load balance)
+  std::string mixture_routing_mode = "token_choice";
+
+  // check = >0.0
+  // check = <=3.0
+  // desc = capacity multiplier for expert_choice routing
+  // desc = each expert selects (N/K) * capacity_factor samples
+  // desc = 1.0 means exact balanced capacity, >1.0 allows overlap
+  double mixture_expert_capacity_factor = 1.0;
+
+  // type = enum
+  // options = gate, loss, combined
+  // desc = score function for expert sample selection
+  // desc = ``gate``: use gate probability as affinity
+  // desc = ``loss``: use negative loss as affinity
+  // desc = ``combined``: gate + alpha * (-loss)
+  std::string mixture_expert_choice_score = "combined";
+
+  // check = >1.0
+  // check = <=100.0
+  // desc = multiplier for responsibility of selected samples
+  // desc = higher values create sharper distinction
+  double mixture_expert_choice_boost = 10.0;
+
   #ifndef __NVCC__
   #pragma endregion
 

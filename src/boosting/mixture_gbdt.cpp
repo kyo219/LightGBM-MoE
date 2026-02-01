@@ -216,6 +216,23 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   dropout_rng_.seed(config_->seed + 12345);  // Different seed from other RNGs
   dropout_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
 
+  // Expert Choice Routing initialization
+  use_expert_choice_ = (config_->mixture_routing_mode == "expert_choice");
+
+  if (use_expert_choice_) {
+    double capacity_ratio = static_cast<double>(num_data_) / num_experts_;
+    expert_capacity_ = static_cast<int>(
+        capacity_ratio * config_->mixture_expert_capacity_factor);
+    expert_capacity_ = std::max(1, expert_capacity_);
+
+    affinity_scores_.resize(nk);
+    expert_selection_mask_.resize(nk);
+
+    Log::Info("MixtureGBDT: Expert Choice Routing enabled "
+              "(capacity=%d, factor=%.2f)",
+              expert_capacity_, config_->mixture_expert_capacity_factor);
+  }
+
   // Initialize early stopping parameters
   early_stopping_round_ = config_->early_stopping_round;
   early_stopping_min_delta_ = config_->early_stopping_min_delta;
@@ -513,6 +530,99 @@ void MixtureGBDT::EStep() {
     // Note: No hard clipping here. Collapse prevention is handled by
     // Loss-Free Load Balancing (UpdateExpertBias) which adjusts gate bias.
     Softmax(scores.data(), num_experts_, responsibilities_.data() + i * num_experts_);
+  }
+}
+
+void MixtureGBDT::EStepExpertChoice() {
+  // Step 1: Compute affinity scores
+  ComputeAffinityScores();
+
+  // Step 2: Each expert selects top-C samples
+  SelectTopSamplesPerExpert();
+
+  // Step 3: Convert selection to soft responsibilities
+  ConvertSelectionToResponsibilities();
+}
+
+void MixtureGBDT::ComputeAffinityScores() {
+  const label_t* labels = train_data_->metadata().label();
+  const double alpha = config_->mixture_e_step_alpha;
+  const std::string& score_type = config_->mixture_expert_choice_score;
+
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    for (int k = 0; k < num_experts_; ++k) {
+      double score = 0.0;
+
+      if (score_type == "gate" || score_type == "combined") {
+        double gate_prob = gate_proba_[i * num_experts_ + k];
+        score += std::log(gate_prob + kMixtureEpsilon);
+      }
+
+      if (score_type == "loss" || score_type == "combined") {
+        double expert_p = expert_pred_[k * num_data_ + i];
+        double loss = ComputePointwiseLoss(labels[i], expert_p);
+        score -= alpha * loss;
+      }
+
+      affinity_scores_[i * num_experts_ + k] = score;
+    }
+  }
+}
+
+void MixtureGBDT::SelectTopSamplesPerExpert() {
+  std::fill(expert_selection_mask_.begin(),
+            expert_selection_mask_.end(), 0);
+
+  for (int k = 0; k < num_experts_; ++k) {
+    // Collect (score, index) pairs for this expert
+    std::vector<std::pair<double, data_size_t>> scores_idx(num_data_);
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      scores_idx[i] = {affinity_scores_[i * num_experts_ + k], i};
+    }
+
+    // Partial sort for top-C (O(N) average)
+    int C = std::min(expert_capacity_, static_cast<int>(num_data_));
+    std::nth_element(
+        scores_idx.begin(),
+        scores_idx.begin() + C,
+        scores_idx.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; }
+    );
+
+    // Mark selected samples
+    for (int c = 0; c < C; ++c) {
+      data_size_t idx = scores_idx[c].second;
+      expert_selection_mask_[idx * num_experts_ + k] = 1;
+    }
+  }
+}
+
+void MixtureGBDT::ConvertSelectionToResponsibilities() {
+  const double boost = config_->mixture_expert_choice_boost;
+  const double min_r = 1.0 / (num_experts_ * boost);
+
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    double sum = 0.0;
+
+    // Assign based on selection
+    for (int k = 0; k < num_experts_; ++k) {
+      size_t idx = i * num_experts_ + k;
+      if (expert_selection_mask_[idx] == 1) {
+        // Selected: high responsibility
+        responsibilities_[idx] = std::exp(affinity_scores_[idx]) * boost;
+      } else {
+        // Not selected: minimum responsibility
+        responsibilities_[idx] = min_r;
+      }
+      sum += responsibilities_[idx];
+    }
+
+    // Normalize (sum = 1)
+    for (int k = 0; k < num_experts_; ++k) {
+      responsibilities_[i * num_experts_ + k] /= sum;
+    }
   }
 }
 
@@ -831,7 +941,11 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   // compute uniform responsibilities and all experts train identically.
   const int warmup_iters = config_->mixture_warmup_iters;
   if (iter_ >= warmup_iters) {
-    EStep();
+    if (use_expert_choice_) {
+      EStepExpertChoice();  // Expert Choice Routing
+    } else {
+      EStep();              // Token Choice (EM-based)
+    }
 
     // Apply time-series smoothing if enabled
     SmoothResponsibilities();

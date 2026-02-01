@@ -171,6 +171,49 @@ params = {
    - At least one expert is always kept
    - Similar to dropout in neural networks
 
+### Expert Choice Routing (Advanced)
+
+An alternative routing strategy where **each expert selects its top samples** instead of each sample selecting experts (Token Choice). This guarantees perfect load balance across experts.
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `mixture_routing_mode` | string | `"token_choice"` | `"token_choice"`, `"expert_choice"` | Routing strategy. `"token_choice"`: each sample selects experts (default EM-based). `"expert_choice"`: each expert selects samples (better load balance). |
+| `mixture_expert_capacity_factor` | float | 1.0 | 0.0-3.0 | Capacity multiplier. Each expert selects `(N/K) × factor` samples. 1.0 = exact balanced capacity, >1.0 allows overlap. |
+| `mixture_expert_choice_score` | string | `"combined"` | `"gate"`, `"loss"`, `"combined"` | Score function for sample selection. `"gate"`: use gate probability. `"loss"`: use negative loss. `"combined"`: gate + alpha × (-loss). |
+| `mixture_expert_choice_boost` | float | 10.0 | 1.0-100.0 | Multiplier for responsibility of selected samples. Higher = sharper distinction between selected/non-selected. |
+
+**Example: Using Expert Choice Routing**
+
+```python
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 4,
+    'objective': 'regression',
+
+    # Expert Choice Routing
+    'mixture_routing_mode': 'expert_choice',
+    'mixture_expert_capacity_factor': 1.0,   # Balanced capacity
+    'mixture_expert_choice_score': 'combined',
+    'mixture_expert_choice_boost': 10.0,
+}
+```
+
+**When to use Expert Choice:**
+
+| Scenario | Recommended |
+|----------|-------------|
+| Experts collapsing to similar predictions | ✅ Expert Choice |
+| Load imbalance (one expert gets all samples) | ✅ Expert Choice |
+| Need strict load balancing | ✅ Expert Choice |
+| Standard MoE training | Token Choice (default) |
+
+**How it works:**
+
+1. **Compute Affinity**: For each sample-expert pair, compute affinity score using gate probability and/or loss
+2. **Expert Selection**: Each expert selects its top-C samples (C = N/K × capacity_factor)
+3. **Soft Assignment**: Selected samples get high responsibility, non-selected get minimum responsibility
+4. **GBDT Compatible**: All samples contribute gradients (soft selection), maintaining GBDT tree-building requirements
+
 ### Early Stopping
 
 MoE supports validation-based early stopping, useful for hyperparameter tuning with Optuna.
@@ -1134,6 +1177,49 @@ params = {
    - 無効化されたExpertは更新されず、他のExpertがカバーを強制
    - 少なくとも1つのExpertは常に有効
    - ニューラルネットワークのdropoutに類似
+
+### Expert Choice Routing（上級者向け）
+
+従来のToken Choice（各サンプルがExpertを選択）とは逆に、**各Expertが担当するサンプルを選択する**ルーティング戦略。完全な負荷均衡を保証します。
+
+| パラメータ | 型 | デフォルト | 範囲 | 説明 |
+|-----------|------|---------|-------|-------------|
+| `mixture_routing_mode` | string | `"token_choice"` | `"token_choice"`, `"expert_choice"` | ルーティング戦略。`"token_choice"`: 各サンプルがExpertを選択（デフォルト）。`"expert_choice"`: 各Expertがサンプルを選択（負荷均衡）。 |
+| `mixture_expert_capacity_factor` | float | 1.0 | 0.0-3.0 | 容量倍率。各Expertは `(N/K) × factor` 個のサンプルを選択。1.0=均等分配、>1.0でオーバーラップ許容。 |
+| `mixture_expert_choice_score` | string | `"combined"` | `"gate"`, `"loss"`, `"combined"` | サンプル選択のスコア関数。`"gate"`: gate確率を使用。`"loss"`: 負の損失を使用。`"combined"`: gate + alpha × (-loss)。 |
+| `mixture_expert_choice_boost` | float | 10.0 | 1.0-100.0 | 選択サンプルの責務度ブースト倍率。大きいほど選択/非選択の差が明確。 |
+
+**使用例: Expert Choice Routing**
+
+```python
+params = {
+    'boosting': 'mixture',
+    'mixture_num_experts': 4,
+    'objective': 'regression',
+
+    # Expert Choice Routing
+    'mixture_routing_mode': 'expert_choice',
+    'mixture_expert_capacity_factor': 1.0,   # 均等分配
+    'mixture_expert_choice_score': 'combined',
+    'mixture_expert_choice_boost': 10.0,
+}
+```
+
+**Expert Choiceを使うべき場面:**
+
+| シナリオ | 推奨 |
+|----------|-------------|
+| Expertが同じ予測に収束してしまう | ✅ Expert Choice |
+| 負荷が不均衡（1つのExpertにサンプル集中） | ✅ Expert Choice |
+| 厳密な負荷均衡が必要 | ✅ Expert Choice |
+| 通常のMoE学習 | Token Choice（デフォルト） |
+
+**動作原理:**
+
+1. **親和度計算**: 各サンプル-Expert組に対して、gate確率や損失に基づく親和度スコアを計算
+2. **Expert選択**: 各Expertが上位Cサンプルを選択（C = N/K × capacity_factor）
+3. **ソフト割当**: 選択されたサンプルは高い責務度、非選択は最小責務度を付与
+4. **GBDT互換**: 全サンプルが勾配計算に寄与（ソフト選択）、GBDTの木構築要件を維持
 
 ### Early Stopping
 
