@@ -486,8 +486,8 @@ def create_objective_moe(
         collapse_stopper_kwargs = {}
 
     def objective(trial):
-        # smoothing=none fixed to prevent expert collapse
-        smoothing = "none"
+        # Search smoothing mode (none or ema)
+        smoothing = trial.suggest_categorical("mixture_r_smoothing", ["none", "ema"])
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
 
         params = {
@@ -516,6 +516,10 @@ def create_objective_moe(
             "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
         }
 
+        # Add smoothing lambda when using ema
+        if smoothing == "ema":
+            params["mixture_smoothing_lambda"] = trial.suggest_float("mixture_smoothing_lambda", 0.5, 0.99)
+
         if per_expert:
             max_depths = [trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)]
             num_leaves = [trial.suggest_int(f"num_leaves_{k}", 8, 128) for k in range(num_experts)]
@@ -528,8 +532,6 @@ def create_objective_moe(
             params["num_leaves"] = trial.suggest_int("num_leaves", 8, 128)
             params["max_depth"] = trial.suggest_int("max_depth", 3, 12)
             params["min_data_in_leaf"] = trial.suggest_int("min_data_in_leaf", 5, 100)
-
-        # smoothing_lambda not needed when smoothing=none
 
         return evaluate_cv(
             X, y, params, config,
