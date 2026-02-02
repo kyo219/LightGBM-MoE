@@ -127,6 +127,43 @@ print(f"Best iteration: {model.best_iteration}")
 | `mixture_gate_entropy_lambda` | float | 0.0 | 0.0-1.0 | Gate entropy regularization. Encourages gate to produce more uncertain predictions, preventing premature expert collapse. **Recommended: 0.01-0.1**. |
 | `mixture_expert_dropout_rate` | float | 0.0 | 0.0-1.0 | Expert dropout rate. Randomly drops experts during training to force all experts to be useful. **Recommended: 0.1-0.3**. |
 
+### Gate Parameters
+
+The gate model controls routing decisions (which expert handles each sample). By default, it uses shallow trees to prevent overfitting. **These parameters should be included in hyperparameter search** as they significantly impact routing quality.
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `mixture_gate_max_depth` | int | 3 | 2-6 | Maximum depth of gate trees. Shallower than experts to prevent overfitting on routing. |
+| `mixture_gate_num_leaves` | int | 8 | 4-32 | Number of leaves in gate trees. Fewer leaves for simpler routing decisions. |
+| `mixture_gate_learning_rate` | float | 0.1 | 0.01-0.3 | Learning rate for gate. Can be higher than experts since gate trees are shallower. |
+| `mixture_gate_lambda_l2` | float | 1.0 | 0.1-10.0 | L2 regularization for gate. Higher values prevent gate overfitting. |
+| `mixture_gate_entropy_lambda` | float | 0.0 | 0.0-0.1 | Entropy regularization. Encourages uncertain predictions to prevent premature expert collapse. |
+
+**Design rationale:**
+- Gate is a **multiclass classifier** (K classes = K experts)
+- Shallow trees (depth=3, leaves=8) prevent gate from memorizing sample→expert mappings
+- Higher learning rate (0.1) allows faster adaptation to changing expert specializations
+- Experts handle prediction accuracy, gate only handles routing
+
+**Optuna example with gate parameters:**
+
+```python
+def objective(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        # Expert parameters
+        'max_depth': trial.suggest_int('max_depth', 3, 12),
+        'num_leaves': trial.suggest_int('num_leaves', 8, 128),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        # Gate parameters (important for routing quality!)
+        'mixture_gate_max_depth': trial.suggest_int('gate_max_depth', 2, 6),
+        'mixture_gate_num_leaves': trial.suggest_int('gate_num_leaves', 4, 32),
+        'mixture_gate_learning_rate': trial.suggest_float('gate_lr', 0.01, 0.3, log=True),
+    }
+    # ... training code ...
+```
+
 > **Important: Use `mixture_r_smoothing="none"` (default)**
 >
 > Smoothing methods (`ema`, `markov`, `momentum`) can cause **expert collapse** where all experts converge to similar predictions. In benchmarks with Optuna optimization, `smoothing=none` consistently achieves good expert separation (correlation ~0.02, regime accuracy ~98%), while other smoothing methods often collapse (correlation ~0.99, regime accuracy ~50%).
@@ -1133,6 +1170,43 @@ print(f"Best iteration: {model.best_iteration}")
 | `mixture_smoothing_lambda` | float | 0.0 | 0.0-1.0 | 平滑化強度。`mixture_r_smoothing` が `"none"` 以外の場合のみ使用。高いほど平滑化が強い（レジーム遷移が遅い）。 |
 | `mixture_gate_entropy_lambda` | float | 0.0 | 0.0-1.0 | Gateエントロピー正則化。Gateがより不確実な予測を出すよう促し、早期のExpert collapseを防止。**推奨: 0.01-0.1**。 |
 | `mixture_expert_dropout_rate` | float | 0.0 | 0.0-1.0 | Expertドロップアウト率。学習中にランダムにExpertを無効化し、全Expertが有用であることを強制。**推奨: 0.1-0.3**。 |
+
+### Gate パラメータ
+
+Gateモデルはルーティング（各サンプルをどのExpertが担当するか）を制御します。デフォルトでは浅い木を使用して過学習を防ぎます。**これらのパラメータはハイパーパラメータ探索に含めるべき**です。ルーティング品質に大きく影響します。
+
+| パラメータ | 型 | デフォルト | 範囲 | 説明 |
+|-----------|------|---------|-------|-------------|
+| `mixture_gate_max_depth` | int | 3 | 2-6 | Gate木の最大深さ。ルーティングの過学習を防ぐためExpertより浅くする。 |
+| `mixture_gate_num_leaves` | int | 8 | 4-32 | Gate木の葉数。シンプルなルーティング判断のため少なめに。 |
+| `mixture_gate_learning_rate` | float | 0.1 | 0.01-0.3 | Gateの学習率。Gate木は浅いのでExpertより高めでも可。 |
+| `mixture_gate_lambda_l2` | float | 1.0 | 0.1-10.0 | GateのL2正則化。高い値でGateの過学習を防止。 |
+| `mixture_gate_entropy_lambda` | float | 0.0 | 0.0-0.1 | エントロピー正則化。不確実な予測を促し、早期のExpert collapseを防止。 |
+
+**設計理念:**
+- Gateは**多クラス分類器**（Kクラス = K個のExpert）
+- 浅い木（depth=3, leaves=8）でサンプル→Expert対応の暗記を防止
+- 高い学習率（0.1）でExpertの専門化変化に素早く適応
+- Expertが予測精度を担当、Gateはルーティングのみ
+
+**Gateパラメータ込みのOptuna例:**
+
+```python
+def objective(trial):
+    params = {
+        'boosting': 'mixture',
+        'mixture_num_experts': trial.suggest_int('num_experts', 2, 4),
+        # Expertパラメータ
+        'max_depth': trial.suggest_int('max_depth', 3, 12),
+        'num_leaves': trial.suggest_int('num_leaves', 8, 128),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        # Gateパラメータ（ルーティング品質に重要！）
+        'mixture_gate_max_depth': trial.suggest_int('gate_max_depth', 2, 6),
+        'mixture_gate_num_leaves': trial.suggest_int('gate_num_leaves', 4, 32),
+        'mixture_gate_learning_rate': trial.suggest_float('gate_lr', 0.01, 0.3, log=True),
+    }
+    # ... training code ...
+```
 
 > **重要: `mixture_r_smoothing="none"`（デフォルト）を推奨**
 >

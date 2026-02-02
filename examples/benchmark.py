@@ -510,6 +510,10 @@ def create_objective_moe(
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
             # Explicitly use token_choice since default is now expert_choice
             "mixture_routing_mode": "token_choice",
+            # Gate parameters (often overlooked but important for routing quality)
+            "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
+            "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
+            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
         }
 
         if per_expert:
@@ -593,6 +597,10 @@ def create_objective_moe_expert_choice(
             "mixture_expert_choice_score": "gate",  # Fixed: only "gate" prevents collapse
             "mixture_expert_choice_boost": trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0),
             "mixture_expert_choice_hard": trial.suggest_categorical("mixture_expert_choice_hard", [True, False]),
+            # Gate parameters (often overlooked but important for routing quality)
+            "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
+            "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
+            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
         }
 
         if per_expert:
@@ -1360,6 +1368,9 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
         lines.append(f"- min_data_in_leaf: {moe_params.get('min_data_in_leaf', 'N/A')}")
         lines.append(f"- learning_rate: {moe_params.get('learning_rate', 'N/A'):.4f}")
         lines.append(f"- e_step_alpha: {moe_params.get('mixture_e_step_alpha', 'N/A'):.2f}")
+        lines.append(f"- gate_max_depth: {moe_params.get('mixture_gate_max_depth', 'N/A')}")
+        lines.append(f"- gate_num_leaves: {moe_params.get('mixture_gate_num_leaves', 'N/A')}")
+        lines.append(f"- gate_learning_rate: {moe_params.get('mixture_gate_learning_rate', 'N/A'):.4f}")
         lines.append("")
 
         # MoE-EC-PE params (Expert Choice + Per-Expert)
@@ -1372,6 +1383,9 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
         lines.append(f"- capacity_factor: {ec_pe_params.get('mixture_expert_capacity_factor', 'N/A'):.2f}")
         lines.append(f"- choice_score: {ec_pe_params.get('mixture_expert_choice_score', 'N/A')}")
         lines.append(f"- choice_boost: {ec_pe_params.get('mixture_expert_choice_boost', 'N/A'):.1f}")
+        lines.append(f"- gate_max_depth: {ec_pe_params.get('mixture_gate_max_depth', 'N/A')}")
+        lines.append(f"- gate_num_leaves: {ec_pe_params.get('mixture_gate_num_leaves', 'N/A')}")
+        lines.append(f"- gate_learning_rate: {ec_pe_params.get('mixture_gate_learning_rate', 'N/A'):.4f}")
 
         # Extract per-expert tree params
         max_depths = [ec_pe_params.get(f"max_depth_{k}", "?") for k in range(num_experts)]
@@ -1454,6 +1468,11 @@ def print_final_summary(all_results: dict):
             f"min_data={moe_params.get('min_data_in_leaf', '?')}, lr={moe_params.get('learning_rate', 0):.4f}, "
             f"alpha={moe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={moe_params.get('mixture_warmup_iters', '?')}"
         )
+        print(
+            f"             gate: depth={moe_params.get('mixture_gate_max_depth', '?')}, "
+            f"leaves={moe_params.get('mixture_gate_num_leaves', '?')}, "
+            f"lr={moe_params.get('mixture_gate_learning_rate', 0):.4f}"
+        )
 
         # MoE-EC-PE (Expert Choice + Per-Expert)
         ec_pe_params = results["MoE-EC-PE"]["params"]
@@ -1467,6 +1486,11 @@ def print_final_summary(all_results: dict):
             f"capacity={ec_pe_params.get('mixture_expert_capacity_factor', '?'):.2f}, "
             f"score={ec_pe_params.get('mixture_expert_choice_score', '?')}, "
             f"boost={ec_pe_params.get('mixture_expert_choice_boost', '?'):.1f}"
+        )
+        print(
+            f"             gate: depth={ec_pe_params.get('mixture_gate_max_depth', '?')}, "
+            f"leaves={ec_pe_params.get('mixture_gate_num_leaves', '?')}, "
+            f"lr={ec_pe_params.get('mixture_gate_learning_rate', 0):.4f}"
         )
         for k in range(ec_pe_k):
             role_name = ec_pe_roles.get(f"role_{k}", "?")
