@@ -1166,11 +1166,14 @@ struct Config {
   int mixture_gate_iters_per_round = 1;
 
   // type = enum
-  // options = uniform, kmeans, residual_kmeans
+  // options = uniform, quantile, random, balanced_kmeans, gmm, tree_hierarchical
   // desc = initialization method for expert responsibilities
-  // desc = ``uniform``: all experts start with equal responsibility
-  // desc = ``kmeans``: initialize using k-means clustering on features
-  // desc = ``residual_kmeans``: initialize using k-means on residuals
+  // desc = ``uniform``: all experts start with equal responsibility (default, may cause collapse)
+  // desc = ``quantile``: assign samples to experts based on label quantiles
+  // desc = ``random``: randomly assign samples to experts
+  // desc = ``balanced_kmeans``: use Balanced K-Means clustering on features (recommended)
+  // desc = ``gmm``: use Gaussian Mixture Model for soft clustering (theoretical EM alignment)
+  // desc = ``tree_hierarchical``: train a deep tree, then hierarchically cluster leaves by mean y
   std::string mixture_init = "uniform";
 
   // check = >=0.0
@@ -1189,11 +1192,22 @@ struct Config {
   std::string mixture_e_step_loss = "auto";
 
   // type = enum
-  // options = em, loss_only
+  // options = em, loss_only, gate_only
   // desc = mode for E-step responsibility calculation
   // desc = ``em``: use both gate probability and expert loss (standard EM)
   // desc = ``loss_only``: use only expert loss, ignore gate probability (simpler, more intuitive)
+  // desc = ``gate_only``: use only gate probability, ignore expert loss (prevents Expert Collapse)
   std::string mixture_e_step_mode = "em";
+
+  // check = >=0.0
+  // check = <=10.0
+  // desc = coefficient for auxiliary load balancing in E-step
+  // desc = adds penalty term to prevent expert collapse while maintaining EM structure
+  // desc = formula: s_ik = log(gate) - alpha*loss - load_balance_alpha * log(load_k * K)
+  // desc = higher values enforce stronger load balancing
+  // desc = 0.0 means no load balancing (default, may cause Expert Collapse)
+  // desc = recommended range: 0.1-1.0 for Token Choice routing
+  double mixture_load_balance_alpha = 0.0;
 
   // type = enum
   // options = none, ema, markov, momentum
@@ -1299,11 +1313,11 @@ struct Config {
   double mixture_expert_dropout_rate = 0.0;
 
   // type = enum
-  // options = token_choice, expert_choice
+  // options = expert_choice, token_choice
   // desc = routing strategy for Mixture-of-Experts
-  // desc = ``token_choice``: each sample selects experts (current EM-based)
-  // desc = ``expert_choice``: each expert selects samples (better load balance)
-  std::string mixture_routing_mode = "token_choice";
+  // desc = ``expert_choice``: each expert selects samples (recommended, prevents Expert Collapse)
+  // desc = ``token_choice``: each sample selects experts (WARNING: prone to Expert Collapse)
+  std::string mixture_routing_mode = "expert_choice";
 
   // check = >0.0
   // check = <=3.0
@@ -1314,17 +1328,22 @@ struct Config {
 
   // type = enum
   // options = gate, loss, combined
-  // desc = score function for expert sample selection
-  // desc = ``gate``: use gate probability as affinity
-  // desc = ``loss``: use negative loss as affinity
-  // desc = ``combined``: gate + alpha * (-loss)
-  std::string mixture_expert_choice_score = "combined";
+  // desc = score function for expert sample selection (only for expert_choice routing)
+  // desc = ``gate``: use gate probability as affinity (recommended, prevents Expert Collapse)
+  // desc = ``loss``: use negative loss as affinity (WARNING: causes Expert Collapse)
+  // desc = ``combined``: gate + alpha * (-loss) (WARNING: causes Expert Collapse)
+  std::string mixture_expert_choice_score = "gate";
 
   // check = >1.0
   // check = <=100.0
   // desc = multiplier for responsibility of selected samples
   // desc = higher values create sharper distinction
   double mixture_expert_choice_boost = 10.0;
+
+  // desc = use hard routing (non-selected samples get zero weight)
+  // desc = when true, only selected samples contribute to each expert's gradient
+  // desc = this forces stronger specialization but may reduce gradient signal
+  bool mixture_expert_choice_hard = false;
 
   #ifndef __NVCC__
   #pragma endregion

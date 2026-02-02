@@ -336,6 +336,7 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_e_step_alpha",
   "mixture_e_step_loss",
   "mixture_e_step_mode",
+  "mixture_load_balance_alpha",
   "mixture_r_smoothing",
   "mixture_smoothing_lambda",
   "mixture_warmup_iters",
@@ -355,6 +356,7 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_expert_capacity_factor",
   "mixture_expert_choice_score",
   "mixture_expert_choice_boost",
+  "mixture_expert_choice_hard",
   });
   return params;
 }
@@ -722,6 +724,10 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
 
   GetString(params, "mixture_e_step_mode", &mixture_e_step_mode);
 
+  GetDouble(params, "mixture_load_balance_alpha", &mixture_load_balance_alpha);
+  CHECK_GE(mixture_load_balance_alpha, 0.0);
+  CHECK_LE(mixture_load_balance_alpha, 10.0);
+
   GetString(params, "mixture_r_smoothing", &mixture_r_smoothing);
 
   GetDouble(params, "mixture_smoothing_lambda", &mixture_smoothing_lambda);
@@ -784,6 +790,8 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetDouble(params, "mixture_expert_choice_boost", &mixture_expert_choice_boost);
   CHECK_GT(mixture_expert_choice_boost, 1.0);
   CHECK_LE(mixture_expert_choice_boost, 100.0);
+
+  GetBool(params, "mixture_expert_choice_hard", &mixture_expert_choice_hard);
 }
 
 std::string Config::SaveMembersToString() const {
@@ -911,6 +919,7 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_e_step_alpha: " << mixture_e_step_alpha << "]\n";
   str_buf << "[mixture_e_step_loss: " << mixture_e_step_loss << "]\n";
   str_buf << "[mixture_e_step_mode: " << mixture_e_step_mode << "]\n";
+  str_buf << "[mixture_load_balance_alpha: " << mixture_load_balance_alpha << "]\n";
   str_buf << "[mixture_r_smoothing: " << mixture_r_smoothing << "]\n";
   str_buf << "[mixture_smoothing_lambda: " << mixture_smoothing_lambda << "]\n";
   str_buf << "[mixture_warmup_iters: " << mixture_warmup_iters << "]\n";
@@ -930,6 +939,7 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_expert_capacity_factor: " << mixture_expert_capacity_factor << "]\n";
   str_buf << "[mixture_expert_choice_score: " << mixture_expert_choice_score << "]\n";
   str_buf << "[mixture_expert_choice_boost: " << mixture_expert_choice_boost << "]\n";
+  str_buf << "[mixture_expert_choice_hard: " << mixture_expert_choice_hard << "]\n";
   return str_buf.str();
 }
 
@@ -1083,6 +1093,7 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_e_step_alpha", {}},
     {"mixture_e_step_loss", {}},
     {"mixture_e_step_mode", {}},
+    {"mixture_load_balance_alpha", {}},
     {"mixture_r_smoothing", {}},
     {"mixture_smoothing_lambda", {}},
     {"mixture_warmup_iters", {}},
@@ -1102,6 +1113,7 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_expert_capacity_factor", {}},
     {"mixture_expert_choice_score", {}},
     {"mixture_expert_choice_boost", {}},
+    {"mixture_expert_choice_hard", {}},
   });
   return map;
 }
@@ -1255,6 +1267,7 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_e_step_alpha", "double"},
     {"mixture_e_step_loss", "string"},
     {"mixture_e_step_mode", "string"},
+    {"mixture_load_balance_alpha", "double"},
     {"mixture_r_smoothing", "string"},
     {"mixture_smoothing_lambda", "double"},
     {"mixture_warmup_iters", "int"},
@@ -1274,6 +1287,7 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_expert_capacity_factor", "double"},
     {"mixture_expert_choice_score", "string"},
     {"mixture_expert_choice_boost", "double"},
+    {"mixture_expert_choice_hard", "bool"},
   });
   return map;
 }

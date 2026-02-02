@@ -161,6 +161,32 @@ class MixtureGBDT : public GBDTBase {
   void InitResponsibilities();
 
   /*!
+   * \brief Initialize responsibilities using Balanced K-Means on labels
+   * \param labels Label array
+   */
+  void InitResponsibilitiesBalancedKMeans(const label_t* labels);
+
+  /*!
+   * \brief Initialize responsibilities using GMM on labels
+   * \param labels Label array
+   */
+  void InitResponsibilitiesGMM(const label_t* labels);
+
+  /*!
+   * \brief Initialize responsibilities using tree-based hierarchical clustering
+   * \param labels Label array
+   *
+   * Algorithm:
+   * 1. Train a deep decision tree to predict y from features
+   * 2. Get leaf index for each sample
+   * 3. Compute mean y for each leaf
+   * 4. Build distance matrix between leaves (|mean_y_i - mean_y_j|)
+   * 5. Hierarchical clustering (agglomerative) to merge leaves into K groups
+   * 6. Assign samples to experts based on their leaf's cluster
+   */
+  void InitResponsibilitiesTreeHierarchical(const label_t* labels);
+
+  /*!
    * \brief Forward pass: compute expert predictions and gate probabilities
    */
   void Forward();
@@ -278,8 +304,14 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Expert bias for load balancing (size K) */
   std::vector<double> expert_bias_;
 
+  /*! \brief Expert load from previous iteration (size K), used for auxiliary loss */
+  std::vector<double> expert_load_;
+
   /*! \brief Update expert bias based on recent load */
   void UpdateExpertBias();
+
+  /*! \brief Update expert load from current responsibilities */
+  void UpdateExpertLoad();
 
   // Expert dropout members
   /*! \brief Random number generator for expert dropout */

@@ -1418,15 +1418,21 @@ Mixture-of-Experts Parameters
 
    -  number of gate training iterations per boosting round
 
--  ``mixture_init`` :raw-html:`<a id="mixture_init" title="Permalink to this parameter" href="#mixture_init">&#x1F517;&#xFE0E;</a>`, default = ``uniform``, type = enum, options: ``uniform``, ``kmeans``, ``residual_kmeans``
+-  ``mixture_init`` :raw-html:`<a id="mixture_init" title="Permalink to this parameter" href="#mixture_init">&#x1F517;&#xFE0E;</a>`, default = ``uniform``, type = enum, options: ``uniform``, ``quantile``, ``random``, ``balanced_kmeans``, ``gmm``, ``tree_hierarchical``
 
    -  initialization method for expert responsibilities
 
-   -  ``uniform``: all experts start with equal responsibility
+   -  ``uniform``: all experts start with equal responsibility (default, may cause collapse)
 
-   -  ``kmeans``: initialize using k-means clustering on features
+   -  ``quantile``: assign samples to experts based on label quantiles
 
-   -  ``residual_kmeans``: initialize using k-means on residuals
+   -  ``random``: randomly assign samples to experts
+
+   -  ``balanced_kmeans``: use Balanced K-Means clustering on features (recommended)
+
+   -  ``gmm``: use Gaussian Mixture Model for soft clustering (theoretical EM alignment)
+
+   -  ``tree_hierarchical``: train a deep tree, then hierarchically cluster leaves by mean y
 
 -  ``mixture_e_step_alpha`` :raw-html:`<a id="mixture_e_step_alpha" title="Permalink to this parameter" href="#mixture_e_step_alpha">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``mixture_e_step_alpha >= 0.0``
 
@@ -1448,13 +1454,29 @@ Mixture-of-Experts Parameters
 
    -  ``quantile``: pinball loss (for quantile regression)
 
--  ``mixture_e_step_mode`` :raw-html:`<a id="mixture_e_step_mode" title="Permalink to this parameter" href="#mixture_e_step_mode">&#x1F517;&#xFE0E;</a>`, default = ``em``, type = enum, options: ``em``, ``loss_only``
+-  ``mixture_e_step_mode`` :raw-html:`<a id="mixture_e_step_mode" title="Permalink to this parameter" href="#mixture_e_step_mode">&#x1F517;&#xFE0E;</a>`, default = ``em``, type = enum, options: ``em``, ``loss_only``, ``gate_only``
 
    -  mode for E-step responsibility calculation
 
    -  ``em``: use both gate probability and expert loss (standard EM)
 
    -  ``loss_only``: use only expert loss, ignore gate probability (simpler, more intuitive)
+
+   -  ``gate_only``: use only gate probability, ignore expert loss (prevents Expert Collapse)
+
+-  ``mixture_load_balance_alpha`` :raw-html:`<a id="mixture_load_balance_alpha" title="Permalink to this parameter" href="#mixture_load_balance_alpha">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_load_balance_alpha <= 10.0``
+
+   -  coefficient for auxiliary load balancing in E-step
+
+   -  adds penalty term to prevent expert collapse while maintaining EM structure
+
+   -  formula: s_ik = log(gate) - alpha*loss - load_balance_alpha * log(load_k * K)
+
+   -  higher values enforce stronger load balancing
+
+   -  0.0 means no load balancing (default, may cause Expert Collapse)
+
+   -  recommended range: 0.1-1.0 for Token Choice routing
 
 -  ``mixture_r_smoothing`` :raw-html:`<a id="mixture_r_smoothing" title="Permalink to this parameter" href="#mixture_r_smoothing">&#x1F517;&#xFE0E;</a>`, default = ``none``, type = enum, options: ``none``, ``ema``, ``markov``, ``momentum``
 
@@ -1592,13 +1614,13 @@ Mixture-of-Experts Parameters
 
    -  note: at least one expert is always kept (never drops all experts)
 
--  ``mixture_routing_mode`` :raw-html:`<a id="mixture_routing_mode" title="Permalink to this parameter" href="#mixture_routing_mode">&#x1F517;&#xFE0E;</a>`, default = ``token_choice``, type = enum, options: ``token_choice``, ``expert_choice``
+-  ``mixture_routing_mode`` :raw-html:`<a id="mixture_routing_mode" title="Permalink to this parameter" href="#mixture_routing_mode">&#x1F517;&#xFE0E;</a>`, default = ``expert_choice``, type = enum, options: ``expert_choice``, ``token_choice``
 
    -  routing strategy for Mixture-of-Experts
 
-   -  ``token_choice``: each sample selects experts (current EM-based)
+   -  ``expert_choice``: each expert selects samples (recommended, prevents Expert Collapse)
 
-   -  ``expert_choice``: each expert selects samples (better load balance)
+   -  ``token_choice``: each sample selects experts (WARNING: prone to Expert Collapse)
 
 -  ``mixture_expert_capacity_factor`` :raw-html:`<a id="mixture_expert_capacity_factor" title="Permalink to this parameter" href="#mixture_expert_capacity_factor">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``0.0 < mixture_expert_capacity_factor <= 3.0``
 
@@ -1608,21 +1630,29 @@ Mixture-of-Experts Parameters
 
    -  1.0 means exact balanced capacity, >1.0 allows overlap
 
--  ``mixture_expert_choice_score`` :raw-html:`<a id="mixture_expert_choice_score" title="Permalink to this parameter" href="#mixture_expert_choice_score">&#x1F517;&#xFE0E;</a>`, default = ``combined``, type = enum, options: ``gate``, ``loss``, ``combined``
+-  ``mixture_expert_choice_score`` :raw-html:`<a id="mixture_expert_choice_score" title="Permalink to this parameter" href="#mixture_expert_choice_score">&#x1F517;&#xFE0E;</a>`, default = ``gate``, type = enum, options: ``gate``, ``loss``, ``combined``
 
-   -  score function for expert sample selection
+   -  score function for expert sample selection (only for expert_choice routing)
 
-   -  ``gate``: use gate probability as affinity
+   -  ``gate``: use gate probability as affinity (recommended, prevents Expert Collapse)
 
-   -  ``loss``: use negative loss as affinity
+   -  ``loss``: use negative loss as affinity (WARNING: causes Expert Collapse)
 
-   -  ``combined``: gate + alpha * (-loss)
+   -  ``combined``: gate + alpha * (-loss) (WARNING: causes Expert Collapse)
 
 -  ``mixture_expert_choice_boost`` :raw-html:`<a id="mixture_expert_choice_boost" title="Permalink to this parameter" href="#mixture_expert_choice_boost">&#x1F517;&#xFE0E;</a>`, default = ``10.0``, type = double, constraints: ``1.0 < mixture_expert_choice_boost <= 100.0``
 
    -  multiplier for responsibility of selected samples
 
    -  higher values create sharper distinction
+
+-  ``mixture_expert_choice_hard`` :raw-html:`<a id="mixture_expert_choice_hard" title="Permalink to this parameter" href="#mixture_expert_choice_hard">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
+
+   -  use hard routing (non-selected samples get zero weight)
+
+   -  when true, only selected samples contribute to each expert's gradient
+
+   -  this forces stronger specialization but may reduce gradient signal
 
 .. end params list
 

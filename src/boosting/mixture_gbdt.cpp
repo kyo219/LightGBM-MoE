@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -212,6 +213,24 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // Initialize expert bias for loss-free load balancing
   expert_bias_.resize(num_experts_, 0.0);
 
+  // Initialize expert load for auxiliary load balancing
+  // Add small random perturbation to break initial symmetry
+  expert_load_.resize(num_experts_);
+  {
+    std::mt19937 load_rng(config_->seed + 99999);
+    std::uniform_real_distribution<double> noise_dist(-0.1, 0.1);
+    double sum = 0.0;
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_load_[k] = 1.0 / num_experts_ + noise_dist(load_rng);
+      expert_load_[k] = std::max(expert_load_[k], 0.01);  // Ensure positive
+      sum += expert_load_[k];
+    }
+    // Normalize to sum to 1
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_load_[k] /= sum;
+    }
+  }
+
   // Initialize expert dropout RNG
   dropout_rng_.seed(config_->seed + 12345);  // Different seed from other RNGs
   dropout_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
@@ -296,6 +315,30 @@ void MixtureGBDT::InitResponsibilities() {
         }
       }
     }
+  } else if (config_->mixture_init == "balanced_kmeans") {
+    // Balanced K-Means initialization on labels
+    // Each expert gets exactly N/K samples (balanced clusters)
+    // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment
+    Log::Info("MixtureGBDT: Using Balanced K-Means initialization on labels");
+
+    InitResponsibilitiesBalancedKMeans(labels);
+
+  } else if (config_->mixture_init == "gmm") {
+    // GMM (Gaussian Mixture Model) initialization on labels
+    // Produces soft responsibilities (probabilities) that align with EM theory
+    // Reference: Classical MoE (Jacobs 1991) uses GMM for gating
+    Log::Info("MixtureGBDT: Using GMM initialization on labels");
+
+    InitResponsibilitiesGMM(labels);
+
+  } else if (config_->mixture_init == "tree_hierarchical") {
+    // Tree-based hierarchical clustering initialization
+    // Trains a deep decision tree, then clusters leaves by mean y
+    // Reference: Similar to MoEfication's co-activation graph approach
+    Log::Info("MixtureGBDT: Using tree-based hierarchical clustering initialization");
+
+    InitResponsibilitiesTreeHierarchical(labels);
+
   } else {
     // Default: uniform initialization
     // All experts start with equal responsibility (1/K).
@@ -310,6 +353,673 @@ void MixtureGBDT::InitResponsibilities() {
         responsibilities_[i * num_experts_ + k] = uniform_r;
       }
     }
+  }
+}
+
+void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels) {
+  // Balanced K-Means on features (with label as additional feature)
+  // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment
+  //
+  // Algorithm:
+  // 1. Initialize centroids using K-means++ on features
+  // 2. Iterate: assign samples to nearest centroid
+  // 3. Balance: ensure each cluster has exactly N/K samples using greedy assignment
+  //
+  // Falls back to label-only if raw features are not available.
+
+  const int K = num_experts_;
+  const data_size_t N = num_data_;
+  const int max_iters = 20;  // K-means iterations
+
+  // Get number of features
+  int num_features = train_data_->num_features();
+  bool has_raw = train_data_->has_raw();
+
+  // If no raw features, use labels only (1D clustering)
+  if (!has_raw || num_features == 0) {
+    Log::Warning("MixtureGBDT: Raw features not available, using labels only for Balanced K-Means");
+    num_features = 0;
+  }
+
+  const int D = num_features + 1;  // features + label
+
+  // Build feature matrix (N x D) - sample-major order
+  std::vector<double> X(static_cast<size_t>(N) * D);
+
+  // Compute feature statistics for normalization
+  std::vector<double> feat_mean(D, 0.0);
+  std::vector<double> feat_std(D, 1.0);
+
+  // Fill feature matrix and compute means
+  for (data_size_t i = 0; i < N; ++i) {
+    // Copy features
+    for (int f = 0; f < num_features; ++f) {
+      const float* raw_feat = train_data_->raw_index(f);
+      X[i * D + f] = static_cast<double>(raw_feat[i]);
+      feat_mean[f] += X[i * D + f];
+    }
+    // Add label as last feature
+    X[i * D + num_features] = static_cast<double>(labels[i]);
+    feat_mean[num_features] += X[i * D + num_features];
+  }
+
+  // Compute means
+  for (int d = 0; d < D; ++d) {
+    feat_mean[d] /= N;
+  }
+
+  // Compute standard deviations
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int d = 0; d < D; ++d) {
+      double diff = X[i * D + d] - feat_mean[d];
+      feat_std[d] += diff * diff;
+    }
+  }
+  for (int d = 0; d < D; ++d) {
+    feat_std[d] = std::sqrt(feat_std[d] / N);
+    if (feat_std[d] < 1e-10) feat_std[d] = 1.0;  // Avoid division by zero
+  }
+
+  // Normalize features (z-score)
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int d = 0; d < D; ++d) {
+      X[i * D + d] = (X[i * D + d] - feat_mean[d]) / feat_std[d];
+    }
+  }
+
+  // Initialize centroids using K-means++
+  std::vector<double> centroids(static_cast<size_t>(K) * D, 0.0);
+  std::mt19937 rng(config_->seed);
+
+  // First centroid: random sample
+  std::uniform_int_distribution<data_size_t> sample_dist(0, N - 1);
+  data_size_t first_idx = sample_dist(rng);
+  for (int d = 0; d < D; ++d) {
+    centroids[0 * D + d] = X[first_idx * D + d];
+  }
+
+  // Remaining centroids: K-means++ (proportional to squared distance)
+  std::vector<double> min_dist_sq(N, std::numeric_limits<double>::max());
+  for (int k = 1; k < K; ++k) {
+    // Update minimum distances to existing centroids
+    double total_dist = 0.0;
+    for (data_size_t i = 0; i < N; ++i) {
+      double dist_sq = 0.0;
+      for (int d = 0; d < D; ++d) {
+        double diff = X[i * D + d] - centroids[(k - 1) * D + d];
+        dist_sq += diff * diff;
+      }
+      min_dist_sq[i] = std::min(min_dist_sq[i], dist_sq);
+      total_dist += min_dist_sq[i];
+    }
+
+    // Sample next centroid proportional to squared distance
+    std::uniform_real_distribution<double> prob_dist(0.0, total_dist);
+    double r = prob_dist(rng);
+    double cumsum = 0.0;
+    data_size_t next_idx = 0;
+    for (data_size_t i = 0; i < N; ++i) {
+      cumsum += min_dist_sq[i];
+      if (cumsum >= r) {
+        next_idx = i;
+        break;
+      }
+    }
+    for (int d = 0; d < D; ++d) {
+      centroids[k * D + d] = X[next_idx * D + d];
+    }
+  }
+
+  // K-means iterations
+  std::vector<int> assignments(N);
+  std::vector<double> distances(static_cast<size_t>(N) * K);
+
+  for (int iter = 0; iter < max_iters; ++iter) {
+    // Compute distances to all centroids
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < K; ++k) {
+        double dist_sq = 0.0;
+        for (int d = 0; d < D; ++d) {
+          double diff = X[i * D + d] - centroids[k * D + d];
+          dist_sq += diff * diff;
+        }
+        distances[i * K + k] = dist_sq;
+      }
+    }
+
+    // Balanced assignment using greedy approach
+    // Target: each cluster gets exactly N/K samples (with remainder distributed)
+    const data_size_t base_size = N / K;
+    const data_size_t remainder = N % K;
+    std::vector<data_size_t> cluster_sizes(K, 0);
+    std::vector<data_size_t> cluster_capacity(K);
+    for (int k = 0; k < K; ++k) {
+      cluster_capacity[k] = base_size + (k < remainder ? 1 : 0);
+    }
+
+    // Sort samples by their minimum distance to any centroid (greedy)
+    std::vector<std::pair<double, data_size_t>> sample_order(N);
+    for (data_size_t i = 0; i < N; ++i) {
+      double min_d = distances[i * K];
+      for (int k = 1; k < K; ++k) {
+        min_d = std::min(min_d, distances[i * K + k]);
+      }
+      sample_order[i] = {min_d, i};
+    }
+    std::sort(sample_order.begin(), sample_order.end());
+
+    // Assign samples (closest first)
+    std::fill(assignments.begin(), assignments.end(), -1);
+    for (const auto& [min_d, i] : sample_order) {
+      // Find closest available cluster
+      int best_k = -1;
+      double best_dist = std::numeric_limits<double>::max();
+      for (int k = 0; k < K; ++k) {
+        if (cluster_sizes[k] < cluster_capacity[k] && distances[i * K + k] < best_dist) {
+          best_dist = distances[i * K + k];
+          best_k = k;
+        }
+      }
+      if (best_k >= 0) {
+        assignments[i] = best_k;
+        cluster_sizes[best_k]++;
+      }
+    }
+
+    // Handle any unassigned (shouldn't happen with proper capacity)
+    for (data_size_t i = 0; i < N; ++i) {
+      if (assignments[i] < 0) {
+        // Find any cluster with room
+        for (int k = 0; k < K; ++k) {
+          if (cluster_sizes[k] < cluster_capacity[k]) {
+            assignments[i] = k;
+            cluster_sizes[k]++;
+            break;
+          }
+        }
+      }
+    }
+
+    // Update centroids
+    std::vector<double> new_centroids(static_cast<size_t>(K) * D, 0.0);
+    std::vector<int> counts(K, 0);
+
+    for (data_size_t i = 0; i < N; ++i) {
+      int k = assignments[i];
+      for (int d = 0; d < D; ++d) {
+        new_centroids[k * D + d] += X[i * D + d];
+      }
+      counts[k]++;
+    }
+
+    for (int k = 0; k < K; ++k) {
+      if (counts[k] > 0) {
+        for (int d = 0; d < D; ++d) {
+          new_centroids[k * D + d] /= counts[k];
+        }
+      }
+    }
+
+    // Check convergence
+    double max_shift = 0.0;
+    for (int k = 0; k < K; ++k) {
+      for (int d = 0; d < D; ++d) {
+        max_shift = std::max(max_shift,
+                             std::abs(new_centroids[k * D + d] - centroids[k * D + d]));
+      }
+    }
+    centroids = std::move(new_centroids);
+
+    if (max_shift < 1e-6) {
+      Log::Debug("MixtureGBDT: Balanced K-Means converged at iteration %d", iter + 1);
+      break;
+    }
+  }
+
+  // Convert assignments to soft responsibilities
+  const double base_r = 0.05 / K;  // Small base probability
+  const double main_r = 1.0 - base_r * K;  // Main probability for assigned expert
+
+  for (data_size_t i = 0; i < N; ++i) {
+    int assigned_k = assignments[i];
+    for (int k = 0; k < K; ++k) {
+      if (k == assigned_k) {
+        responsibilities_[i * num_experts_ + k] = main_r + base_r;
+      } else {
+        responsibilities_[i * num_experts_ + k] = base_r;
+      }
+    }
+  }
+
+  // Log cluster sizes for verification
+  std::vector<int> final_counts(K, 0);
+  for (data_size_t i = 0; i < N; ++i) {
+    final_counts[assignments[i]]++;
+  }
+  std::string count_str;
+  for (int k = 0; k < K; ++k) {
+    count_str += std::to_string(final_counts[k]);
+    if (k < K - 1) count_str += ", ";
+  }
+  Log::Info("MixtureGBDT: Balanced K-Means cluster sizes = [%s]", count_str.c_str());
+}
+
+void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels) {
+  // Gaussian Mixture Model initialization
+  // Reference: Classical MoE (Jacobs et al., 1991)
+  //
+  // Algorithm:
+  // 1. Initialize with K-means centroids
+  // 2. EM iterations:
+  //    E-step: compute posterior probabilities (responsibilities)
+  //    M-step: update means, variances, mixing coefficients
+  // 3. Final posteriors become the initial responsibilities
+  //
+  // Falls back to label-only if raw features are not available.
+
+  const int K = num_experts_;
+  const data_size_t N = num_data_;
+  const int max_iters = 30;  // EM iterations
+  const double min_variance = 1e-6;  // Prevent collapse
+
+  // Get number of features
+  int num_features = train_data_->num_features();
+  bool has_raw = train_data_->has_raw();
+
+  if (!has_raw || num_features == 0) {
+    Log::Warning("MixtureGBDT: Raw features not available, using labels only for GMM");
+    num_features = 0;
+  }
+
+  const int D = num_features + 1;  // features + label
+
+  // Build feature matrix (N x D)
+  std::vector<double> X(static_cast<size_t>(N) * D);
+
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int f = 0; f < num_features; ++f) {
+      const float* raw_feat = train_data_->raw_index(f);
+      X[i * D + f] = static_cast<double>(raw_feat[i]);
+    }
+    X[i * D + num_features] = static_cast<double>(labels[i]);
+  }
+
+  // Compute global mean and std for normalization
+  std::vector<double> global_mean(D, 0.0);
+  std::vector<double> global_std(D, 1.0);
+
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int d = 0; d < D; ++d) {
+      global_mean[d] += X[i * D + d];
+    }
+  }
+  for (int d = 0; d < D; ++d) {
+    global_mean[d] /= N;
+  }
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int d = 0; d < D; ++d) {
+      double diff = X[i * D + d] - global_mean[d];
+      global_std[d] += diff * diff;
+    }
+  }
+  for (int d = 0; d < D; ++d) {
+    global_std[d] = std::sqrt(global_std[d] / N);
+    if (global_std[d] < 1e-10) global_std[d] = 1.0;
+  }
+
+  // Normalize
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int d = 0; d < D; ++d) {
+      X[i * D + d] = (X[i * D + d] - global_mean[d]) / global_std[d];
+    }
+  }
+
+  // Initialize GMM parameters using quantile-based seeding
+  // (sort by first feature or label, then place centroids at quantile positions)
+  std::vector<double> means(static_cast<size_t>(K) * D);      // K x D
+  std::vector<double> variances(static_cast<size_t>(K) * D);  // K x D (diagonal covariance)
+  std::vector<double> weights(K, 1.0 / K);                    // Mixing coefficients
+
+  // Sort indices by last feature (label)
+  std::vector<data_size_t> sorted_idx(N);
+  std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
+  std::sort(sorted_idx.begin(), sorted_idx.end(),
+            [&X, D](data_size_t a, data_size_t b) {
+              return X[a * D + D - 1] < X[b * D + D - 1];
+            });
+
+  // Place initial means at quantile positions
+  for (int k = 0; k < K; ++k) {
+    data_size_t quantile_idx = sorted_idx[(k * N + N / 2) / K];
+    for (int d = 0; d < D; ++d) {
+      means[k * D + d] = X[quantile_idx * D + d];
+      variances[k * D + d] = 1.0;  // Initial variance = 1 (normalized data)
+    }
+  }
+
+  // EM iterations
+  std::vector<double> gamma(static_cast<size_t>(N) * K);  // Responsibilities
+
+  for (int iter = 0; iter < max_iters; ++iter) {
+    // E-step: compute responsibilities
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < N; ++i) {
+      std::vector<double> log_prob(K);
+      double max_log_prob = -std::numeric_limits<double>::max();
+
+      for (int k = 0; k < K; ++k) {
+        // Log probability under Gaussian k (diagonal covariance)
+        double log_p = std::log(weights[k] + 1e-300);
+        for (int d = 0; d < D; ++d) {
+          double var_k = std::max(variances[k * D + d], min_variance);
+          double diff = X[i * D + d] - means[k * D + d];
+          log_p -= 0.5 * std::log(2.0 * M_PI * var_k);
+          log_p -= 0.5 * diff * diff / var_k;
+        }
+        log_prob[k] = log_p;
+        max_log_prob = std::max(max_log_prob, log_p);
+      }
+
+      // Softmax to get responsibilities
+      double sum_exp = 0.0;
+      for (int k = 0; k < K; ++k) {
+        gamma[i * K + k] = std::exp(log_prob[k] - max_log_prob);
+        sum_exp += gamma[i * K + k];
+      }
+      for (int k = 0; k < K; ++k) {
+        gamma[i * K + k] /= sum_exp;
+      }
+    }
+
+    // M-step: update parameters
+    std::vector<double> N_k(K, 0.0);  // Effective number of points per cluster
+    std::vector<double> new_means(static_cast<size_t>(K) * D, 0.0);
+    std::vector<double> new_variances(static_cast<size_t>(K) * D, 0.0);
+
+    // Compute new means
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < K; ++k) {
+        double g = gamma[i * K + k];
+        N_k[k] += g;
+        for (int d = 0; d < D; ++d) {
+          new_means[k * D + d] += g * X[i * D + d];
+        }
+      }
+    }
+    for (int k = 0; k < K; ++k) {
+      if (N_k[k] > 1e-10) {
+        for (int d = 0; d < D; ++d) {
+          new_means[k * D + d] /= N_k[k];
+        }
+      }
+    }
+
+    // Compute new variances
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < K; ++k) {
+        double g = gamma[i * K + k];
+        for (int d = 0; d < D; ++d) {
+          double diff = X[i * D + d] - new_means[k * D + d];
+          new_variances[k * D + d] += g * diff * diff;
+        }
+      }
+    }
+    for (int k = 0; k < K; ++k) {
+      if (N_k[k] > 1e-10) {
+        for (int d = 0; d < D; ++d) {
+          new_variances[k * D + d] /= N_k[k];
+          new_variances[k * D + d] = std::max(new_variances[k * D + d], min_variance);
+        }
+      }
+    }
+
+    // Update weights
+    for (int k = 0; k < K; ++k) {
+      weights[k] = N_k[k] / N;
+      weights[k] = std::max(weights[k], 1e-10);  // Prevent zero weight
+    }
+    // Renormalize weights
+    double weight_sum = 0.0;
+    for (int k = 0; k < K; ++k) weight_sum += weights[k];
+    for (int k = 0; k < K; ++k) weights[k] /= weight_sum;
+
+    // Check convergence (mean shift)
+    double max_shift = 0.0;
+    for (int k = 0; k < K; ++k) {
+      for (int d = 0; d < D; ++d) {
+        max_shift = std::max(max_shift, std::abs(new_means[k * D + d] - means[k * D + d]));
+      }
+    }
+
+    means = std::move(new_means);
+    variances = std::move(new_variances);
+
+    if (max_shift < 1e-6) {
+      Log::Debug("MixtureGBDT: GMM converged at iteration %d", iter + 1);
+      break;
+    }
+  }
+
+  // Copy final responsibilities (gamma)
+  // Note: GMM gives soft assignments naturally
+  for (data_size_t i = 0; i < N; ++i) {
+    for (int k = 0; k < K; ++k) {
+      // Ensure minimum responsibility
+      responsibilities_[i * num_experts_ + k] = std::max(gamma[i * K + k], 0.01 / K);
+    }
+    // Renormalize
+    double sum = 0.0;
+    for (int k = 0; k < K; ++k) {
+      sum += responsibilities_[i * num_experts_ + k];
+    }
+    for (int k = 0; k < K; ++k) {
+      responsibilities_[i * num_experts_ + k] /= sum;
+    }
+  }
+
+  // Log weight distribution
+  std::string weight_str;
+  for (int k = 0; k < K; ++k) {
+    weight_str += std::to_string(weights[k]).substr(0, 5);
+    if (k < K - 1) weight_str += ", ";
+  }
+  Log::Info("MixtureGBDT: GMM mixing weights = [%s]", weight_str.c_str());
+}
+
+void MixtureGBDT::InitResponsibilitiesTreeHierarchical(const label_t* labels) {
+  // Hierarchical clustering initialization based on label distribution
+  //
+  // Algorithm:
+  // 1. Create fine-grained bins based on label values (like tree leaves)
+  // 2. Compute mean y and count for each bin
+  // 3. Build distance matrix between bins (|mean_y_i - mean_y_j|)
+  // 4. Agglomerative hierarchical clustering (average linkage) to merge bins into K groups
+  // 5. Assign samples to experts based on their bin's cluster
+  //
+  // This provides a principled way to partition the label space into K regions
+  // that are as homogeneous as possible within each cluster.
+
+  const int K = num_experts_;
+  const data_size_t N = num_data_;
+
+  // Step 1: Create fine-grained bins based on label values
+  // Use more bins than experts for fine-grained initial partitioning
+  const int num_bins = std::max(64, K * 16);
+
+  // Sort samples by label to find bin boundaries
+  std::vector<data_size_t> sorted_indices(N);
+  std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
+  std::sort(sorted_indices.begin(), sorted_indices.end(),
+            [labels](data_size_t a, data_size_t b) { return labels[a] < labels[b]; });
+
+  // Assign samples to bins (equal-frequency binning)
+  std::vector<int> bin_assignment(N);
+  std::vector<std::vector<data_size_t>> bin_samples(num_bins);
+  std::vector<double> bin_mean_y(num_bins, 0.0);
+  std::vector<int> bin_count(num_bins, 0);
+
+  for (data_size_t rank = 0; rank < N; ++rank) {
+    data_size_t i = sorted_indices[rank];
+    int bin = static_cast<int>(static_cast<int64_t>(rank) * num_bins / N);
+    if (bin >= num_bins) bin = num_bins - 1;
+    bin_assignment[i] = bin;
+    bin_samples[bin].push_back(i);
+    bin_mean_y[bin] += labels[i];
+    bin_count[bin]++;
+  }
+
+  // Compute mean y for each bin
+  for (int b = 0; b < num_bins; ++b) {
+    if (bin_count[b] > 0) {
+      bin_mean_y[b] /= bin_count[b];
+    }
+  }
+
+  Log::Info("MixtureGBDT: Created %d bins for hierarchical clustering", num_bins);
+
+  // Step 2: Hierarchical clustering (agglomerative with average linkage)
+  // We'll merge bins until we have K clusters
+
+  if (num_bins <= K) {
+    // If we have fewer bins than experts, assign each bin to a different expert
+    Log::Warning("MixtureGBDT: Only %d bins, less than K=%d experts", num_bins, K);
+
+    // Sort bins by mean y and distribute
+    std::vector<std::pair<double, int>> bin_order;
+    for (int b = 0; b < num_bins; ++b) {
+      bin_order.push_back({bin_mean_y[b], b});
+    }
+    std::sort(bin_order.begin(), bin_order.end());
+
+    std::vector<int> bin_to_expert(num_bins);
+    for (size_t i = 0; i < bin_order.size(); ++i) {
+      int expert = static_cast<int>(i * K / num_bins);
+      if (expert >= K) expert = K - 1;
+      bin_to_expert[bin_order[i].second] = expert;
+    }
+
+    // Assign responsibilities
+    const double base_r = 0.05 / K;
+    const double main_r = 1.0 - base_r * K;
+
+    for (data_size_t i = 0; i < N; ++i) {
+      int bin = bin_assignment[i];
+      int assigned_expert = bin_to_expert[bin];
+      for (int k = 0; k < K; ++k) {
+        responsibilities_[i * num_experts_ + k] = (k == assigned_expert) ? main_r + base_r : base_r;
+      }
+    }
+  } else {
+    // Hierarchical clustering to merge bins into K clusters
+    // Using agglomerative clustering with average linkage
+
+    // Initialize: each bin is its own cluster
+    // cluster_members[c] = list of bin indices in cluster c
+    std::vector<std::vector<int>> cluster_members(num_bins);
+    for (int b = 0; b < num_bins; ++b) {
+      cluster_members[b].push_back(b);
+    }
+
+    // Compute initial cluster centroids (mean y of cluster)
+    std::vector<double> cluster_centroid(num_bins);
+    std::vector<int> cluster_weight(num_bins);  // Total sample count in cluster
+    for (int b = 0; b < num_bins; ++b) {
+      cluster_centroid[b] = bin_mean_y[b];
+      cluster_weight[b] = bin_count[b];
+    }
+
+    // Track active clusters
+    std::vector<bool> active(num_bins, true);
+    int num_active = num_bins;
+
+    // Merge until K clusters remain
+    while (num_active > K) {
+      // Find closest pair of clusters
+      double min_dist = std::numeric_limits<double>::max();
+      int merge_i = -1, merge_j = -1;
+
+      for (int i = 0; i < num_bins; ++i) {
+        if (!active[i]) continue;
+        for (int j = i + 1; j < num_bins; ++j) {
+          if (!active[j]) continue;
+
+          // Distance = |centroid_i - centroid_j|
+          double dist = std::abs(cluster_centroid[i] - cluster_centroid[j]);
+
+          if (dist < min_dist) {
+            min_dist = dist;
+            merge_i = i;
+            merge_j = j;
+          }
+        }
+      }
+
+      if (merge_i < 0 || merge_j < 0) break;
+
+      // Merge cluster j into cluster i
+      // Update centroid using weighted average
+      double new_weight = cluster_weight[merge_i] + cluster_weight[merge_j];
+      cluster_centroid[merge_i] = (cluster_centroid[merge_i] * cluster_weight[merge_i] +
+                                    cluster_centroid[merge_j] * cluster_weight[merge_j]) / new_weight;
+      cluster_weight[merge_i] = static_cast<int>(new_weight);
+
+      // Move members from j to i
+      for (int bin_idx : cluster_members[merge_j]) {
+        cluster_members[merge_i].push_back(bin_idx);
+      }
+      cluster_members[merge_j].clear();
+
+      // Deactivate cluster j
+      active[merge_j] = false;
+      num_active--;
+    }
+
+    // Create bin -> expert mapping
+    std::vector<int> bin_to_expert(num_bins);
+    int expert_idx = 0;
+
+    // Sort clusters by centroid for consistent ordering
+    std::vector<std::pair<double, int>> cluster_order;
+    for (int i = 0; i < num_bins; ++i) {
+      if (active[i]) {
+        cluster_order.push_back({cluster_centroid[i], i});
+      }
+    }
+    std::sort(cluster_order.begin(), cluster_order.end());
+
+    for (const auto& [centroid, cluster_idx] : cluster_order) {
+      for (int bin_local_idx : cluster_members[cluster_idx]) {
+        bin_to_expert[bin_local_idx] = expert_idx;
+      }
+      expert_idx++;
+    }
+
+    // Assign responsibilities
+    const double base_r = 0.05 / K;
+    const double main_r = 1.0 - base_r * K;
+
+    for (data_size_t i = 0; i < N; ++i) {
+      int bin = bin_assignment[i];
+      int assigned_expert = bin_to_expert[bin];
+      for (int k = 0; k < K; ++k) {
+        responsibilities_[i * num_experts_ + k] = (k == assigned_expert) ? main_r + base_r : base_r;
+      }
+    }
+
+    // Log cluster sizes
+    std::vector<int> expert_counts(K, 0);
+    for (data_size_t i = 0; i < N; ++i) {
+      int bin = bin_assignment[i];
+      expert_counts[bin_to_expert[bin]]++;
+    }
+
+    std::string count_str;
+    for (int k = 0; k < K; ++k) {
+      count_str += std::to_string(expert_counts[k]);
+      if (k < K - 1) count_str += ", ";
+    }
+    Log::Info("MixtureGBDT: Tree hierarchical cluster sizes = [%s]", count_str.c_str());
   }
 }
 
@@ -499,9 +1209,26 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
 }
 
 void MixtureGBDT::EStep() {
+  // NOTE: Token Choice routing is prone to Expert Collapse without load balancing.
+  // Use mixture_load_balance_alpha > 0 to enable auxiliary load balancing loss.
+  // Alternatively, use Expert Choice routing (mixture_routing_mode="expert_choice").
   const label_t* labels = train_data_->metadata().label();
   const double alpha = config_->mixture_e_step_alpha;
-  const bool use_loss_only = (config_->mixture_e_step_mode == "loss_only");
+  const double lb_alpha = config_->mixture_load_balance_alpha;
+  const std::string& mode = config_->mixture_e_step_mode;
+
+  // Precompute load balance penalty for each expert
+  // penalty_k = lb_alpha * log(load_k * K)
+  // When load_k > 1/K (overloaded): penalty > 0, score decreases
+  // When load_k < 1/K (underloaded): penalty < 0, score increases
+  std::vector<double> load_penalty(num_experts_, 0.0);
+  if (lb_alpha > 0.0) {
+    for (int k = 0; k < num_experts_; ++k) {
+      // Add small epsilon to avoid log(0)
+      double adjusted_load = std::max(expert_load_[k], 1e-10) * num_experts_;
+      load_penalty[k] = lb_alpha * std::log(adjusted_load);
+    }
+  }
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
@@ -510,26 +1237,56 @@ void MixtureGBDT::EStep() {
 
     // Compute scores based on mode
     for (int k = 0; k < num_experts_; ++k) {
-      double expert_p = expert_pred_[k * num_data_ + i];
-      double loss = ComputePointwiseLoss(labels[i], expert_p);
+      double score = 0.0;
 
-      if (use_loss_only) {
+      if (mode == "gate_only") {
+        // gate_only mode: use only gate probability, ignore expert loss
+        double gate_prob = gate_proba_[i * num_experts_ + k];
+        score = std::log(gate_prob + kMixtureEpsilon);
+      } else if (mode == "loss_only") {
         // loss_only mode: use only expert loss, ignore gate probability
-        // s_ik = -alpha * loss(y_i, expert_pred_ik)
-        // Lower loss → higher score → higher responsibility
-        scores[k] = -alpha * loss;
+        double expert_p = expert_pred_[k * num_data_ + i];
+        double loss = ComputePointwiseLoss(labels[i], expert_p);
+        score = -alpha * loss;
       } else {
         // em mode (default): use both gate probability and expert loss
-        // s_ik = log(gate_proba_ik + eps) - alpha * loss(y_i, expert_pred_ik)
         double gate_prob = gate_proba_[i * num_experts_ + k];
-        scores[k] = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
+        double expert_p = expert_pred_[k * num_data_ + i];
+        double loss = ComputePointwiseLoss(labels[i], expert_p);
+        score = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
       }
+
+      // Apply auxiliary load balancing penalty
+      // This discourages routing to overloaded experts
+      scores[k] = score - load_penalty[k];
     }
 
     // Apply softmax to get responsibilities
-    // Note: No hard clipping here. Collapse prevention is handled by
-    // Loss-Free Load Balancing (UpdateExpertBias) which adjusts gate bias.
     Softmax(scores.data(), num_experts_, responsibilities_.data() + i * num_experts_);
+  }
+}
+
+void MixtureGBDT::UpdateExpertLoad() {
+  // Compute current load per expert (mean responsibility)
+  std::fill(expert_load_.begin(), expert_load_.end(), 0.0);
+
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_load_[k] += responsibilities_[i * num_experts_ + k];
+    }
+  }
+
+  for (int k = 0; k < num_experts_; ++k) {
+    expert_load_[k] /= num_data_;  // Normalize to [0, 1], should sum to 1
+  }
+
+  // Log for debugging
+  if (iter_ % 10 == 0 && config_->mixture_load_balance_alpha > 0.0) {
+    std::string load_str = "";
+    for (int k = 0; k < num_experts_; ++k) {
+      load_str += std::to_string(expert_load_[k]).substr(0, 5) + " ";
+    }
+    Log::Debug("MixtureGBDT: Expert loads (aux) = [%s]", load_str.c_str());
   }
 }
 
@@ -565,6 +1322,10 @@ void MixtureGBDT::ComputeAffinityScores() {
         score -= alpha * loss;
       }
 
+      // Add expert bias for Loss-Free Load Balancing (DeepSeek method)
+      // This encourages balanced expert selection without auxiliary loss
+      score += expert_bias_[k];
+
       affinity_scores_[i * num_experts_ + k] = score;
     }
   }
@@ -574,11 +1335,46 @@ void MixtureGBDT::SelectTopSamplesPerExpert() {
   std::fill(expert_selection_mask_.begin(),
             expert_selection_mask_.end(), 0);
 
+  // Compute score statistics to set appropriate noise scale
+  double score_std = 0.0;
+  {
+    double sum = 0.0, sum_sq = 0.0;
+    size_t count = static_cast<size_t>(num_data_) * num_experts_;
+    for (size_t i = 0; i < count; ++i) {
+      sum += affinity_scores_[i];
+      sum_sq += affinity_scores_[i] * affinity_scores_[i];
+    }
+    double mean = sum / count;
+    double variance = sum_sq / count - mean * mean;
+    score_std = std::sqrt(std::max(variance, 1e-10));
+  }
+
+  // Adaptive noise scale based on score variance
+  // Early iterations: higher noise (when scores are similar)
+  // Later iterations: lower noise (when scores are more distinct)
+  const int warmup_iters = config_->mixture_warmup_iters;
+  double noise_scale;
+  if (iter_ < warmup_iters) {
+    // During warmup: noise proportional to score std, with minimum
+    // This ensures differentiation even when scores are nearly identical
+    noise_scale = std::max(score_std * 0.5, 0.1);
+  } else {
+    // After warmup: small noise for tie-breaking only
+    noise_scale = score_std * 0.01 + 1e-6;
+  }
+
   for (int k = 0; k < num_experts_; ++k) {
-    // Collect (score, index) pairs for this expert
+    // Use expert-specific seed for noise (different each iteration and expert)
+    std::mt19937 rng(config_->seed + k * 10000 + iter_ * 100);
+    std::normal_distribution<double> noise_dist(0.0, noise_scale);
+
+    // Collect (score + noise, index) pairs for this expert
     std::vector<std::pair<double, data_size_t>> scores_idx(num_data_);
     for (data_size_t i = 0; i < num_data_; ++i) {
-      scores_idx[i] = {affinity_scores_[i * num_experts_ + k], i};
+      double score = affinity_scores_[i * num_experts_ + k];
+      // Add noise to break ties and force differentiation
+      score += noise_dist(rng);
+      scores_idx[i] = {score, i};
     }
 
     // Partial sort for top-C (O(N) average)
@@ -600,28 +1396,45 @@ void MixtureGBDT::SelectTopSamplesPerExpert() {
 
 void MixtureGBDT::ConvertSelectionToResponsibilities() {
   const double boost = config_->mixture_expert_choice_boost;
-  const double min_r = 1.0 / (num_experts_ * boost);
+  const bool hard_routing = config_->mixture_expert_choice_hard;
+  const double min_r = hard_routing ? 0.0 : (1.0 / (num_experts_ * boost));
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     double sum = 0.0;
+    int num_selected = 0;
 
     // Assign based on selection
     for (int k = 0; k < num_experts_; ++k) {
       size_t idx = i * num_experts_ + k;
       if (expert_selection_mask_[idx] == 1) {
         // Selected: high responsibility
-        responsibilities_[idx] = std::exp(affinity_scores_[idx]) * boost;
+        if (hard_routing) {
+          // Hard routing: use affinity score directly (will be normalized)
+          responsibilities_[idx] = std::exp(affinity_scores_[idx]);
+        } else {
+          // Soft routing: boost selected samples
+          responsibilities_[idx] = std::exp(affinity_scores_[idx]) * boost;
+        }
+        num_selected++;
       } else {
-        // Not selected: minimum responsibility
+        // Not selected: zero (hard) or minimum (soft)
         responsibilities_[idx] = min_r;
       }
       sum += responsibilities_[idx];
     }
 
-    // Normalize (sum = 1)
-    for (int k = 0; k < num_experts_; ++k) {
-      responsibilities_[i * num_experts_ + k] /= sum;
+    // Handle edge case: sample not selected by any expert (hard routing)
+    if (hard_routing && num_selected == 0) {
+      // Uniform distribution as fallback
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] = 1.0 / num_experts_;
+      }
+    } else {
+      // Normalize (sum = 1)
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] /= sum;
+      }
     }
   }
 }
@@ -689,17 +1502,20 @@ void MixtureGBDT::SmoothResponsibilities() {
 }
 
 void MixtureGBDT::UpdateExpertBias() {
-  // Loss-Free Load Balancing: adjust expert bias when usage falls below threshold
+  // Loss-Free Load Balancing (DeepSeek method)
   // Reference: "Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts" (2024)
   //
-  // Modified for regime-switching: only intervene when an expert's usage
-  // falls below the minimum threshold, allowing natural imbalanced distributions.
+  // Key idea: Adjust expert bias BIDIRECTIONALLY to achieve balanced load.
+  // - Underloaded experts: increase bias (make more attractive)
+  // - Overloaded experts: decrease bias (make less attractive)
   //
-  // min_usage = 1 / (balance_factor * K)
-  // e.g., factor=10, K=2 -> min_usage = 5%, allows 95:5 imbalance
+  // The bias affects only expert SELECTION, not the gate weights used for
+  // combining expert outputs. This prevents gradient interference.
 
-  const double min_usage = 1.0 / (config_->mixture_balance_factor * num_experts_);
-  const double bias_update_rate = 0.1;  // η: how quickly to adjust bias
+  const double target_load = 1.0 / num_experts_;  // Uniform distribution target
+  // DeepSeek recommends γ=0.001 for LLMs with many tokens
+  // For GBDT with fewer samples, we need larger γ for faster convergence
+  const double gamma = 0.1;
 
   // Compute actual load per expert (mean responsibility)
   std::vector<double> actual_load(num_experts_, 0.0);
@@ -712,26 +1528,24 @@ void MixtureGBDT::UpdateExpertBias() {
     actual_load[k] /= num_data_;  // Normalize to [0, 1]
   }
 
-  // Update bias: only increase for underloaded experts (below threshold)
-  // Do NOT decrease for overloaded - allow natural imbalance
+  // Update bias BIDIRECTIONALLY (DeepSeek method)
+  // - If actual_load < target: load_diff > 0, bias increases (more attractive)
+  // - If actual_load > target: load_diff < 0, bias decreases (less attractive)
   for (int k = 0; k < num_experts_; ++k) {
-    if (actual_load[k] < min_usage) {
-      double load_diff = min_usage - actual_load[k];
-      expert_bias_[k] += bias_update_rate * load_diff;
-    }
-    // Note: We don't decrease bias for overloaded experts
-    // This allows the model to learn naturally imbalanced regime distributions
+    double load_diff = target_load - actual_load[k];
+    expert_bias_[k] += gamma * load_diff;
   }
 
   // Log for debugging (only occasionally to avoid spam)
   if (iter_ % 10 == 0) {
     std::string load_str = "";
+    std::string bias_str = "";
     for (int k = 0; k < num_experts_; ++k) {
       load_str += std::to_string(actual_load[k]).substr(0, 5) + " ";
+      bias_str += std::to_string(expert_bias_[k]).substr(0, 6) + " ";
     }
-    Log::Debug("MixtureGBDT: Expert loads = [%s], bias = [%.3f, %.3f, ...]",
-               load_str.c_str(), expert_bias_[0],
-               num_experts_ > 1 ? expert_bias_[1] : 0.0);
+    Log::Debug("MixtureGBDT: Expert loads = [%s], bias = [%s]",
+               load_str.c_str(), bias_str.c_str());
   }
 }
 
@@ -935,23 +1749,33 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   Forward();
 
   // E-step: update responsibilities
-  // Skip E-step for first few iterations to allow experts to differentiate
-  // with the initial (non-uniform) responsibilities.
-  // Without this, all experts start with prediction=0, causing EStep to
-  // compute uniform responsibilities and all experts train identically.
   const int warmup_iters = config_->mixture_warmup_iters;
-  if (iter_ >= warmup_iters) {
-    if (use_expert_choice_) {
-      EStepExpertChoice();  // Expert Choice Routing
-    } else {
-      EStep();              // Token Choice (EM-based)
+
+  if (use_expert_choice_) {
+    // Expert Choice: always run EStep
+    // During warmup: high noise for random-ish differentiation
+    // After warmup: low noise, affinity-based selection
+    EStepExpertChoice();
+
+    if (iter_ >= warmup_iters) {
+      SmoothResponsibilities();
+      UpdateExpertBias();
     }
+  } else {
+    // Token Choice (EM-based)
+    // When auxiliary load balancing is enabled (lb_alpha > 0), run EStep during warmup
+    // to maintain diversity from the start. Otherwise, skip EStep during warmup.
+    const bool use_aux_lb = config_->mixture_load_balance_alpha > 0.0;
 
-    // Apply time-series smoothing if enabled
-    SmoothResponsibilities();
+    if (iter_ >= warmup_iters || use_aux_lb) {
+      EStep();
+      UpdateExpertLoad();  // Update load for auxiliary loss (used in next iteration)
 
-    // Update expert bias for loss-free load balancing
-    UpdateExpertBias();
+      if (iter_ >= warmup_iters) {
+        SmoothResponsibilities();
+        UpdateExpertBias();
+      }
+    }
   }
 
   // M-step: update experts
