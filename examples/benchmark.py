@@ -170,8 +170,8 @@ def print_selected_roles(roles: list):
 def expert_collapse_stopper(
     X_sample: np.ndarray,
     check_every: int = 20,
-    corr_threshold: float = 0.95,
-    regime_imbalance_threshold: float = 0.95,
+    corr_threshold: float = 0.7,
+    min_expert_ratio: float = 0.05,
     min_iters: int = 50,
     verbose: bool = False,
 ):
@@ -186,8 +186,8 @@ def expert_collapse_stopper(
         何iteration毎にチェックするか
     corr_threshold : float
         Expert間の相関がこの値を超えたらcollapse判定（max pairwise）
-    regime_imbalance_threshold : float
-        1つのregimeへの割り当て率がこの値を超えたらcollapse判定
+    min_expert_ratio : float
+        各Expertの最低利用率。これを下回るExpertがあればcollapse判定
     min_iters : int
         最低限このiteration数は回す（初期は相関高くなりがち）
     verbose : bool
@@ -228,18 +228,18 @@ def expert_collapse_stopper(
                     )
                 raise lgb.EarlyStopException(iteration, [])
 
-            # 2. Regime偏りをチェック
+            # 2. Expert利用率をチェック（各Expertが最低min_expert_ratio以上）
             regime_pred = model.predict_regime(X_sample)
-            unique, counts = np.unique(regime_pred, return_counts=True)
-            max_ratio = counts.max() / len(regime_pred)
-
-            if max_ratio > regime_imbalance_threshold:
-                if verbose:
-                    print(
-                        f"[iter {iteration}] Regime imbalance detected: "
-                        f"max_ratio={max_ratio:.1%} > {regime_imbalance_threshold:.1%}"
-                    )
-                raise lgb.EarlyStopException(iteration, [])
+            n_samples = len(regime_pred)
+            for k in range(K):
+                expert_ratio = (regime_pred == k).sum() / n_samples
+                if expert_ratio < min_expert_ratio:
+                    if verbose:
+                        print(
+                            f"[iter {iteration}] Expert underutilization detected: "
+                            f"Expert {k} ratio={expert_ratio:.1%} < {min_expert_ratio:.1%}"
+                        )
+                    raise lgb.EarlyStopException(iteration, [])
 
         except lgb.EarlyStopException:
             raise  # Re-raise early stop exception
@@ -350,11 +350,6 @@ DATASETS = {
         "params": {"n_samples": 500},
         "description": "Latent regime",
     },
-    "VIX": {
-        "generator": generate_vix_data,
-        "params": {"n_samples": 1000},
-        "description": "Volatility regime",
-    },
 }
 
 
@@ -384,7 +379,7 @@ def evaluate_cv(
     use_collapse_stopper : bool
         Whether to use expert collapse early stopping (for MoE models)
     collapse_stopper_kwargs : dict
-        Arguments for expert_collapse_stopper (corr_threshold, regime_imbalance_threshold, etc.)
+        Arguments for expert_collapse_stopper (corr_threshold, min_expert_ratio, etc.)
     """
     tscv = TimeSeriesSplit(n_splits=config.n_splits)
     scores = []
@@ -477,8 +472,8 @@ def create_objective_moe(
         If True, stop training early when expert collapse is detected.
     collapse_stopper_kwargs : dict
         Arguments for expert_collapse_stopper:
-        - corr_threshold: float (default 0.95)
-        - regime_imbalance_threshold: float (default 0.95)
+        - corr_threshold: float (default 0.7)
+        - min_expert_ratio: float (default 0.05)
         - check_every: int (default 20)
         - min_iters: int (default 50)
     """
@@ -486,9 +481,10 @@ def create_objective_moe(
         collapse_stopper_kwargs = {}
 
     def objective(trial):
-        # Search smoothing mode (none or ema)
-        smoothing = trial.suggest_categorical("mixture_r_smoothing", ["none", "ema"])
+        # smoothing=none fixed to prevent expert collapse
+        smoothing = "none"
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
+        routing_mode = trial.suggest_categorical("mixture_routing_mode", ["token_choice", "expert_choice"])
 
         params = {
             "objective": "regression",
@@ -508,17 +504,19 @@ def create_objective_moe(
             "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
             "mixture_r_smoothing": smoothing,
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
-            # Explicitly use token_choice since default is now expert_choice
-            "mixture_routing_mode": "token_choice",
+            "mixture_routing_mode": routing_mode,
             # Gate parameters (often overlooked but important for routing quality)
             "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
             "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
             "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
         }
 
-        # Add smoothing lambda when using ema
-        if smoothing == "ema":
-            params["mixture_smoothing_lambda"] = trial.suggest_float("mixture_smoothing_lambda", 0.5, 0.99)
+        # Expert Choice specific parameters
+        if routing_mode == "expert_choice":
+            params["mixture_expert_capacity_factor"] = trial.suggest_float("mixture_expert_capacity_factor", 0.8, 1.5)
+            params["mixture_expert_choice_score"] = "gate"  # Fixed: only "gate" prevents collapse
+            params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
+            params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
 
         if per_expert:
             max_depths = [trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)]
@@ -739,8 +737,8 @@ def run_benchmark(
 
     Compares:
     1. Standard GBDT
-    2. MoE (Token Choice)
-    3. MoE-EC-PE (Expert Choice + Per-Expert parameters)
+    2. MoE (Shared tree structure, routing mode searched)
+    3. MoE-PE (Per-Expert tree structure, routing mode searched)
 
     Parameters
     ----------
@@ -776,9 +774,8 @@ def run_benchmark(
     }
     print(f"  Best RMSE: {study_std.best_value:.4f}")
 
-    # 2. MoE (Token Choice) - WARNING: Prone to Expert Collapse
-    print(f"\n[2] MoE (Token Choice) ({config.n_trials} trials)...")
-    print("    ⚠️  WARNING: Token Choice is prone to Expert Collapse. Use Expert Choice instead.")
+    # 2. MoE (Shared tree structure)
+    print(f"\n[2] MoE (Shared) ({config.n_trials} trials)...")
     start = time.time()
     study_moe = optuna.create_study(direction="minimize")
     study_moe.optimize(
@@ -797,12 +794,12 @@ def run_benchmark(
     }
     print(f"  Best RMSE: {study_moe.best_value:.4f}")
 
-    # 3. MoE-EC-PE (Expert Choice + Per-Expert)
-    print(f"\n[3] MoE-EC-PE (Expert Choice + Per-Expert) ({config.n_trials} trials)...")
+    # 3. MoE-PE (Per-Expert with routing search)
+    print(f"\n[3] MoE-PE (Per-Expert) ({config.n_trials} trials)...")
     start = time.time()
-    study_moe_ec_pe = optuna.create_study(direction="minimize")
-    study_moe_ec_pe.optimize(
-        create_objective_moe_expert_choice(
+    study_moe_pe = optuna.create_study(direction="minimize")
+    study_moe_pe.optimize(
+        create_objective_moe(
             X, y, config, per_expert=True,
             use_collapse_stopper=use_collapse_stopper,
             collapse_stopper_kwargs=collapse_stopper_kwargs,
@@ -810,44 +807,45 @@ def run_benchmark(
         n_trials=config.n_trials,
         show_progress_bar=True,
     )
-    results["MoE-EC-PE"] = {
-        "rmse": study_moe_ec_pe.best_value,
-        "params": study_moe_ec_pe.best_params,
+    results["MoE-PE"] = {
+        "rmse": study_moe_pe.best_value,
+        "params": study_moe_pe.best_params,
         "time": time.time() - start,
-        "roles": study_moe_ec_pe.best_trial.user_attrs,  # role_0, role_1, ... if diverse_roles=True
     }
-    print(f"  Best RMSE: {study_moe_ec_pe.best_value:.4f}")
+    print(f"  Best RMSE: {study_moe_pe.best_value:.4f}")
 
     # MoE Analysis
     print("\n[4] MoE Analysis (Regime Separation & Expert Differentiation)...")
-    analysis_moe = analyze_moe(X, y, regime_true, study_moe.best_params, config, is_expert_choice=False)
-    analysis_moe_ec_pe = analyze_moe(X, y, regime_true, study_moe_ec_pe.best_params, config, is_expert_choice=True)
+    moe_routing = study_moe.best_params.get("mixture_routing_mode", "token_choice")
+    moe_pe_routing = study_moe_pe.best_params.get("mixture_routing_mode", "token_choice")
+    analysis_moe = analyze_moe(X, y, regime_true, study_moe.best_params, config, is_expert_choice=(moe_routing == "expert_choice"))
+    analysis_moe_pe = analyze_moe(X, y, regime_true, study_moe_pe.best_params, config, is_expert_choice=(moe_pe_routing == "expert_choice"))
     results["analysis_moe"] = analysis_moe
-    results["analysis_moe_ec_pe"] = analysis_moe_ec_pe
+    results["analysis_moe_pe"] = analysis_moe_pe
 
     # Print analysis
-    print("  MoE (Token Choice):")
+    print(f"  MoE ({moe_routing}):")
     print(f"    Gate working: {'Yes' if analysis_moe['gate_working'] else 'NO!'}")
     print(f"    Expert corr (max/min): {analysis_moe['expert_corr_max']:.2f} / {analysis_moe['expert_corr_min']:.2f}")
     print(f"    Regime accuracy: {analysis_moe['regime_accuracy']:.1%}")
-    print("  MoE-EC-PE (Expert Choice + Per-Expert):")
-    print(f"    Gate working: {'Yes' if analysis_moe_ec_pe['gate_working'] else 'NO!'}")
+    print(f"  MoE-PE ({moe_pe_routing}):")
+    print(f"    Gate working: {'Yes' if analysis_moe_pe['gate_working'] else 'NO!'}")
     print(
-        f"    Expert corr (max/min): {analysis_moe_ec_pe['expert_corr_max']:.2f} / {analysis_moe_ec_pe['expert_corr_min']:.2f}"
+        f"    Expert corr (max/min): {analysis_moe_pe['expert_corr_max']:.2f} / {analysis_moe_pe['expert_corr_min']:.2f}"
     )
-    print(f"    Regime accuracy: {analysis_moe_ec_pe['regime_accuracy']:.1%}")
+    print(f"    Regime accuracy: {analysis_moe_pe['regime_accuracy']:.1%}")
 
     # Summary
     std_rmse = results["Standard"]["rmse"]
     moe_rmse = results["MoE"]["rmse"]
-    moe_ec_pe_rmse = results["MoE-EC-PE"]["rmse"]
-    best_rmse = min(moe_rmse, moe_ec_pe_rmse)
+    moe_pe_rmse = results["MoE-PE"]["rmse"]
+    best_rmse = min(moe_rmse, moe_pe_rmse)
     improvement = (std_rmse - best_rmse) / std_rmse * 100
 
     print("\n  --- Summary ---")
     print(f"  Standard RMSE:   {std_rmse:.4f}")
     print(f"  MoE RMSE:        {moe_rmse:.4f}")
-    print(f"  MoE-EC-PE RMSE:  {moe_ec_pe_rmse:.4f}")
+    print(f"  MoE-PE RMSE:     {moe_pe_rmse:.4f}")
     print(f"  Best MoE Impr:   {improvement:+.1f}%")
 
     return results
@@ -866,10 +864,10 @@ def create_visualization(all_results: dict, output_path: str):
 
     for i, (name, results) in enumerate(all_results.items()):
         # Use best MoE analysis for visualization
-        if results["MoE"]["rmse"] <= results["MoE-EC-PE"]["rmse"]:
+        if results["MoE"]["rmse"] <= results["MoE-PE"]["rmse"]:
             analysis = results["analysis_moe"]
         else:
-            analysis = results["analysis_moe_ec_pe"]
+            analysis = results["analysis_moe_pe"]
         regime_true = analysis["regime_true"]
         regime_pred = analysis["regime_pred"]
         expert_preds = analysis["expert_preds"]
@@ -906,8 +904,8 @@ def create_visualization(all_results: dict, output_path: str):
 
         # Plot 3: RMSE Comparison
         ax3 = axes[i, 2]
-        methods = ["Standard", "MoE", "MoE-EC-PE"]
-        rmses = [results["Standard"]["rmse"], results["MoE"]["rmse"], results["MoE-EC-PE"]["rmse"]]
+        methods = ["Standard", "MoE", "MoE-PE"]
+        rmses = [results["Standard"]["rmse"], results["MoE"]["rmse"], results["MoE-PE"]["rmse"]]
         bars = ax3.bar(methods, rmses, color=["gray", "C0", "C3"], alpha=0.7)
         ax3.set_ylabel("RMSE")
         ax3.set_title(f"{name}: RMSE Comparison")
@@ -1289,18 +1287,18 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
     # RMSE Table
     lines.append("### RMSE Comparison")
     lines.append("")
-    lines.append("| Dataset | Standard | MoE | MoE-EC-PE | Best Improvement |")
+    lines.append("| Dataset | Standard | MoE | MoE-PE | Best Improvement |")
     lines.append("|---------|----------|-----|-----------|------------------|")
 
     for name, results in all_results.items():
         std_rmse = results["Standard"]["rmse"]
         moe_rmse = results["MoE"]["rmse"]
-        moe_ec_pe_rmse = results["MoE-EC-PE"]["rmse"]
-        best_rmse = min(moe_rmse, moe_ec_pe_rmse)
+        moe_pe_rmse = results["MoE-PE"]["rmse"]
+        best_rmse = min(moe_rmse, moe_pe_rmse)
         improvement = (std_rmse - best_rmse) / std_rmse * 100
 
         # Mark the best MoE variant
-        rmses = {"MoE": moe_rmse, "MoE-EC-PE": moe_ec_pe_rmse}
+        rmses = {"MoE": moe_rmse, "MoE-PE": moe_pe_rmse}
         best_key = min(rmses, key=rmses.get)
 
         def fmt(key, val):
@@ -1310,22 +1308,22 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
 
         lines.append(
             f"| {name} | {std_rmse:.4f} | {fmt('MoE', moe_rmse)} | "
-            f"{fmt('MoE-EC-PE', moe_ec_pe_rmse)} | {improvement:+.1f}% |"
+            f"{fmt('MoE-PE', moe_pe_rmse)} | {improvement:+.1f}% |"
         )
 
     lines.append("")
-    lines.append("**Legend**: MoE = Token Choice, MoE-EC-PE = Expert Choice + Per-Expert")
+    lines.append("**Legend**: MoE = Shared tree, MoE-PE = Per-Expert tree (both search routing mode)")
     lines.append("")
 
     # Expert Differentiation Table
     lines.append("### Expert Differentiation (Regime Separation)")
     lines.append("")
-    lines.append("| Dataset | MoE Corr | MoE-EC-PE Corr | MoE Acc | MoE-EC-PE Acc |")
+    lines.append("| Dataset | MoE Corr | MoE-PE Corr | MoE Acc | MoE-PE Acc |")
     lines.append("|---------|----------|----------------|---------|---------------|")
 
     for name, results in all_results.items():
         analysis_moe = results["analysis_moe"]
-        analysis_ec_pe = results["analysis_moe_ec_pe"]
+        analysis_ec_pe = results["analysis_moe_pe"]
 
         moe_corr = f"{analysis_moe['expert_corr_min']:.2f}/{analysis_moe['expert_corr_max']:.2f}"
         ec_pe_corr = f"{analysis_ec_pe['expert_corr_min']:.2f}/{analysis_ec_pe['expert_corr_max']:.2f}"
@@ -1361,10 +1359,12 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
         lines.append(f"- learning_rate: {std_params.get('learning_rate', 'N/A'):.4f}")
         lines.append("")
 
-        # MoE params (Token Choice)
+        # MoE params (Shared tree)
         moe_params = results["MoE"]["params"]
-        lines.append("**MoE (Token Choice):**")
+        moe_routing = moe_params.get('mixture_routing_mode', 'token_choice')
+        lines.append(f"**MoE (Shared, {moe_routing}):**")
         lines.append(f"- num_experts: {moe_params.get('mixture_num_experts', 2)}")
+        lines.append(f"- routing_mode: {moe_routing}")
         lines.append(f"- max_depth: {moe_params.get('max_depth', 'N/A')}")
         lines.append(f"- num_leaves: {moe_params.get('num_leaves', 'N/A')}")
         lines.append(f"- min_data_in_leaf: {moe_params.get('min_data_in_leaf', 'N/A')}")
@@ -1375,25 +1375,22 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
         lines.append(f"- gate_learning_rate: {moe_params.get('mixture_gate_learning_rate', 'N/A'):.4f}")
         lines.append("")
 
-        # MoE-EC-PE params (Expert Choice + Per-Expert)
-        ec_pe_params = results["MoE-EC-PE"]["params"]
-        ec_pe_roles = results["MoE-EC-PE"].get("roles", {})
-        num_experts = ec_pe_params.get("mixture_num_experts", 2)
-        lines.append("**MoE-EC-PE (Expert Choice + Per-Expert):**")
+        # MoE-PE params (Per-Expert tree)
+        pe_params = results["MoE-PE"]["params"]
+        pe_routing = pe_params.get('mixture_routing_mode', 'token_choice')
+        num_experts = pe_params.get("mixture_num_experts", 2)
+        lines.append(f"**MoE-PE (Per-Expert, {pe_routing}):**")
         lines.append(f"- num_experts: {num_experts}")
-        lines.append(f"- routing_mode: expert_choice")
-        lines.append(f"- capacity_factor: {ec_pe_params.get('mixture_expert_capacity_factor', 'N/A'):.2f}")
-        lines.append(f"- choice_score: {ec_pe_params.get('mixture_expert_choice_score', 'N/A')}")
-        lines.append(f"- choice_boost: {ec_pe_params.get('mixture_expert_choice_boost', 'N/A'):.1f}")
-        lines.append(f"- gate_max_depth: {ec_pe_params.get('mixture_gate_max_depth', 'N/A')}")
-        lines.append(f"- gate_num_leaves: {ec_pe_params.get('mixture_gate_num_leaves', 'N/A')}")
-        lines.append(f"- gate_learning_rate: {ec_pe_params.get('mixture_gate_learning_rate', 'N/A'):.4f}")
+        lines.append(f"- routing_mode: {pe_routing}")
+        lines.append(f"- gate_max_depth: {pe_params.get('mixture_gate_max_depth', 'N/A')}")
+        lines.append(f"- gate_num_leaves: {pe_params.get('mixture_gate_num_leaves', 'N/A')}")
+        lines.append(f"- gate_learning_rate: {pe_params.get('mixture_gate_learning_rate', 'N/A'):.4f}")
 
         # Extract per-expert tree params
-        max_depths = [ec_pe_params.get(f"max_depth_{k}", "?") for k in range(num_experts)]
-        num_leaves = [ec_pe_params.get(f"num_leaves_{k}", "?") for k in range(num_experts)]
-        min_data = [ec_pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(num_experts)]
-        roles = [ec_pe_roles.get(f"role_{k}", "?") for k in range(num_experts)]
+        max_depths = [pe_params.get(f"max_depth_{k}", "?") for k in range(num_experts)]
+        num_leaves = [pe_params.get(f"num_leaves_{k}", "?") for k in range(num_experts)]
+        min_data = [pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(num_experts)]
+        roles = [pe_roles.get(f"role_{k}", "?") for k in range(num_experts)]
 
         # Create a table for per-expert params with role names
         lines.append("")
@@ -1403,7 +1400,7 @@ def generate_markdown_report(all_results: dict, config: BenchmarkConfig) -> str:
             lines.append(f"| E{k} | {roles[k]} | {max_depths[k]} | {num_leaves[k]} | {min_data[k]} |")
         lines.append("")
 
-        lines.append(f"- learning_rate: {ec_pe_params.get('learning_rate', 'N/A'):.4f}")
+        lines.append(f"- learning_rate: {pe_params.get('learning_rate', 'N/A'):.4f}")
         lines.append("")
 
     return "\n".join(lines)
@@ -1417,7 +1414,7 @@ def print_final_summary(all_results: dict):
 
     # Results table with expert count
     print(
-        f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-EC-PE':>12} {'Best Impr':>10} "
+        f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'MoE-PE':>12} {'Best Impr':>10} "
         f"{'MoE K':>6} {'EC-PE K':>8} {'MoE Corr':>12} {'EC-PE Corr':>12} {'MoE Acc':>8} {'EC-PE Acc':>10}"
     )
     print("-" * 140)
@@ -1425,27 +1422,27 @@ def print_final_summary(all_results: dict):
     for name, results in all_results.items():
         std_rmse = results["Standard"]["rmse"]
         moe_rmse = results["MoE"]["rmse"]
-        moe_ec_pe_rmse = results["MoE-EC-PE"]["rmse"]
-        best_rmse = min(moe_rmse, moe_ec_pe_rmse)
+        moe_pe_rmse = results["MoE-PE"]["rmse"]
+        best_rmse = min(moe_rmse, moe_pe_rmse)
         improvement = (std_rmse - best_rmse) / std_rmse * 100
         analysis_moe = results["analysis_moe"]
-        analysis_ec_pe = results["analysis_moe_ec_pe"]
+        analysis_ec_pe = results["analysis_moe_pe"]
 
         moe_k = analysis_moe["K"]
-        ec_pe_k = analysis_ec_pe["K"]
+        pe_k = analysis_ec_pe["K"]
         moe_corr = f"{analysis_moe['expert_corr_min']:.2f}/{analysis_moe['expert_corr_max']:.2f}"
         ec_pe_corr = f"{analysis_ec_pe['expert_corr_min']:.2f}/{analysis_ec_pe['expert_corr_max']:.2f}"
         moe_acc = f"{analysis_moe['regime_accuracy']:.1%}"
         ec_pe_acc = f"{analysis_ec_pe['regime_accuracy']:.1%}"
 
         print(
-            f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_ec_pe_rmse:>12.4f} {improvement:>+9.1f}% "
-            f"{moe_k:>6} {ec_pe_k:>8} {moe_corr:>12} {ec_pe_corr:>12} {moe_acc:>8} {ec_pe_acc:>10}"
+            f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {moe_pe_rmse:>12.4f} {improvement:>+9.1f}% "
+            f"{moe_k:>6} {pe_k:>8} {moe_corr:>12} {ec_pe_corr:>12} {moe_acc:>8} {ec_pe_acc:>10}"
         )
 
     print("\n" + "-" * 140)
     print("K: Number of experts | Corr: Expert correlation (min/max) | Acc: Regime classification accuracy")
-    print("MoE: Token Choice | MoE-EC-PE: Expert Choice + Per-Expert")
+    print("MoE: Shared tree | MoE-PE: Per-Expert tree (both search routing mode)")
     print("=" * 140)
 
     # Detailed hyperparameters for each dataset
@@ -1462,13 +1459,14 @@ def print_final_summary(all_results: dict):
             f"min_data={std_params.get('min_data_in_leaf', '?')}, lr={std_params.get('learning_rate', 0):.4f}"
         )
 
-        # MoE (Token Choice)
+        # MoE (Shared tree)
         moe_params = results["MoE"]["params"]
         moe_k = moe_params.get("mixture_num_experts", 2)
+        moe_routing = moe_params.get("mixture_routing_mode", "token_choice")
         print(
-            f"  MoE:       K={moe_k}, depth={moe_params.get('max_depth', '?')}, leaves={moe_params.get('num_leaves', '?')}, "
-            f"min_data={moe_params.get('min_data_in_leaf', '?')}, lr={moe_params.get('learning_rate', 0):.4f}, "
-            f"alpha={moe_params.get('mixture_e_step_alpha', '?'):.2f}, warmup={moe_params.get('mixture_warmup_iters', '?')}"
+            f"  MoE:       K={moe_k}, routing={moe_routing}, depth={moe_params.get('max_depth', '?')}, "
+            f"leaves={moe_params.get('num_leaves', '?')}, min_data={moe_params.get('min_data_in_leaf', '?')}, "
+            f"lr={moe_params.get('learning_rate', 0):.4f}, alpha={moe_params.get('mixture_e_step_alpha', '?'):.2f}"
         )
         print(
             f"             gate: depth={moe_params.get('mixture_gate_max_depth', '?')}, "
@@ -1476,27 +1474,24 @@ def print_final_summary(all_results: dict):
             f"lr={moe_params.get('mixture_gate_learning_rate', 0):.4f}"
         )
 
-        # MoE-EC-PE (Expert Choice + Per-Expert)
-        ec_pe_params = results["MoE-EC-PE"]["params"]
-        ec_pe_roles = results["MoE-EC-PE"].get("roles", {})
-        ec_pe_k = ec_pe_params.get("mixture_num_experts", 2)
-        depths = [ec_pe_params.get(f"max_depth_{k}", "?") for k in range(ec_pe_k)]
-        leaves = [ec_pe_params.get(f"num_leaves_{k}", "?") for k in range(ec_pe_k)]
-        min_data = [ec_pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(ec_pe_k)]
+        # MoE-PE (Per-Expert tree)
+        pe_params = results["MoE-PE"]["params"]
+        pe_k = pe_params.get("mixture_num_experts", 2)
+        pe_routing = pe_params.get("mixture_routing_mode", "token_choice")
+        depths = [pe_params.get(f"max_depth_{k}", "?") for k in range(pe_k)]
+        leaves = [pe_params.get(f"num_leaves_{k}", "?") for k in range(pe_k)]
+        min_data = [pe_params.get(f"min_data_in_leaf_{k}", "?") for k in range(pe_k)]
         print(
-            f"  MoE-EC-PE: K={ec_pe_k}, routing=expert_choice, "
-            f"capacity={ec_pe_params.get('mixture_expert_capacity_factor', '?'):.2f}, "
-            f"score={ec_pe_params.get('mixture_expert_choice_score', '?')}, "
-            f"boost={ec_pe_params.get('mixture_expert_choice_boost', '?'):.1f}"
+            f"  MoE-PE:    K={pe_k}, routing={pe_routing}, "
+            f"lr={pe_params.get('learning_rate', 0):.4f}, alpha={pe_params.get('mixture_e_step_alpha', '?'):.2f}"
         )
         print(
-            f"             gate: depth={ec_pe_params.get('mixture_gate_max_depth', '?')}, "
-            f"leaves={ec_pe_params.get('mixture_gate_num_leaves', '?')}, "
-            f"lr={ec_pe_params.get('mixture_gate_learning_rate', 0):.4f}"
+            f"             gate: depth={pe_params.get('mixture_gate_max_depth', '?')}, "
+            f"leaves={pe_params.get('mixture_gate_num_leaves', '?')}, "
+            f"lr={pe_params.get('mixture_gate_learning_rate', 0):.4f}"
         )
-        for k in range(ec_pe_k):
-            role_name = ec_pe_roles.get(f"role_{k}", "?")
-            print(f"             E{k} [{role_name}]: depth={depths[k]}, leaves={leaves[k]}, min_data={min_data[k]}")
+        for k in range(pe_k):
+            print(f"             E{k}: depth={depths[k]}, leaves={leaves[k]}, min_data={min_data[k]}")
 
     print("\n" + "=" * 140)
 
@@ -1520,12 +1515,12 @@ def main():
         help="Enable expert collapse early stopping for MoE models"
     )
     parser.add_argument(
-        "--corr-threshold", type=float, default=0.95,
-        help="Expert correlation threshold for collapse detection (default: 0.95)"
+        "--corr-threshold", type=float, default=0.7,
+        help="Expert correlation threshold for collapse detection (default: 0.7)"
     )
     parser.add_argument(
-        "--regime-imbalance-threshold", type=float, default=0.95,
-        help="Regime imbalance threshold (e.g., 0.95 = 95:5 split) (default: 0.95)"
+        "--min-expert-ratio", type=float, default=0.05,
+        help="Minimum expert utilization ratio (default: 0.05 = 5%%)"
     )
     parser.add_argument(
         "--check-every", type=int, default=20,
@@ -1545,21 +1540,21 @@ def main():
     )
 
     print("=" * 70)
-    print("Benchmark: Standard vs MoE vs MoE-EC-PE")
+    print("Benchmark: Standard vs MoE (Shared) vs MoE-PE (Per-Expert)")
     print("=" * 70)
     print(f"Trials: {config.n_trials}, CV Splits: {config.n_splits}, Boost Rounds: {config.num_boost_round}")
 
     # Collapse stopper settings
     collapse_stopper_kwargs = {
         "corr_threshold": args.corr_threshold,
-        "regime_imbalance_threshold": args.regime_imbalance_threshold,
+        "min_expert_ratio": args.min_expert_ratio,
         "check_every": args.check_every,
         "min_iters": args.min_iters,
         "verbose": True,
     }
     if args.collapse_stopper:
         print(f"Expert Collapse Stopper: ENABLED")
-        print(f"  corr_threshold={args.corr_threshold}, regime_imbalance={args.regime_imbalance_threshold}")
+        print(f"  corr_threshold={args.corr_threshold}, min_expert_ratio={args.min_expert_ratio}")
         print(f"  check_every={args.check_every}, min_iters={args.min_iters}")
 
     all_results = {}

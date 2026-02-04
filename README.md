@@ -489,6 +489,164 @@ study.optimize(objective_per_expert, n_trials=200)
 
 **Tip**: Start with standard MoE. Per-expert requires more trials to converge due to larger search space.
 
+#### Optuna Search Parameters Reference
+
+Below is a comprehensive reference of all hyperparameters that can be searched with Optuna for MoE models.
+
+##### Model Variants
+
+| Variant | Tree Structure | Routing Mode | Description |
+|---------|---------------|--------------|-------------|
+| **MoE** | Shared | token_choice / expert_choice | All experts share same tree params |
+| **MoE-PE** | Per-Expert | token_choice / expert_choice | Each expert has different tree params |
+
+##### Routing Mode Selection
+
+```python
+# Search between token_choice and expert_choice
+routing_mode = trial.suggest_categorical("mixture_routing_mode", ["token_choice", "expert_choice"])
+```
+
+| Mode | Direction | Description |
+|------|-----------|-------------|
+| `token_choice` | Row-wise (sample perspective) | Each sample chooses which expert to use |
+| `expert_choice` | Column-wise (expert perspective) | Each expert chooses which samples to handle |
+
+##### Common Parameters (All MoE Variants)
+
+```python
+params = {
+    # === Tree Structure (shared or per-expert) ===
+    "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+    "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
+    "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
+    "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+    "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+    "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
+
+    # === MoE Core ===
+    "mixture_num_experts": trial.suggest_int("mixture_num_experts", 2, 4),
+    "mixture_e_step_alpha": trial.suggest_float("mixture_e_step_alpha", 0.1, 2.0),
+    "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 50),
+    "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
+    "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
+
+    # === Gate ===
+    "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
+    "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
+    "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
+
+    # === Routing Mode ===
+    "mixture_routing_mode": trial.suggest_categorical("mixture_routing_mode", ["token_choice", "expert_choice"]),
+
+    # === Initialization (optional) ===
+    "mixture_init": trial.suggest_categorical("mixture_init",
+        ["uniform", "quantile", "random", "balanced_kmeans", "gmm", "tree_hierarchical"]),
+}
+```
+
+##### Expert Choice Specific Parameters
+
+When `routing_mode == "expert_choice"`, add these parameters:
+
+```python
+if routing_mode == "expert_choice":
+    params["mixture_expert_capacity_factor"] = trial.suggest_float("mixture_expert_capacity_factor", 0.8, 1.5)
+    params["mixture_expert_choice_score"] = "gate"  # Fixed: only "gate" prevents collapse
+    params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
+    params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
+```
+
+| Parameter | Range | Description |
+|-----------|-------|-------------|
+| `mixture_expert_capacity_factor` | 0.8-1.5 | Expert capacity relative to uniform allocation |
+| `mixture_expert_choice_score` | `"gate"` (fixed) | Must be "gate" to prevent collapse |
+| `mixture_expert_choice_boost` | 5.0-30.0 | Boost factor for expert selection scores |
+| `mixture_expert_choice_hard` | True/False | Hard vs soft expert selection |
+
+##### Initialization Method Selection
+
+```python
+# Search among initialization methods
+mixture_init = trial.suggest_categorical("mixture_init",
+    ["uniform", "quantile", "random", "balanced_kmeans", "gmm", "tree_hierarchical"])
+```
+
+| Method | Description |
+|--------|-------------|
+| `uniform` | Uniform distribution across experts |
+| `quantile` | Target-based quantile initialization |
+| `random` | Random assignment |
+| `balanced_kmeans` | K-means clustering with balance constraint |
+| `gmm` | Gaussian Mixture Model clustering |
+| `tree_hierarchical` | Hierarchical tree-based initialization |
+
+##### MoE (Shared Tree Structure)
+
+```python
+# Tree params applied to ALL experts
+params["num_leaves"] = trial.suggest_int("num_leaves", 8, 128)
+params["max_depth"] = trial.suggest_int("max_depth", 3, 12)
+params["min_data_in_leaf"] = trial.suggest_int("min_data_in_leaf", 5, 100)
+```
+
+##### MoE-PE (Per-Expert Tree Structure)
+
+```python
+num_experts = params["mixture_num_experts"]
+
+# Different tree params for EACH expert
+max_depths = [trial.suggest_int(f"max_depth_{k}", 3, 12) for k in range(num_experts)]
+num_leaves = [trial.suggest_int(f"num_leaves_{k}", 8, 128) for k in range(num_experts)]
+min_data = [trial.suggest_int(f"min_data_in_leaf_{k}", 5, 100) for k in range(num_experts)]
+
+params["mixture_expert_max_depths"] = ",".join(map(str, max_depths))
+params["mixture_expert_num_leaves"] = ",".join(map(str, num_leaves))
+params["mixture_expert_min_data_in_leaf"] = ",".join(map(str, min_data))
+```
+
+##### Expert Collapse Stopper (Training Callback)
+
+Use `expert_collapse_stopper` to early-stop trials with collapsed experts:
+
+```python
+from examples.benchmark import expert_collapse_stopper
+
+callbacks = [
+    lgb.early_stopping(stopping_rounds=50, verbose=False),
+    expert_collapse_stopper(
+        X_sample,                    # Subsample for efficiency
+        corr_threshold=0.7,          # Max expert correlation (pairwise)
+        min_expert_ratio=0.05,       # Min utilization per expert (5%)
+        check_every=20,              # Check every N iterations
+        min_iters=50,                # Skip early iterations
+    ),
+]
+
+try:
+    model = lgb.train(params, train_data, callbacks=callbacks)
+except lgb.EarlyStopException:
+    raise optuna.TrialPruned("Expert collapse detected")
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `corr_threshold` | 0.7 | Prune if max pairwise expert correlation > threshold |
+| `min_expert_ratio` | 0.05 | Prune if any expert utilization < 5% |
+| `check_every` | 20 | Check frequency (iterations) |
+| `min_iters` | 50 | Skip initial iterations (high correlation is normal early) |
+
+##### Parameter Count Summary
+
+| Variant | Base | + Expert Choice | + Init | + Per-Expert (K=4) | Total |
+|---------|------|-----------------|--------|-------------------|-------|
+| MoE | 16 | +4 | +1 | - | 17-21 |
+| MoE-PE | 13 | +4 | +1 | +12 | 26-30 |
+
+**Recommendation**: Use 100+ trials for MoE, 200+ trials for MoE-PE.
+
+**Benchmark Results**: In our tests, `gmm` initialization with `token_choice` routing performed best.
+
 #### Role-based Per-Expert (Recommended for Optuna)
 
 The naive per-expert approach has a problem: **each expert's parameters are independent**, so you might end up with similar experts (e.g., all with similar depth and leaves). This wastes the MoE's potential for specialization.
