@@ -481,8 +481,7 @@ def create_objective_moe(
         collapse_stopper_kwargs = {}
 
     def objective(trial):
-        # smoothing=none fixed to prevent expert collapse
-        smoothing = "none"
+        smoothing = trial.suggest_categorical("mixture_r_smoothing", ["none", "ema", "markov"])
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
         routing_mode = trial.suggest_categorical("mixture_routing_mode", ["token_choice", "expert_choice"])
 
@@ -499,18 +498,22 @@ def create_objective_moe(
             "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             "mixture_num_experts": num_experts,
-            "mixture_e_step_alpha": trial.suggest_float("mixture_e_step_alpha", 0.1, 2.0),
+            "mixture_e_step_alpha": trial.suggest_float("mixture_e_step_alpha", 0.1, 3.0),
+            "mixture_e_step_mode": trial.suggest_categorical("mixture_e_step_mode", ["em", "loss_only"]),
             "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 50),
             "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
             "mixture_r_smoothing": smoothing,
+            "mixture_smoothing_lambda": trial.suggest_float("mixture_smoothing_lambda", 0.0, 0.9) if smoothing != "none" else 0.0,
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
             "mixture_routing_mode": routing_mode,
             # Diversity regularization to ensure expert differentiation
             "mixture_diversity_lambda": trial.suggest_float("mixture_diversity_lambda", 0.0, 0.5),
-            # Gate parameters (often overlooked but important for routing quality)
-            "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
-            "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
-            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
+            # Gate parameters - wider search for stronger regime detection
+            "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 10),
+            "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 64),
+            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.5, log=True),
+            "mixture_gate_lambda_l2": trial.suggest_float("mixture_gate_lambda_l2", 1e-3, 10.0, log=True),
+            "mixture_gate_iters_per_round": trial.suggest_int("mixture_gate_iters_per_round", 1, 3),
         }
 
         # Expert Choice specific parameters
@@ -598,10 +601,12 @@ def create_objective_moe_expert_choice(
             "mixture_expert_choice_hard": trial.suggest_categorical("mixture_expert_choice_hard", [True, False]),
             # Diversity regularization to ensure expert differentiation
             "mixture_diversity_lambda": trial.suggest_float("mixture_diversity_lambda", 0.0, 0.5),
-            # Gate parameters (often overlooked but important for routing quality)
-            "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
-            "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
-            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
+            # Gate parameters - wider search for stronger regime detection
+            "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 10),
+            "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 64),
+            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.5, log=True),
+            "mixture_gate_lambda_l2": trial.suggest_float("mixture_gate_lambda_l2", 1e-3, 10.0, log=True),
+            "mixture_gate_iters_per_round": trial.suggest_int("mixture_gate_iters_per_round", 1, 3),
         }
 
         if per_expert:
