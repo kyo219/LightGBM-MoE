@@ -1301,6 +1301,22 @@ struct Config {
   // desc = recommended range: 0.01-0.1
   double mixture_gate_entropy_lambda = 0.0;
 
+  // desc = use hard (argmax) assignment in M-step instead of soft responsibility weighting
+  // desc = when true, each sample's gradient goes only to the expert with highest responsibility
+  // desc = other experts receive zero gradient for that sample
+  // desc = this forces experts to learn from completely different data subsets, preventing collapse
+  // desc = recommended: ``true`` for most use cases
+  bool mixture_hard_m_step = true;
+
+  // check = >=0.0
+  // check = <=1.0
+  // desc = diversity regularization coefficient for expert predictions
+  // desc = adds gradient penalty that pushes expert predictions apart
+  // desc = for expert k at sample i: grad += lambda * sum_{j!=k} r_ij * (f_k - f_j) / (K-1)
+  // desc = 0.0 means no diversity regularization (default)
+  // desc = recommended range: 0.1-0.5
+  double mixture_diversity_lambda = 0.0;
+
   // check = >=0.0
   // check = <1.0
   // desc = dropout rate for experts during training

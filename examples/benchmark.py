@@ -681,7 +681,7 @@ def analyze_moe(X, y, regime_true, best_params, config: BenchmarkConfig, is_expe
     regime_pred = model.predict_regime(X)
     regime_proba = model.predict_regime_proba(X)
     expert_preds = model.predict_expert_pred(X)
-    K = full_params.get("mixture_num_experts", 2)
+    K = regime_proba.shape[1]  # Get actual K from model output
 
     # Gate check
     gate_working = not np.allclose(regime_proba, 1.0 / K, atol=0.01)

@@ -1594,6 +1594,25 @@ void MixtureGBDT::MStepExperts() {
     }
   }
 
+  // Precompute argmax assignment for hard M-step
+  const bool hard_m_step = config_->mixture_hard_m_step;
+  const double diversity_lambda = config_->mixture_diversity_lambda;
+  std::vector<int> best_expert(num_data_, 0);
+
+  if (hard_m_step) {
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double max_r = -1.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        double r_ik = responsibilities_[i * num_experts_ + k];
+        if (r_ik > max_r) {
+          max_r = r_ik;
+          best_expert[i] = k;
+        }
+      }
+    }
+  }
+
   // Train each expert with responsibility-weighted gradients
   // computed from the expert's OWN prediction (not mixture yhat)
   for (int k = 0; k < num_experts_; ++k) {
@@ -1622,18 +1641,67 @@ void MixtureGBDT::MStepExperts() {
 
       #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
       for (data_size_t i = 0; i < num_data_; ++i) {
-        double r_ik = responsibilities_[i * num_experts_ + k];
-        grad_k[i] = static_cast<score_t>(r_ik * temp_grad[i]);
-        hess_k[i] = static_cast<score_t>(r_ik * temp_hess[i]);
+        if (hard_m_step) {
+          // Hard assignment: only the best expert gets gradient
+          if (best_expert[i] == k) {
+            grad_k[i] = temp_grad[i];
+            hess_k[i] = temp_hess[i];
+          } else {
+            grad_k[i] = 0.0;
+            hess_k[i] = static_cast<score_t>(kMixtureEpsilon);
+          }
+        } else {
+          // Soft assignment: responsibility-weighted gradient
+          double r_ik = responsibilities_[i * num_experts_ + k];
+          grad_k[i] = static_cast<score_t>(r_ik * temp_grad[i]);
+          hess_k[i] = static_cast<score_t>(r_ik * temp_hess[i]);
+        }
+
+        // Diversity regularization: push expert predictions apart
+        if (diversity_lambda > 0.0) {
+          double div_grad = 0.0;
+          for (int j = 0; j < num_experts_; ++j) {
+            if (j == k) continue;
+            double r_ij = responsibilities_[i * num_experts_ + j];
+            double f_k = expert_k_pred[i];
+            double f_j = expert_pred_[j * num_data_ + i];
+            div_grad += r_ij * (f_k - f_j);
+          }
+          grad_k[i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
+        }
       }
     } else {
       // Default to MSE: d/df (y - f)^2 = 2*(f - y)
       #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
       for (data_size_t i = 0; i < num_data_; ++i) {
-        double r_ik = responsibilities_[i * num_experts_ + k];
         double diff = expert_k_pred[i] - labels[i];
-        grad_k[i] = static_cast<score_t>(r_ik * 2.0 * diff);
-        hess_k[i] = static_cast<score_t>(r_ik * 2.0);
+
+        if (hard_m_step) {
+          if (best_expert[i] == k) {
+            grad_k[i] = static_cast<score_t>(2.0 * diff);
+            hess_k[i] = static_cast<score_t>(2.0);
+          } else {
+            grad_k[i] = 0.0;
+            hess_k[i] = static_cast<score_t>(kMixtureEpsilon);
+          }
+        } else {
+          double r_ik = responsibilities_[i * num_experts_ + k];
+          grad_k[i] = static_cast<score_t>(r_ik * 2.0 * diff);
+          hess_k[i] = static_cast<score_t>(r_ik * 2.0);
+        }
+
+        // Diversity regularization
+        if (diversity_lambda > 0.0) {
+          double div_grad = 0.0;
+          for (int j = 0; j < num_experts_; ++j) {
+            if (j == k) continue;
+            double r_ij = responsibilities_[i * num_experts_ + j];
+            double f_k = expert_k_pred[i];
+            double f_j = expert_pred_[j * num_data_ + i];
+            div_grad += r_ij * (f_k - f_j);
+          }
+          grad_k[i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
+        }
       }
     }
 
