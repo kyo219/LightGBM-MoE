@@ -217,9 +217,9 @@ An alternative routing strategy where **each expert selects its top samples** in
 
 | Parameter | Type | Default | Range | Description |
 |-----------|------|---------|-------|-------------|
-| `mixture_routing_mode` | string | `"expert_choice"` | `"token_choice"`, `"expert_choice"` | Routing strategy. `"token_choice"`: each sample selects experts (standard EM). `"expert_choice"`: each expert selects samples (recommended, prevents Expert Collapse). |
+| `mixture_routing_mode` | string | `"token_choice"` | `"token_choice"`, `"expert_choice"` | Routing strategy. `"token_choice"`: each sample selects experts (default, standard EM). `"expert_choice"`: each expert selects samples (better load balance, experimental). |
 | `mixture_expert_capacity_factor` | float | 1.0 | 0.0-3.0 | Capacity multiplier. Each expert selects `(N/K) × factor` samples. 1.0 = exact balanced capacity, >1.0 allows overlap. |
-| `mixture_expert_choice_score` | string | `"gate"` | `"gate"`, `"loss"`, `"combined"` | Score function for sample selection. `"gate"`: use gate probability (recommended). `"loss"`: use negative loss. `"combined"`: gate + alpha × (-loss). |
+| `mixture_expert_choice_score` | string | `"combined"` | `"gate"`, `"loss"`, `"combined"` | Score function for sample selection. `"gate"`: use gate probability. `"loss"`: use negative loss. `"combined"`: gate + alpha × (-loss) (default). |
 | `mixture_expert_choice_boost` | float | 10.0 | 1.0-100.0 | Multiplier for responsibility of selected samples. Higher = sharper distinction between selected/non-selected. |
 | `mixture_expert_choice_hard` | bool | `false` | `true`, `false` | Hard routing: non-selected samples get zero weight. Forces stronger specialization but may reduce gradient signal. |
 

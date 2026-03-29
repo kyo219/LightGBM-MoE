@@ -1322,9 +1322,8 @@ void MixtureGBDT::ComputeAffinityScores() {
         score -= alpha * loss;
       }
 
-      // Add expert bias for Loss-Free Load Balancing (DeepSeek method)
-      // This encourages balanced expert selection without auxiliary loss
-      score += expert_bias_[k];
+      // Note: expert_bias_ is already applied in Forward() via gate softmax.
+      // Do NOT add it here to avoid double application.
 
       affinity_scores_[i * num_experts_ + k] = score;
     }
@@ -1502,20 +1501,20 @@ void MixtureGBDT::SmoothResponsibilities() {
 }
 
 void MixtureGBDT::UpdateExpertBias() {
-  // Loss-Free Load Balancing (DeepSeek method)
+  // Loss-Free Load Balancing: adjust expert bias when usage falls below threshold
   // Reference: "Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts" (2024)
   //
-  // Key idea: Adjust expert bias BIDIRECTIONALLY to achieve balanced load.
-  // - Underloaded experts: increase bias (make more attractive)
-  // - Overloaded experts: decrease bias (make less attractive)
+  // Modified for regime-switching: only intervene when an expert's usage
+  // falls below the minimum threshold, allowing natural imbalanced distributions.
+  // This is critical for regime-switching data where regimes may be genuinely
+  // imbalanced (e.g., 70:30). Bidirectional balancing would fight against
+  // the correct solution.
   //
-  // The bias affects only expert SELECTION, not the gate weights used for
-  // combining expert outputs. This prevents gradient interference.
+  // min_usage = 1 / (balance_factor * K)
+  // e.g., factor=10, K=2 -> min_usage = 5%, allows 95:5 imbalance
 
-  const double target_load = 1.0 / num_experts_;  // Uniform distribution target
-  // DeepSeek recommends γ=0.001 for LLMs with many tokens
-  // For GBDT with fewer samples, we need larger γ for faster convergence
-  const double gamma = 0.1;
+  const double min_usage = 1.0 / (config_->mixture_balance_factor * num_experts_);
+  const double bias_update_rate = 0.1;
 
   // Compute actual load per expert (mean responsibility)
   std::vector<double> actual_load(num_experts_, 0.0);
@@ -1528,12 +1527,15 @@ void MixtureGBDT::UpdateExpertBias() {
     actual_load[k] /= num_data_;  // Normalize to [0, 1]
   }
 
-  // Update bias BIDIRECTIONALLY (DeepSeek method)
-  // - If actual_load < target: load_diff > 0, bias increases (more attractive)
-  // - If actual_load > target: load_diff < 0, bias decreases (less attractive)
+  // Update bias: only increase for underloaded experts (below threshold)
+  // Do NOT decrease for overloaded - allow natural imbalance
   for (int k = 0; k < num_experts_; ++k) {
-    double load_diff = target_load - actual_load[k];
-    expert_bias_[k] += gamma * load_diff;
+    if (actual_load[k] < min_usage) {
+      double load_diff = min_usage - actual_load[k];
+      expert_bias_[k] += bias_update_rate * load_diff;
+    }
+    // Note: We don't decrease bias for overloaded experts
+    // This allows natural regime imbalance (e.g., 70:30)
   }
 
   // Log for debugging (only occasionally to avoid spam)
@@ -1817,33 +1819,25 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   Forward();
 
   // E-step: update responsibilities
+  // Skip E-step for first few iterations to allow experts to differentiate
+  // with the initial responsibilities. Without this, all experts start with
+  // prediction=0, causing EStep to compute uniform responsibilities and
+  // all experts train identically.
   const int warmup_iters = config_->mixture_warmup_iters;
 
-  if (use_expert_choice_) {
-    // Expert Choice: always run EStep
-    // During warmup: high noise for random-ish differentiation
-    // After warmup: low noise, affinity-based selection
-    EStepExpertChoice();
-
-    if (iter_ >= warmup_iters) {
-      SmoothResponsibilities();
-      UpdateExpertBias();
-    }
-  } else {
-    // Token Choice (EM-based)
-    // When auxiliary load balancing is enabled (lb_alpha > 0), run EStep during warmup
-    // to maintain diversity from the start. Otherwise, skip EStep during warmup.
-    const bool use_aux_lb = config_->mixture_load_balance_alpha > 0.0;
-
-    if (iter_ >= warmup_iters || use_aux_lb) {
+  if (iter_ >= warmup_iters) {
+    if (use_expert_choice_) {
+      EStepExpertChoice();
+    } else {
       EStep();
-      UpdateExpertLoad();  // Update load for auxiliary loss (used in next iteration)
-
-      if (iter_ >= warmup_iters) {
-        SmoothResponsibilities();
-        UpdateExpertBias();
-      }
+      UpdateExpertLoad();
     }
+
+    // Apply time-series smoothing if enabled
+    SmoothResponsibilities();
+
+    // Update expert bias for loss-free load balancing
+    UpdateExpertBias();
   }
 
   // M-step: update experts
