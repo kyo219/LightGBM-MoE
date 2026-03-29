@@ -292,10 +292,13 @@ def generate_synthetic_data(n_samples: int = 2000, noise_level: float = 0.5, see
 def generate_hamilton_gnp_data(n_samples: int = 500, seed: int = 42):
     """
     Hamilton GNP-like regime-switching data (latent regime).
+
+    Time-series features (lag, moving average, volatility) are added
+    to make the latent regime partially observable from past y values.
     """
     np.random.seed(seed)
-    n_features = 4
-    X = np.random.randn(n_samples, n_features)
+    n_base_features = 4
+    X_base = np.random.randn(n_samples, n_base_features)
 
     t = np.arange(n_samples)
     regime_prob = 0.5 + 0.3 * np.sin(2 * np.pi * t / 100)
@@ -304,12 +307,50 @@ def generate_hamilton_gnp_data(n_samples: int = 500, seed: int = 42):
     y = np.zeros(n_samples)
 
     mask0 = regime_true == 0
-    y[mask0] = 0.8 + 0.3 * X[mask0, 0] + 0.2 * X[mask0, 1]
+    y[mask0] = 0.8 + 0.3 * X_base[mask0, 0] + 0.2 * X_base[mask0, 1]
 
     mask1 = regime_true == 1
-    y[mask1] = -0.5 + 0.1 * X[mask1, 0] - 0.3 * X[mask1, 2]
+    y[mask1] = -0.5 + 0.1 * X_base[mask1, 0] - 0.3 * X_base[mask1, 2]
 
     y += np.random.randn(n_samples) * 0.3
+
+    # Add time-series features derived from y
+    # Focus on regime-indicative statistics (level, volatility),
+    # NOT raw lags (which would leak y directly for autoregression)
+    ts_features = []
+
+    # Moving averages — captures regime level (regime 0: y≈0.8, regime 1: y≈-0.5)
+    for window in [5, 10, 20]:
+        ma = np.zeros(n_samples)
+        for i in range(1, n_samples):
+            start = max(0, i - window)
+            ma[i] = np.mean(y[start:i])
+        ts_features.append(ma)
+
+    # Rolling volatility — regime transitions cause variance spikes
+    for window in [5, 10]:
+        vol = np.zeros(n_samples)
+        for i in range(2, n_samples):
+            start = max(0, i - window)
+            vol[i] = np.std(y[start:i])
+        ts_features.append(vol)
+
+    # MA difference (short - long) — detects regime transitions
+    ma5 = ts_features[0]   # MA(5)
+    ma20 = ts_features[2]  # MA(20)
+    ts_features.append(ma5 - ma20)
+
+    # Sign of MA — directly indicates regime (positive = regime 0, negative = regime 1)
+    ts_features.append(np.sign(ma5))
+
+    # Rolling fraction of positive y — proxy for regime proportion
+    frac_pos = np.zeros(n_samples)
+    for i in range(1, n_samples):
+        start = max(0, i - 10)
+        frac_pos[i] = np.mean(y[start:i] > 0)
+    ts_features.append(frac_pos)
+
+    X = np.column_stack([X_base] + ts_features)
 
     return X, y, regime_true
 
