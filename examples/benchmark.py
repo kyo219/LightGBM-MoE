@@ -505,6 +505,8 @@ def create_objective_moe(
             "mixture_r_smoothing": smoothing,
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
             "mixture_routing_mode": routing_mode,
+            # Diversity regularization to ensure expert differentiation
+            "mixture_diversity_lambda": trial.suggest_float("mixture_diversity_lambda", 0.0, 0.5),
             # Gate parameters (often overlooked but important for routing quality)
             "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
             "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
@@ -514,7 +516,7 @@ def create_objective_moe(
         # Expert Choice specific parameters
         if routing_mode == "expert_choice":
             params["mixture_expert_capacity_factor"] = trial.suggest_float("mixture_expert_capacity_factor", 0.8, 1.5)
-            params["mixture_expert_choice_score"] = "gate"  # Fixed: only "gate" prevents collapse
+            params["mixture_expert_choice_score"] = "combined"
             params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
             params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
 
@@ -589,14 +591,13 @@ def create_objective_moe_expert_choice(
             "mixture_r_smoothing": "none",
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
             # Expert Choice Routing parameters
-            # NOTE: score_type MUST be "gate" to prevent Expert Collapse in GBDT.
-            # Using "loss" or "combined" causes feedback loop: similar experts → similar loss
-            # → similar selection → similar gradients → collapse.
             "mixture_routing_mode": "expert_choice",
             "mixture_expert_capacity_factor": trial.suggest_float("mixture_expert_capacity_factor", 0.8, 1.5),
-            "mixture_expert_choice_score": "gate",  # Fixed: only "gate" prevents collapse
+            "mixture_expert_choice_score": "combined",
             "mixture_expert_choice_boost": trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0),
             "mixture_expert_choice_hard": trial.suggest_categorical("mixture_expert_choice_hard", [True, False]),
+            # Diversity regularization to ensure expert differentiation
+            "mixture_diversity_lambda": trial.suggest_float("mixture_diversity_lambda", 0.0, 0.5),
             # Gate parameters (often overlooked but important for routing quality)
             "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
             "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
