@@ -414,89 +414,111 @@ Available initialization modes (`mixture_init` parameter):
 | `gmm` | Gaussian Mixture Model soft clustering (aligns with EM theory) |
 | `tree_hierarchical` | Deep tree → leaf clustering → hierarchical merge into K groups |
 
-#### Optuna Optimization Examples
+#### Recommended Settings & Optuna Search Ranges
 
-**Standard MoE** (shared hyperparameters across experts):
+The following configuration is based on extensive benchmarking (500+ trials). These settings ensure experts properly differentiate (switching model) while maximizing prediction accuracy.
+
+**Recommended fixed settings:**
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `mixture_hard_m_step` | `true` (default) | Prevents Expert Collapse by ensuring each sample's gradient goes to only one expert |
+| `mixture_r_smoothing` | Search `none`/`ema`/`markov` | `none` for i.i.d. data; `ema`/`markov` can help time-series |
+
+**Recommended Optuna search example:**
 
 ```python
 import optuna
 import lightgbm_moe as lgb
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error
+import numpy as np
 
 def objective(trial):
+    num_experts = trial.suggest_int('mixture_num_experts', 2, 4)
+    routing_mode = trial.suggest_categorical('mixture_routing_mode', ['token_choice', 'expert_choice'])
+    smoothing = trial.suggest_categorical('mixture_r_smoothing', ['none', 'ema', 'markov'])
+
     params = {
         'boosting': 'mixture',
         'objective': 'regression',
         'verbose': -1,
-        # Tree structure (shared by all experts)
+        # Tree structure
         'num_leaves': trial.suggest_int('num_leaves', 8, 128),
         'max_depth': trial.suggest_int('max_depth', 3, 12),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        # MoE specific
-        'mixture_num_experts': trial.suggest_int('mixture_num_experts', 2, 4),
-        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
-        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
-        'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
-        # Smoothing (optional, for time-series)
-        'mixture_r_smoothing': trial.suggest_categorical(
-            'mixture_r_smoothing', ['none', 'ema', 'markov']
-        ),
-    }
-    if params['mixture_r_smoothing'] != 'none':
-        params['mixture_smoothing_lambda'] = trial.suggest_float(
-            'mixture_smoothing_lambda', 0.1, 0.9
-        )
-
-    # Train and evaluate
-    train_data = lgb.Dataset(X_train, label=y_train)
-    model = lgb.train(params, train_data, num_boost_round=100)
-    pred = model.predict(X_val)
-    return mean_squared_error(y_val, pred)
-
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=100)
-```
-
-**Per-Expert MoE** (different tree structure per expert):
-
-```python
-def objective_per_expert(trial):
-    num_experts = trial.suggest_int('mixture_num_experts', 2, 4)
-
-    # Per-expert tree structure
-    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 12) for k in range(num_experts)]
-    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 128) for k in range(num_experts)]
-    min_data = [trial.suggest_int(f'min_data_{k}', 5, 100) for k in range(num_experts)]
-
-    params = {
-        'boosting': 'mixture',
-        'objective': 'regression',
-        'verbose': -1,
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        # MoE specific
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 10.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 10.0, log=True),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.5, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
+        'bagging_freq': trial.suggest_int('bagging_freq', 0, 7),
+        # MoE core
         'mixture_num_experts': num_experts,
-        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
-        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 3.0),
+        'mixture_e_step_mode': trial.suggest_categorical('mixture_e_step_mode', ['em', 'loss_only']),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 50),
         'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
-        # Per-expert structure (comma-separated)
-        'mixture_expert_max_depths': ','.join(map(str, max_depths)),
-        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),
-        'mixture_expert_min_data_in_leaf': ','.join(map(str, min_data)),
+        'mixture_routing_mode': routing_mode,
+        'mixture_r_smoothing': smoothing,
+        'mixture_smoothing_lambda': trial.suggest_float('mixture_smoothing_lambda', 0.0, 0.9) if smoothing != 'none' else 0.0,
+        # Diversity regularization (key for expert differentiation)
+        'mixture_diversity_lambda': trial.suggest_float('mixture_diversity_lambda', 0.0, 0.5),
+        # Gate parameters (wider range for stronger regime detection)
+        'mixture_gate_max_depth': trial.suggest_int('mixture_gate_max_depth', 2, 10),
+        'mixture_gate_num_leaves': trial.suggest_int('mixture_gate_num_leaves', 4, 64),
+        'mixture_gate_learning_rate': trial.suggest_float('mixture_gate_learning_rate', 0.01, 0.5, log=True),
+        'mixture_gate_lambda_l2': trial.suggest_float('mixture_gate_lambda_l2', 1e-3, 10.0, log=True),
+        'mixture_gate_iters_per_round': trial.suggest_int('mixture_gate_iters_per_round', 1, 3),
     }
 
-    # Train and evaluate
-    train_data = lgb.Dataset(X_train, label=y_train)
-    model = lgb.train(params, train_data, num_boost_round=100)
-    pred = model.predict(X_val)
-    return mean_squared_error(y_val, pred)
+    # Expert Choice specific parameters
+    if routing_mode == 'expert_choice':
+        params['mixture_expert_capacity_factor'] = trial.suggest_float('mixture_expert_capacity_factor', 0.8, 1.5)
+        params['mixture_expert_choice_boost'] = trial.suggest_float('mixture_expert_choice_boost', 5.0, 30.0)
+        params['mixture_expert_choice_hard'] = trial.suggest_categorical('mixture_expert_choice_hard', [True, False])
 
-# Note: Per-expert adds K×3 more hyperparameters, so needs more trials (e.g., 200+)
+    # Train with early stopping
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+    model = lgb.train(
+        params, train_data, num_boost_round=500,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+    )
+    pred = model.predict(X_valid)
+    return mean_squared_error(y_valid, pred, squared=False)
+
 study = optuna.create_study(direction='minimize')
-study.optimize(objective_per_expert, n_trials=200)
+study.optimize(objective, n_trials=500)  # 500+ trials recommended
 ```
 
-**Tip**: Start with standard MoE. Per-expert requires more trials to converge due to larger search space.
+**Search range summary:**
+
+| Category | Parameter | Range | Notes |
+|----------|-----------|-------|-------|
+| **Expert** | `num_leaves` | 8-128 | |
+| | `max_depth` | 3-12 | |
+| | `min_data_in_leaf` | 5-100 | |
+| | `learning_rate` | 0.01-0.3 | log scale |
+| **MoE Core** | `mixture_num_experts` | 2-4 | Start with 2 |
+| | `mixture_e_step_alpha` | 0.1-3.0 | Higher = more weight on expert fit |
+| | `mixture_e_step_mode` | `em`, `loss_only` | `loss_only` can help latent regimes |
+| | `mixture_warmup_iters` | 5-50 | |
+| | `mixture_diversity_lambda` | 0.0-0.5 | **Key for expert differentiation** |
+| | `mixture_routing_mode` | `token_choice`, `expert_choice` | |
+| **Gate** | `mixture_gate_max_depth` | 2-10 | Wider than expert for regime detection |
+| | `mixture_gate_num_leaves` | 4-64 | |
+| | `mixture_gate_learning_rate` | 0.01-0.5 | log scale |
+| | `mixture_gate_lambda_l2` | 0.001-10.0 | log scale |
+| | `mixture_gate_iters_per_round` | 1-3 | Multiple gate updates per round |
+| **Smoothing** | `mixture_r_smoothing` | `none`, `ema`, `markov` | For time-series |
+| | `mixture_smoothing_lambda` | 0.0-0.9 | Only when smoothing != `none` |
+
+**Tips for time-series / latent regime data:**
+- Add time-series features (moving averages, rolling volatility, MA crossover) to make latent regimes observable
+- Search `mixture_r_smoothing` including `ema`/`markov` for temporal regime persistence
+- Use `mixture_e_step_mode='loss_only'` when Gate cannot determine regime from features alone
 
 #### Optuna Search Parameters Reference
 
@@ -1670,89 +1692,110 @@ expert_configs_[k]->seed = config_->seed + k + 1;  // Expertごとに異なるse
 | `gmm` | ガウス混合モデルによるソフトクラスタリング（EM理論と整合） |
 | `tree_hierarchical` | 深い決定木 → 葉クラスタリング → 階層的にK群へマージ |
 
-#### Optuna最適化の例
+#### 推奨設定 & Optuna探索範囲
 
-**標準MoE**（全Expertで共通のハイパーパラメータ）：
+以下の設定は500+ trialsのベンチマークに基づく推奨です。Expertが適切に分化（switching model として機能）しつつ、予測精度を最大化します。
+
+**推奨の固定設定:**
+
+| パラメータ | 値 | 根拠 |
+|-----------|-----|------|
+| `mixture_hard_m_step` | `true`（デフォルト） | 各サンプルの勾配を1つのExpertのみに渡し、Expert Collapseを防止 |
+| `mixture_r_smoothing` | `none`/`ema`/`markov`を探索 | i.i.d.データなら`none`、時系列なら`ema`/`markov`が有効 |
+
+**推奨のOptuna探索コード:**
 
 ```python
 import optuna
 import lightgbm_moe as lgb
 from sklearn.metrics import mean_squared_error
+import numpy as np
 
 def objective(trial):
+    num_experts = trial.suggest_int('mixture_num_experts', 2, 4)
+    routing_mode = trial.suggest_categorical('mixture_routing_mode', ['token_choice', 'expert_choice'])
+    smoothing = trial.suggest_categorical('mixture_r_smoothing', ['none', 'ema', 'markov'])
+
     params = {
         'boosting': 'mixture',
         'objective': 'regression',
         'verbose': -1,
-        # 木構造（全Expertで共通）
+        # 木構造
         'num_leaves': trial.suggest_int('num_leaves', 8, 128),
         'max_depth': trial.suggest_int('max_depth', 3, 12),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        # MoE固有
-        'mixture_num_experts': trial.suggest_int('mixture_num_experts', 2, 4),
-        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
-        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
-        'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
-        # 平滑化（オプション、時系列向け）
-        'mixture_r_smoothing': trial.suggest_categorical(
-            'mixture_r_smoothing', ['none', 'ema', 'markov']
-        ),
-    }
-    if params['mixture_r_smoothing'] != 'none':
-        params['mixture_smoothing_lambda'] = trial.suggest_float(
-            'mixture_smoothing_lambda', 0.1, 0.9
-        )
-
-    # 学習と評価
-    train_data = lgb.Dataset(X_train, label=y_train)
-    model = lgb.train(params, train_data, num_boost_round=100)
-    pred = model.predict(X_val)
-    return mean_squared_error(y_val, pred)
-
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=100)
-```
-
-**Per-Expert MoE**（Expertごとに異なる木構造）：
-
-```python
-def objective_per_expert(trial):
-    num_experts = trial.suggest_int('mixture_num_experts', 2, 4)
-
-    # Expertごとの木構造
-    max_depths = [trial.suggest_int(f'max_depth_{k}', 3, 12) for k in range(num_experts)]
-    num_leaves = [trial.suggest_int(f'num_leaves_{k}', 8, 128) for k in range(num_experts)]
-    min_data = [trial.suggest_int(f'min_data_{k}', 5, 100) for k in range(num_experts)]
-
-    params = {
-        'boosting': 'mixture',
-        'objective': 'regression',
-        'verbose': -1,
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        # MoE固有
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 10.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 10.0, log=True),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.5, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
+        'bagging_freq': trial.suggest_int('bagging_freq', 0, 7),
+        # MoEコア
         'mixture_num_experts': num_experts,
-        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 2.0),
-        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 30),
+        'mixture_e_step_alpha': trial.suggest_float('mixture_e_step_alpha', 0.1, 3.0),
+        'mixture_e_step_mode': trial.suggest_categorical('mixture_e_step_mode', ['em', 'loss_only']),
+        'mixture_warmup_iters': trial.suggest_int('mixture_warmup_iters', 5, 50),
         'mixture_balance_factor': trial.suggest_int('mixture_balance_factor', 2, 10),
-        # Expertごとの構造（カンマ区切り）
-        'mixture_expert_max_depths': ','.join(map(str, max_depths)),
-        'mixture_expert_num_leaves': ','.join(map(str, num_leaves)),
-        'mixture_expert_min_data_in_leaf': ','.join(map(str, min_data)),
+        'mixture_routing_mode': routing_mode,
+        'mixture_r_smoothing': smoothing,
+        'mixture_smoothing_lambda': trial.suggest_float('mixture_smoothing_lambda', 0.0, 0.9) if smoothing != 'none' else 0.0,
+        # 多様性正則化（Expert分化に重要）
+        'mixture_diversity_lambda': trial.suggest_float('mixture_diversity_lambda', 0.0, 0.5),
+        # Gateパラメータ（レジーム検出に重要、広めの範囲で探索）
+        'mixture_gate_max_depth': trial.suggest_int('mixture_gate_max_depth', 2, 10),
+        'mixture_gate_num_leaves': trial.suggest_int('mixture_gate_num_leaves', 4, 64),
+        'mixture_gate_learning_rate': trial.suggest_float('mixture_gate_learning_rate', 0.01, 0.5, log=True),
+        'mixture_gate_lambda_l2': trial.suggest_float('mixture_gate_lambda_l2', 1e-3, 10.0, log=True),
+        'mixture_gate_iters_per_round': trial.suggest_int('mixture_gate_iters_per_round', 1, 3),
     }
 
-    # 学習と評価
-    train_data = lgb.Dataset(X_train, label=y_train)
-    model = lgb.train(params, train_data, num_boost_round=100)
-    pred = model.predict(X_val)
-    return mean_squared_error(y_val, pred)
+    # Expert Choice固有パラメータ
+    if routing_mode == 'expert_choice':
+        params['mixture_expert_capacity_factor'] = trial.suggest_float('mixture_expert_capacity_factor', 0.8, 1.5)
+        params['mixture_expert_choice_boost'] = trial.suggest_float('mixture_expert_choice_boost', 5.0, 30.0)
+        params['mixture_expert_choice_hard'] = trial.suggest_categorical('mixture_expert_choice_hard', [True, False])
 
-# 注意: Per-expertはK×3個のハイパラが追加されるため、より多くのtrial（200+）が必要
+    # Early Stoppingで学習
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+    model = lgb.train(
+        params, train_data, num_boost_round=500,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+    )
+    pred = model.predict(X_valid)
+    return mean_squared_error(y_valid, pred, squared=False)
+
 study = optuna.create_study(direction='minimize')
-study.optimize(objective_per_expert, n_trials=200)
+study.optimize(objective, n_trials=500)  # 500+トライアル推奨
 ```
 
-**Tip**: まず標準MoEを試す。Per-expertは探索空間が大きいため収束に多くのtrialが必要。
+**探索範囲一覧:**
+
+| カテゴリ | パラメータ | 範囲 | 備考 |
+|---------|-----------|------|------|
+| **Expert** | `num_leaves` | 8-128 | |
+| | `max_depth` | 3-12 | |
+| | `min_data_in_leaf` | 5-100 | |
+| | `learning_rate` | 0.01-0.3 | log scale |
+| **MoEコア** | `mixture_num_experts` | 2-4 | まず2から |
+| | `mixture_e_step_alpha` | 0.1-3.0 | 高い=Expert適合重視 |
+| | `mixture_e_step_mode` | `em`, `loss_only` | 潜在レジームでは`loss_only`が有効 |
+| | `mixture_warmup_iters` | 5-50 | |
+| | `mixture_diversity_lambda` | 0.0-0.5 | **Expert分化に重要** |
+| | `mixture_routing_mode` | `token_choice`, `expert_choice` | |
+| **Gate** | `mixture_gate_max_depth` | 2-10 | レジーム検出に広めの範囲 |
+| | `mixture_gate_num_leaves` | 4-64 | |
+| | `mixture_gate_learning_rate` | 0.01-0.5 | log scale |
+| | `mixture_gate_lambda_l2` | 0.001-10.0 | log scale |
+| | `mixture_gate_iters_per_round` | 1-3 | ラウンドあたり複数回Gate更新 |
+| **平滑化** | `mixture_r_smoothing` | `none`, `ema`, `markov` | 時系列向け |
+| | `mixture_smoothing_lambda` | 0.0-0.9 | smoothing != `none` の時のみ |
+
+**時系列・潜在レジームデータのTips:**
+- 時系列特徴量（移動平均、ボラティリティ、MAクロスオーバー）を追加して潜在レジームを間接的に観測可能にする
+- `mixture_r_smoothing` で `ema`/`markov` を探索（レジームの時間的持続性を活用）
+- Gateだけではレジームを特定できない場合、`mixture_e_step_mode='loss_only'` が有効
 
 #### 役割ベースPer-Expert（Optuna推奨）
 
