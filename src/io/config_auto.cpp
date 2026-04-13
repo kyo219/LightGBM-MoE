@@ -351,12 +351,19 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_expert_min_gain_to_split",
   "mixture_expert_extra_trees",
   "mixture_gate_entropy_lambda",
+  "mixture_hard_m_step",
+  "mixture_diversity_lambda",
   "mixture_expert_dropout_rate",
   "mixture_routing_mode",
   "mixture_expert_capacity_factor",
   "mixture_expert_choice_score",
   "mixture_expert_choice_boost",
   "mixture_expert_choice_hard",
+  "mixture_progressive_mode",
+  "mixture_seed_iterations",
+  "mixture_spawn_perturbation",
+  "mixture_gate_temperature_init",
+  "mixture_gate_temperature_final",
   });
   return params;
 }
@@ -775,6 +782,12 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   CHECK_GE(mixture_gate_entropy_lambda, 0.0);
   CHECK_LE(mixture_gate_entropy_lambda, 1.0);
 
+  GetBool(params, "mixture_hard_m_step", &mixture_hard_m_step);
+
+  GetDouble(params, "mixture_diversity_lambda", &mixture_diversity_lambda);
+  CHECK_GE(mixture_diversity_lambda, 0.0);
+  CHECK_LE(mixture_diversity_lambda, 1.0);
+
   GetDouble(params, "mixture_expert_dropout_rate", &mixture_expert_dropout_rate);
   CHECK_GE(mixture_expert_dropout_rate, 0.0);
   CHECK_LT(mixture_expert_dropout_rate, 1.0);
@@ -792,6 +805,21 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   CHECK_LE(mixture_expert_choice_boost, 100.0);
 
   GetBool(params, "mixture_expert_choice_hard", &mixture_expert_choice_hard);
+
+  GetString(params, "mixture_progressive_mode", &mixture_progressive_mode);
+
+  GetInt(params, "mixture_seed_iterations", &mixture_seed_iterations);
+  CHECK_GE(mixture_seed_iterations, 0);
+
+  GetDouble(params, "mixture_spawn_perturbation", &mixture_spawn_perturbation);
+  CHECK_GE(mixture_spawn_perturbation, 0.0);
+  CHECK_LE(mixture_spawn_perturbation, 1.0);
+
+  GetDouble(params, "mixture_gate_temperature_init", &mixture_gate_temperature_init);
+  CHECK_GT(mixture_gate_temperature_init, 0.0);
+
+  GetDouble(params, "mixture_gate_temperature_final", &mixture_gate_temperature_final);
+  CHECK_GT(mixture_gate_temperature_final, 0.0);
 }
 
 std::string Config::SaveMembersToString() const {
@@ -934,12 +962,19 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_expert_min_gain_to_split: " << Common::Join(mixture_expert_min_gain_to_split, ",") << "]\n";
   str_buf << "[mixture_expert_extra_trees: " << Common::Join(mixture_expert_extra_trees, ",") << "]\n";
   str_buf << "[mixture_gate_entropy_lambda: " << mixture_gate_entropy_lambda << "]\n";
+  str_buf << "[mixture_hard_m_step: " << mixture_hard_m_step << "]\n";
+  str_buf << "[mixture_diversity_lambda: " << mixture_diversity_lambda << "]\n";
   str_buf << "[mixture_expert_dropout_rate: " << mixture_expert_dropout_rate << "]\n";
   str_buf << "[mixture_routing_mode: " << mixture_routing_mode << "]\n";
   str_buf << "[mixture_expert_capacity_factor: " << mixture_expert_capacity_factor << "]\n";
   str_buf << "[mixture_expert_choice_score: " << mixture_expert_choice_score << "]\n";
   str_buf << "[mixture_expert_choice_boost: " << mixture_expert_choice_boost << "]\n";
   str_buf << "[mixture_expert_choice_hard: " << mixture_expert_choice_hard << "]\n";
+  str_buf << "[mixture_progressive_mode: " << mixture_progressive_mode << "]\n";
+  str_buf << "[mixture_seed_iterations: " << mixture_seed_iterations << "]\n";
+  str_buf << "[mixture_spawn_perturbation: " << mixture_spawn_perturbation << "]\n";
+  str_buf << "[mixture_gate_temperature_init: " << mixture_gate_temperature_init << "]\n";
+  str_buf << "[mixture_gate_temperature_final: " << mixture_gate_temperature_final << "]\n";
   return str_buf.str();
 }
 
@@ -1108,12 +1143,19 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_expert_min_gain_to_split", {}},
     {"mixture_expert_extra_trees", {}},
     {"mixture_gate_entropy_lambda", {}},
+    {"mixture_hard_m_step", {}},
+    {"mixture_diversity_lambda", {}},
     {"mixture_expert_dropout_rate", {}},
     {"mixture_routing_mode", {}},
     {"mixture_expert_capacity_factor", {}},
     {"mixture_expert_choice_score", {}},
     {"mixture_expert_choice_boost", {}},
     {"mixture_expert_choice_hard", {}},
+    {"mixture_progressive_mode", {}},
+    {"mixture_seed_iterations", {}},
+    {"mixture_spawn_perturbation", {}},
+    {"mixture_gate_temperature_init", {}},
+    {"mixture_gate_temperature_final", {}},
   });
   return map;
 }
@@ -1282,12 +1324,19 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_expert_min_gain_to_split", "vector<double>"},
     {"mixture_expert_extra_trees", "vector<int>"},
     {"mixture_gate_entropy_lambda", "double"},
+    {"mixture_hard_m_step", "bool"},
+    {"mixture_diversity_lambda", "double"},
     {"mixture_expert_dropout_rate", "double"},
     {"mixture_routing_mode", "string"},
     {"mixture_expert_capacity_factor", "double"},
     {"mixture_expert_choice_score", "string"},
     {"mixture_expert_choice_boost", "double"},
     {"mixture_expert_choice_hard", "bool"},
+    {"mixture_progressive_mode", "string"},
+    {"mixture_seed_iterations", "int"},
+    {"mixture_spawn_perturbation", "double"},
+    {"mixture_gate_temperature_init", "double"},
+    {"mixture_gate_temperature_final", "double"},
   });
   return map;
 }

@@ -324,6 +324,7 @@ class GBDTBase : public Boosting {
  public:
   virtual double GetLeafValue(int tree_idx, int leaf_idx) const = 0;
   virtual void SetLeafValue(int tree_idx, int leaf_idx, double val) = 0;
+  virtual int GetNumLeavesForTree(int tree_idx) const = 0;
 };
 
 }  // namespace LightGBM
