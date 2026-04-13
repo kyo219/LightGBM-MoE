@@ -359,6 +359,80 @@ class MixtureGBDT : public GBDTBase {
    */
   void SpawnExpertsFromSeed();
 
+  // ===== Sequential MoE =====
+
+  /*! \brief Phase tracking for sequential training */
+  enum class SeqPhase { EXPERT_TRAINING, GATE_TRAINING, DONE };
+
+  /*! \brief Whether sequential mode is enabled */
+  bool use_sequential_;
+
+  /*! \brief Current sequential phase */
+  SeqPhase seq_phase_;
+
+  /*! \brief Index of expert being trained (0-based) */
+  int seq_current_expert_;
+
+  /*! \brief How many experts actually created */
+  int seq_actual_num_experts_;
+
+  /*! \brief Hard sample indices for each expert (per-expert) */
+  std::vector<std::vector<data_size_t>> seq_hard_indices_;
+
+  /*! \brief Per-sample loss from current best expert ensemble */
+  std::vector<double> seq_sample_losses_;
+
+  /*! \brief Internal early stopping: best validation loss */
+  double seq_best_valid_loss_;
+
+  /*! \brief Internal early stopping: no-improvement count */
+  int seq_no_improve_count_;
+
+  /*! \brief Gate early stopping: best validation loss */
+  double seq_gate_best_valid_loss_;
+
+  /*! \brief Gate early stopping: no-improvement count */
+  int seq_gate_no_improve_count_;
+
+  /*! \brief Sequential mode: one iteration of training */
+  bool TrainOneIterSequential();
+
+  /*! \brief Train current expert for one boosting iteration */
+  void SeqTrainExpertOneIter();
+
+  /*! \brief Compute per-sample losses from a given expert */
+  void SeqComputeSampleLosses(int expert_idx);
+
+  /*! \brief Find hard samples based on losses */
+  void SeqFindHardSamples();
+
+  /*! \brief Validate whether expert k improves over expert k-1 on hard set */
+  bool SeqValidateExpert(int expert_idx);
+
+  /*! \brief Transition to training the next expert */
+  void SeqTransitionToNextExpert();
+
+  /*! \brief Transition to gate training phase */
+  void SeqTransitionToGatePhase();
+
+  /*! \brief Train gate for one boosting iteration */
+  void SeqTrainGateOneIter();
+
+  /*! \brief Compute gate gradients/hessians for sequential mode */
+  void SeqComputeGateLabels(std::vector<score_t>& gate_grad, std::vector<score_t>& gate_hess);
+
+  /*! \brief Update combined predictions using all experts + gate */
+  void SeqUpdateCombinedPredictions();
+
+  /*! \brief Check internal early stopping for current expert */
+  bool SeqCheckEarlyStopping();
+
+  /*! \brief Check gate early stopping */
+  bool SeqCheckGateEarlyStopping();
+
+  /*! \brief Compute Otsu threshold for bimodal loss distribution */
+  double OtsuThreshold(const std::vector<double>& values) const;
+
   /*!
    * \brief Compute current gate temperature based on MoE iteration progress
    * \param moe_iter Current iteration within MoE phase

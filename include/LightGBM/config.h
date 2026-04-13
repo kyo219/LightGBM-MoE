@@ -1396,6 +1396,48 @@ struct Config {
   // desc = recommended: 0.3-1.0 for exploitation in late training
   double mixture_gate_temperature_final = 1.0;
 
+  // --- Sequential MoE ---
+
+  // type = enum
+  // options = parallel, sequential
+  // desc = MoE training mode
+  // desc = ``parallel``: standard EM-based simultaneous training (existing behavior)
+  // desc = ``sequential``: train experts one at a time on progressively harder data
+  std::string mixture_training_mode = "parallel";
+
+  // type = enum
+  // options = percentile, otsu
+  // desc = how to select "hard" samples for next expert
+  // desc = ``percentile``: top N% by loss (N = mixture_seq_hard_percentile)
+  // desc = ``otsu``: automatic threshold via Otsu's method on loss distribution
+  std::string mixture_seq_hard_selection = "percentile";
+
+  // check = >0.0
+  // check = <1.0
+  // desc = fraction of samples considered "hard" (used when mixture_seq_hard_selection=percentile)
+  // desc = 0.3 means top 30% by loss are selected for next expert
+  double mixture_seq_hard_percentile = 0.3;
+
+  // check = >=0.0
+  // desc = minimum RMSE improvement ratio to justify adding a new expert
+  // desc = if new expert improves hard-set RMSE by less than this ratio, discard and stop
+  double mixture_seq_min_improvement = 0.01;
+
+  // check = >=2
+  // desc = maximum number of experts in sequential mode
+  int mixture_seq_max_experts = 5;
+
+  // check = >=1
+  // desc = early stopping patience for each expert's internal training
+  int mixture_seq_expert_patience = 20;
+
+  // type = enum
+  // options = hard, soft
+  // desc = gate training label type
+  // desc = ``hard``: argmin_k loss(expert_k, sample) as class label
+  // desc = ``soft``: loss-inverse softmax probabilities
+  std::string mixture_seq_gate_label = "hard";
+
   #ifndef __NVCC__
   #pragma endregion
 

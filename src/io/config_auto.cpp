@@ -364,6 +364,13 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_spawn_perturbation",
   "mixture_gate_temperature_init",
   "mixture_gate_temperature_final",
+  "mixture_training_mode",
+  "mixture_seq_hard_selection",
+  "mixture_seq_hard_percentile",
+  "mixture_seq_min_improvement",
+  "mixture_seq_max_experts",
+  "mixture_seq_expert_patience",
+  "mixture_seq_gate_label",
   });
   return params;
 }
@@ -820,6 +827,25 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
 
   GetDouble(params, "mixture_gate_temperature_final", &mixture_gate_temperature_final);
   CHECK_GT(mixture_gate_temperature_final, 0.0);
+
+  GetString(params, "mixture_training_mode", &mixture_training_mode);
+
+  GetString(params, "mixture_seq_hard_selection", &mixture_seq_hard_selection);
+
+  GetDouble(params, "mixture_seq_hard_percentile", &mixture_seq_hard_percentile);
+  CHECK_GT(mixture_seq_hard_percentile, 0.0);
+  CHECK_LT(mixture_seq_hard_percentile, 1.0);
+
+  GetDouble(params, "mixture_seq_min_improvement", &mixture_seq_min_improvement);
+  CHECK_GE(mixture_seq_min_improvement, 0.0);
+
+  GetInt(params, "mixture_seq_max_experts", &mixture_seq_max_experts);
+  CHECK_GE(mixture_seq_max_experts, 2);
+
+  GetInt(params, "mixture_seq_expert_patience", &mixture_seq_expert_patience);
+  CHECK_GE(mixture_seq_expert_patience, 1);
+
+  GetString(params, "mixture_seq_gate_label", &mixture_seq_gate_label);
 }
 
 std::string Config::SaveMembersToString() const {
@@ -975,6 +1001,13 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_spawn_perturbation: " << mixture_spawn_perturbation << "]\n";
   str_buf << "[mixture_gate_temperature_init: " << mixture_gate_temperature_init << "]\n";
   str_buf << "[mixture_gate_temperature_final: " << mixture_gate_temperature_final << "]\n";
+  str_buf << "[mixture_training_mode: " << mixture_training_mode << "]\n";
+  str_buf << "[mixture_seq_hard_selection: " << mixture_seq_hard_selection << "]\n";
+  str_buf << "[mixture_seq_hard_percentile: " << mixture_seq_hard_percentile << "]\n";
+  str_buf << "[mixture_seq_min_improvement: " << mixture_seq_min_improvement << "]\n";
+  str_buf << "[mixture_seq_max_experts: " << mixture_seq_max_experts << "]\n";
+  str_buf << "[mixture_seq_expert_patience: " << mixture_seq_expert_patience << "]\n";
+  str_buf << "[mixture_seq_gate_label: " << mixture_seq_gate_label << "]\n";
   return str_buf.str();
 }
 
@@ -1156,6 +1189,13 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_spawn_perturbation", {}},
     {"mixture_gate_temperature_init", {}},
     {"mixture_gate_temperature_final", {}},
+    {"mixture_training_mode", {}},
+    {"mixture_seq_hard_selection", {}},
+    {"mixture_seq_hard_percentile", {}},
+    {"mixture_seq_min_improvement", {}},
+    {"mixture_seq_max_experts", {}},
+    {"mixture_seq_expert_patience", {}},
+    {"mixture_seq_gate_label", {}},
   });
   return map;
 }
@@ -1337,6 +1377,13 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_spawn_perturbation", "double"},
     {"mixture_gate_temperature_init", "double"},
     {"mixture_gate_temperature_final", "double"},
+    {"mixture_training_mode", "string"},
+    {"mixture_seq_hard_selection", "string"},
+    {"mixture_seq_hard_percentile", "double"},
+    {"mixture_seq_min_improvement", "double"},
+    {"mixture_seq_max_experts", "int"},
+    {"mixture_seq_expert_patience", "int"},
+    {"mixture_seq_gate_label", "string"},
   });
   return map;
 }

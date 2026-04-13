@@ -40,6 +40,14 @@ MixtureGBDT::MixtureGBDT()
       label_idx_(0),
       use_markov_(false),
       use_momentum_(false),
+      use_sequential_(false),
+      seq_phase_(SeqPhase::EXPERT_TRAINING),
+      seq_current_expert_(0),
+      seq_actual_num_experts_(0),
+      seq_best_valid_loss_(std::numeric_limits<double>::max()),
+      seq_no_improve_count_(0),
+      seq_gate_best_valid_loss_(std::numeric_limits<double>::max()),
+      seq_gate_no_improve_count_(0),
       use_progressive_(false),
       seed_iterations_(0),
       seed_phase_complete_(false),
@@ -86,8 +94,17 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
     e_step_loss_type_ = config_->mixture_e_step_loss;
   }
 
-  Log::Info("MixtureGBDT: Initializing with %d experts, E-step loss type: %s",
-            num_experts_, e_step_loss_type_.c_str());
+  // Detect sequential mode
+  use_sequential_ = (config_->mixture_training_mode == "sequential");
+
+  if (use_sequential_) {
+    num_experts_ = config_->mixture_seq_max_experts;
+    Log::Info("MixtureGBDT: Sequential mode enabled, max_experts=%d, E-step loss type: %s",
+              num_experts_, e_step_loss_type_.c_str());
+  } else {
+    Log::Info("MixtureGBDT: Initializing with %d experts, E-step loss type: %s",
+              num_experts_, e_step_loss_type_.c_str());
+  }
 
   // Create expert config (same as original but for regression)
   expert_config_ = std::unique_ptr<Config>(new Config(*config));
@@ -151,7 +168,37 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
                num_experts_, static_cast<int>(config_->mixture_expert_extra_trees.size()));
   }
 
-  if (use_progressive_) {
+  if (use_sequential_) {
+    // Sequential mode: create only Expert 0 on full data
+    Log::Info("MixtureGBDT: Sequential mode, creating Expert 0 on full data");
+    seq_phase_ = SeqPhase::EXPERT_TRAINING;
+    seq_current_expert_ = 0;
+    seq_actual_num_experts_ = 1;
+    seq_best_valid_loss_ = std::numeric_limits<double>::max();
+    seq_no_improve_count_ = 0;
+    seq_gate_best_valid_loss_ = std::numeric_limits<double>::max();
+    seq_gate_no_improve_count_ = 0;
+
+    // Create expert configs for all possible experts
+    expert_configs_.clear();
+    expert_configs_.reserve(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_configs_.emplace_back(new Config(*expert_config_));
+      expert_configs_[k]->seed = config_->seed + k + 1;
+    }
+
+    // Create only Expert 0
+    experts_.clear();
+    experts_.reserve(num_experts_);
+    experts_.emplace_back(new GBDT());
+    experts_[0]->Init(expert_configs_[0].get(), train_data_, nullptr, {});
+
+    // Allocate loss buffer
+    seq_sample_losses_.resize(num_data_, 0.0);
+
+    // Don't create gate yet (created in gate phase)
+    // gate_ will remain nullptr until SeqTransitionToGatePhase
+  } else if (use_progressive_) {
     // EvoMoE progressive mode: create only a single seed expert
     Log::Info("MixtureGBDT: Progressive mode (EvoMoE) enabled, "
               "seed_iterations=%d, perturbation=%.2f",
@@ -227,20 +274,22 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   use_markov_ = (config_->mixture_r_smoothing == "markov");
   use_momentum_ = (config_->mixture_r_smoothing == "momentum");
 
-  // Initialize gate
-  Log::Debug("MixtureGBDT::Init - creating gate");
-  gate_.reset(new GBDT());
-  Log::Debug("MixtureGBDT::Init - initializing gate");
+  // Initialize gate (skip for sequential mode - gate created later)
+  if (!use_sequential_) {
+    Log::Debug("MixtureGBDT::Init - creating gate");
+    gate_.reset(new GBDT());
+    Log::Debug("MixtureGBDT::Init - initializing gate");
 
-  if (use_markov_) {
-    Log::Info("MixtureGBDT: Markov mode enabled (lambda=%.2f)",
-              config_->mixture_smoothing_lambda);
-  } else if (use_momentum_) {
-    Log::Info("MixtureGBDT: Momentum mode enabled (lambda=%.2f)",
-              config_->mixture_smoothing_lambda);
+    if (use_markov_) {
+      Log::Info("MixtureGBDT: Markov mode enabled (lambda=%.2f)",
+                config_->mixture_smoothing_lambda);
+    } else if (use_momentum_) {
+      Log::Info("MixtureGBDT: Momentum mode enabled (lambda=%.2f)",
+                config_->mixture_smoothing_lambda);
+    }
+    gate_->Init(gate_config_.get(), train_data_, nullptr, {});
+    Log::Debug("MixtureGBDT::Init - gate initialized");
   }
-  gate_->Init(gate_config_.get(), train_data_, nullptr, {});
-  Log::Debug("MixtureGBDT::Init - gate initialized");
 
   // Allocate buffers
   size_t nk = static_cast<size_t>(num_data_) * num_experts_;
@@ -305,8 +354,8 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   early_stopping_min_delta_ = config_->early_stopping_min_delta;
   es_first_metric_only_ = config_->first_metric_only;
 
-  // Initialize responsibilities (skip during progressive seed phase)
-  if (!use_progressive_) {
+  // Initialize responsibilities (skip during progressive seed phase and sequential mode)
+  if (!use_progressive_ && !use_sequential_) {
     InitResponsibilities();
   }
 
@@ -1934,6 +1983,11 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   (void)gradients;
   (void)hessians;
 
+  // === SEQUENTIAL MODE ===
+  if (use_sequential_) {
+    return TrainOneIterSequential();
+  }
+
   // === SEED PHASE (progressive mode) ===
   if (use_progressive_ && !seed_phase_complete_) {
     if (iter_ < seed_iterations_) {
@@ -2083,14 +2137,22 @@ int MixtureGBDT::GetCurrentIteration() const {
 
 void MixtureGBDT::RollbackOneIter() {
   if (iter_ > 0) {
-    if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
+    if (use_sequential_) {
+      if (seq_phase_ == SeqPhase::EXPERT_TRAINING) {
+        experts_[seq_current_expert_]->RollbackOneIter();
+      } else if (seq_phase_ == SeqPhase::GATE_TRAINING && gate_) {
+        gate_->RollbackOneIter();
+      }
+    } else if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
       // During seed phase, rollback the seed expert
       seed_expert_->RollbackOneIter();
     } else {
       for (int k = 0; k < num_experts_; ++k) {
         experts_[k]->RollbackOneIter();
       }
-      gate_->RollbackOneIter();
+      if (gate_) {
+        gate_->RollbackOneIter();
+      }
     }
     --iter_;
   }
@@ -2253,6 +2315,25 @@ void MixtureGBDT::Predict(const double* features, double* output,
       "none", PredictionEarlyStopConfig());
   const PredictionEarlyStopInstance* early_stop_ptr = earlyStop ? earlyStop : &no_early_stop;
 
+  int n_available = static_cast<int>(experts_.size());
+
+  // If gate doesn't exist yet (sequential mode expert training phase),
+  // use first expert or uniform weighting
+  if (!gate_) {
+    if (n_available == 1) {
+      experts_[0]->Predict(features, output, early_stop_ptr);
+    } else {
+      double sum = 0.0;
+      for (int k = 0; k < n_available; ++k) {
+        double pred;
+        experts_[k]->Predict(features, &pred, early_stop_ptr);
+        sum += pred;
+      }
+      *output = sum / n_available;
+    }
+    return;
+  }
+
   // Get expert predictions
   std::vector<double> expert_preds(num_experts_);
   for (int k = 0; k < num_experts_; ++k) {
@@ -2286,6 +2367,23 @@ void MixtureGBDT::PredictByMap(const std::unordered_map<int, double>& features, 
       "none", PredictionEarlyStopConfig());
   const PredictionEarlyStopInstance* early_stop_ptr = early_stop ? early_stop : &no_early_stop;
 
+  int n_available = static_cast<int>(experts_.size());
+
+  if (!gate_) {
+    if (n_available == 1) {
+      experts_[0]->PredictByMap(features, output, early_stop_ptr);
+    } else {
+      double sum = 0.0;
+      for (int k = 0; k < n_available; ++k) {
+        double pred;
+        experts_[k]->PredictByMap(features, &pred, early_stop_ptr);
+        sum += pred;
+      }
+      *output = sum / n_available;
+    }
+    return;
+  }
+
   std::vector<double> expert_preds(num_experts_);
   for (int k = 0; k < num_experts_; ++k) {
     experts_[k]->PredictByMap(features, &expert_preds[k], early_stop_ptr);
@@ -2310,6 +2408,11 @@ void MixtureGBDT::PredictRawByMap(const std::unordered_map<int, double>& feature
 }
 
 void MixtureGBDT::PredictRegime(const double* features, int* output) const {
+  if (!gate_) {
+    *output = 0;  // No gate yet, default to expert 0
+    return;
+  }
+
   // Create a no-op early stop instance
   PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
       "none", PredictionEarlyStopConfig());
@@ -2333,6 +2436,16 @@ void MixtureGBDT::PredictRegime(const double* features, int* output) const {
 }
 
 void MixtureGBDT::PredictRegimeProba(const double* features, double* output) const {
+  if (!gate_) {
+    // No gate yet, return uniform over available experts
+    int n = static_cast<int>(experts_.size());
+    double uniform = 1.0 / std::max(n, 1);
+    for (int k = 0; k < num_experts_; ++k) {
+      output[k] = (k < n) ? uniform : 0.0;
+    }
+    return;
+  }
+
   // Create a no-op early stop instance
   PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
       "none", PredictionEarlyStopConfig());
@@ -2347,13 +2460,23 @@ void MixtureGBDT::PredictExpertPred(const double* features, double* output) cons
   PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
       "none", PredictionEarlyStopConfig());
 
-  for (int k = 0; k < num_experts_; ++k) {
+  int n = static_cast<int>(experts_.size());
+  for (int k = 0; k < n; ++k) {
     experts_[k]->Predict(features, &output[k], &no_early_stop);
+  }
+  // Zero-fill remaining slots if fewer experts than num_experts_
+  for (int k = n; k < num_experts_; ++k) {
+    output[k] = 0.0;
   }
 }
 
 void MixtureGBDT::PredictWithPrevProba(const double* features, const double* prev_proba,
                                         double* output) const {
+  if (!gate_) {
+    Predict(features, output, nullptr);
+    return;
+  }
+
   // Create a no-op early stop instance
   PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
       "none", PredictionEarlyStopConfig());
@@ -2398,6 +2521,11 @@ void MixtureGBDT::PredictWithPrevProba(const double* features, const double* pre
 
 void MixtureGBDT::PredictRegimeProbaWithPrevProba(const double* features, const double* prev_proba,
                                                    double* output) const {
+  if (!gate_) {
+    PredictRegimeProba(features, output);
+    return;
+  }
+
   // Create a no-op early stop instance
   PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
       "none", PredictionEarlyStopConfig());
@@ -2524,7 +2652,13 @@ void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
   }
 
   // Add validation data to each expert and gate (they will manage their own ScoreUpdaters)
-  if (use_progressive_ && !seed_phase_complete_) {
+  if (use_sequential_) {
+    // Sequential mode: add to currently existing experts only
+    for (int k = 0; k <= seq_current_expert_ && k < static_cast<int>(experts_.size()); ++k) {
+      experts_[k]->AddValidDataset(valid_data, {});
+    }
+    // Gate doesn't exist yet, will be added in gate phase
+  } else if (use_progressive_ && !seed_phase_complete_) {
     // During seed phase, only add to seed expert
     if (seed_expert_) {
       seed_expert_->AddValidDataset(valid_data, {});
@@ -2534,7 +2668,9 @@ void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
       experts_[k]->AddValidDataset(valid_data, {});  // No metrics at expert level
     }
   }
-  gate_->AddValidDataset(valid_data, {});  // No metrics at gate level
+  if (!use_sequential_ || seq_phase_ == SeqPhase::GATE_TRAINING) {
+    gate_->AddValidDataset(valid_data, {});  // No metrics at gate level
+  }
 
   // Compute initial validation predictions if we have trained iterations
   if (iter_ > 0) {
@@ -2606,7 +2742,9 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   // Mixture header
   ss << "mixture\n";
   ss << "mixture_enable=1\n";
-  ss << "mixture_num_experts=" << num_experts_ << "\n";
+  int save_num_experts = use_sequential_ ? seq_actual_num_experts_ : num_experts_;
+  ss << "mixture_num_experts=" << save_num_experts << "\n";
+  ss << "mixture_training_mode=" << config_->mixture_training_mode << "\n";
   ss << "mixture_e_step_alpha=" << config_->mixture_e_step_alpha << "\n";
   ss << "mixture_e_step_loss=" << e_step_loss_type_ << "\n";
   ss << "mixture_e_step_mode=" << config_->mixture_e_step_mode << "\n";
@@ -2616,7 +2754,23 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
 
   // Gate model
   ss << "[gate_model]\n";
-  ss << gate_->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
+  if (gate_) {
+    ss << gate_->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
+  } else {
+    // No gate yet (sequential mode during expert training)
+    // Write a minimal placeholder that can be loaded
+    ss << "tree\n";
+    ss << "version=v4.0.0\n";
+    ss << "num_class=1\n";
+    ss << "num_tree_per_iteration=1\n";
+    ss << "label_index=0\n";
+    ss << "max_feature_idx=" << max_feature_idx_ << "\n";
+    ss << "objective=regression\n";
+    ss << "end of parameters\n";
+    ss << "\n";
+    ss << "end of trees\n";
+    ss << "\n";
+  }
   ss << "\n";
 
   // Expert models
@@ -2628,7 +2782,8 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
       ss << "\n";
     }
   } else {
-    for (int k = 0; k < num_experts_; ++k) {
+    int n_save = use_sequential_ ? seq_actual_num_experts_ : num_experts_;
+    for (int k = 0; k < n_save; ++k) {
       ss << "[expert_model_" << k << "]\n";
       ss << experts_[k]->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
       ss << "\n";
@@ -2792,7 +2947,8 @@ std::vector<double> MixtureGBDT::FeatureImportance(int num_iteration, int import
   // Sum importance across all experts
   std::vector<double> result(max_feature_idx_ + 1, 0.0);
 
-  for (int k = 0; k < num_experts_; ++k) {
+  int n = static_cast<int>(experts_.size());
+  for (int k = 0; k < n; ++k) {
     auto expert_imp = experts_[k]->FeatureImportance(num_iteration, importance_type);
     for (size_t i = 0; i < expert_imp.size() && i < result.size(); ++i) {
       result[i] += expert_imp[i];
@@ -2804,7 +2960,8 @@ std::vector<double> MixtureGBDT::FeatureImportance(int num_iteration, int import
 
 double MixtureGBDT::GetUpperBoundValue() const {
   double max_val = -std::numeric_limits<double>::infinity();
-  for (int k = 0; k < num_experts_; ++k) {
+  int n = static_cast<int>(experts_.size());
+  for (int k = 0; k < n; ++k) {
     max_val = std::max(max_val, experts_[k]->GetUpperBoundValue());
   }
   return max_val;
@@ -2812,7 +2969,8 @@ double MixtureGBDT::GetUpperBoundValue() const {
 
 double MixtureGBDT::GetLowerBoundValue() const {
   double min_val = std::numeric_limits<double>::infinity();
-  for (int k = 0; k < num_experts_; ++k) {
+  int n = static_cast<int>(experts_.size());
+  for (int k = 0; k < n; ++k) {
     min_val = std::min(min_val, experts_[k]->GetLowerBoundValue());
   }
   return min_val;
@@ -2835,17 +2993,23 @@ int MixtureGBDT::NumberOfTotalModel() const {
   if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
     total += seed_expert_->NumberOfTotalModel();
   } else {
-    for (int k = 0; k < num_experts_; ++k) {
+    int n = static_cast<int>(experts_.size());
+    for (int k = 0; k < n; ++k) {
       total += experts_[k]->NumberOfTotalModel();
     }
-    total += gate_->NumberOfTotalModel();
+    if (gate_) {
+      total += gate_->NumberOfTotalModel();
+    }
   }
   return total;
 }
 
 int MixtureGBDT::NumModelPerIteration() const {
-  // One tree per expert per iteration, plus gate trees
-  return num_experts_ + gate_->NumModelPerIteration();
+  int n = static_cast<int>(experts_.size());
+  if (gate_) {
+    return n + gate_->NumModelPerIteration();
+  }
+  return n;
 }
 
 int MixtureGBDT::NumberOfClasses() const {
@@ -2857,10 +3021,13 @@ bool MixtureGBDT::NeedAccuratePrediction() const {
 }
 
 void MixtureGBDT::InitPredict(int start_iteration, int num_iteration, bool is_pred_contrib) {
-  for (int k = 0; k < num_experts_; ++k) {
+  int n = static_cast<int>(experts_.size());
+  for (int k = 0; k < n; ++k) {
     experts_[k]->InitPredict(start_iteration, num_iteration, is_pred_contrib);
   }
-  gate_->InitPredict(start_iteration, num_iteration, is_pred_contrib);
+  if (gate_) {
+    gate_->InitPredict(start_iteration, num_iteration, is_pred_contrib);
+  }
 }
 
 double MixtureGBDT::GetLeafValue(int tree_idx, int leaf_idx) const {
@@ -2893,6 +3060,661 @@ std::string MixtureGBDT::ParserConfigStr() const {
     return experts_[0]->ParserConfigStr();
   }
   return "";
+}
+
+// ===== Sequential MoE Implementation =====
+
+bool MixtureGBDT::TrainOneIterSequential() {
+  switch (seq_phase_) {
+    case SeqPhase::EXPERT_TRAINING: {
+      SeqTrainExpertOneIter();
+
+      // Check internal early stopping for current expert
+      if (SeqCheckEarlyStopping()) {
+        Log::Info("MixtureGBDT: Expert %d training converged (patience exhausted)",
+                  seq_current_expert_);
+
+        // Expert k done → validate improvement
+        if (seq_current_expert_ > 0 && !SeqValidateExpert(seq_current_expert_)) {
+          // No improvement → discard expert, move to gate
+          Log::Info("MixtureGBDT: Expert %d rejected (insufficient improvement), "
+                    "moving to gate phase with %d experts",
+                    seq_current_expert_, seq_actual_num_experts_ - 1);
+          experts_.pop_back();
+          seq_actual_num_experts_--;
+          SeqTransitionToGatePhase();
+        } else if (seq_actual_num_experts_ >= config_->mixture_seq_max_experts) {
+          // Max experts reached → move to gate
+          Log::Info("MixtureGBDT: Max experts (%d) reached, moving to gate phase",
+                    seq_actual_num_experts_);
+          SeqTransitionToGatePhase();
+        } else {
+          // Find hard samples for next expert
+          SeqComputeSampleLosses(seq_current_expert_);
+          SeqFindHardSamples();
+
+          // Check if hard samples are sufficient
+          int min_hard = std::max(50, num_data_ / 20);
+          if (seq_hard_indices_.back().empty() ||
+              static_cast<int>(seq_hard_indices_.back().size()) < min_hard) {
+            Log::Info("MixtureGBDT: Too few hard samples (%d < %d), moving to gate phase",
+                      static_cast<int>(seq_hard_indices_.empty() ? 0 : seq_hard_indices_.back().size()),
+                      min_hard);
+            SeqTransitionToGatePhase();
+          } else {
+            SeqTransitionToNextExpert();
+          }
+        }
+      }
+      break;
+    }
+
+    case SeqPhase::GATE_TRAINING: {
+      SeqTrainGateOneIter();
+      if (SeqCheckGateEarlyStopping()) {
+        Log::Info("MixtureGBDT: Gate training converged, sequential MoE complete");
+        seq_phase_ = SeqPhase::DONE;
+      }
+      break;
+    }
+
+    case SeqPhase::DONE:
+      return true;  // Signal completion
+  }
+
+  ++iter_;
+
+  // Update combined predictions
+  SeqUpdateCombinedPredictions();
+
+  return false;
+}
+
+void MixtureGBDT::SeqTrainExpertOneIter() {
+  int k = seq_current_expert_;
+  const label_t* labels = train_data_->metadata().label();
+
+  // Get current expert's predictions
+  int64_t out_len;
+  std::vector<double> expert_k_pred(num_data_);
+  experts_[k]->GetPredictAt(0, expert_k_pred.data(), &out_len);
+
+  // Compute gradients/hessians
+  std::vector<score_t> grad(num_data_);
+  std::vector<score_t> hess(num_data_);
+
+  if (objective_function_ != nullptr) {
+    objective_function_->GetGradients(expert_k_pred.data(), grad.data(), hess.data());
+  } else {
+    // Default MSE
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double diff = expert_k_pred[i] - labels[i];
+      grad[i] = static_cast<score_t>(2.0 * diff);
+      hess[i] = static_cast<score_t>(2.0);
+    }
+  }
+
+  // For Expert 0, train on all data. For Expert k>0, mask non-hard samples.
+  if (k > 0 && !seq_hard_indices_.empty()) {
+    // Create a set of hard indices for O(1) lookup
+    const auto& hard = seq_hard_indices_[k - 1];  // hard indices that led to expert k
+    std::vector<bool> is_hard(num_data_, false);
+    for (data_size_t idx : hard) {
+      is_hard[idx] = true;
+    }
+
+    // Zero out gradients for non-hard samples
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      if (!is_hard[i]) {
+        grad[i] = 0.0;
+        hess[i] = 0.0;
+      }
+    }
+  }
+
+  // Train one boosting iteration
+  experts_[k]->TrainOneIter(grad.data(), hess.data());
+}
+
+void MixtureGBDT::SeqComputeSampleLosses(int expert_idx) {
+  const label_t* labels = train_data_->metadata().label();
+
+  // Get expert's predictions on training data
+  int64_t out_len;
+  std::vector<double> pred(num_data_);
+  experts_[expert_idx]->GetPredictAt(0, pred.data(), &out_len);
+
+  // Compute per-sample squared loss
+  seq_sample_losses_.resize(num_data_);
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    double diff = pred[i] - static_cast<double>(labels[i]);
+    seq_sample_losses_[i] = diff * diff;
+  }
+}
+
+void MixtureGBDT::SeqFindHardSamples() {
+  double threshold;
+
+  if (config_->mixture_seq_hard_selection == "otsu") {
+    threshold = OtsuThreshold(seq_sample_losses_);
+    Log::Info("MixtureGBDT: Otsu threshold = %.6f", threshold);
+  } else {
+    // Percentile method
+    std::vector<double> sorted_losses(seq_sample_losses_);
+    std::sort(sorted_losses.begin(), sorted_losses.end());
+    int idx = static_cast<int>(num_data_ * (1.0 - config_->mixture_seq_hard_percentile));
+    idx = std::max(0, std::min(idx, num_data_ - 1));
+    threshold = sorted_losses[idx];
+    Log::Info("MixtureGBDT: Percentile threshold (top %.0f%%) = %.6f",
+              config_->mixture_seq_hard_percentile * 100.0, threshold);
+  }
+
+  // Select samples above threshold
+  std::vector<data_size_t> hard;
+  hard.reserve(static_cast<size_t>(num_data_ * config_->mixture_seq_hard_percentile) + 1);
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    if (seq_sample_losses_[i] >= threshold) {
+      hard.push_back(i);
+    }
+  }
+
+  Log::Info("MixtureGBDT: Found %d hard samples (%.1f%% of data)",
+            static_cast<int>(hard.size()),
+            100.0 * hard.size() / num_data_);
+
+  seq_hard_indices_.push_back(std::move(hard));
+}
+
+bool MixtureGBDT::SeqValidateExpert(int expert_idx) {
+  if (expert_idx <= 0 || seq_hard_indices_.empty()) return true;
+
+  const label_t* labels = train_data_->metadata().label();
+  const auto& hard = seq_hard_indices_[expert_idx - 1];
+
+  if (hard.empty()) return false;
+
+  // Compute RMSE of previous expert on hard set
+  int64_t out_len;
+  std::vector<double> prev_pred(num_data_);
+  experts_[expert_idx - 1]->GetPredictAt(0, prev_pred.data(), &out_len);
+
+  double prev_sse = 0.0;
+  for (data_size_t idx : hard) {
+    double diff = prev_pred[idx] - static_cast<double>(labels[idx]);
+    prev_sse += diff * diff;
+  }
+  double prev_rmse = std::sqrt(prev_sse / hard.size());
+
+  // Compute RMSE of new expert on hard set
+  std::vector<double> new_pred(num_data_);
+  experts_[expert_idx]->GetPredictAt(0, new_pred.data(), &out_len);
+
+  double new_sse = 0.0;
+  for (data_size_t idx : hard) {
+    double diff = new_pred[idx] - static_cast<double>(labels[idx]);
+    new_sse += diff * diff;
+  }
+  double new_rmse = std::sqrt(new_sse / hard.size());
+
+  double improvement = (prev_rmse - new_rmse) / (prev_rmse + kMixtureEpsilon);
+  Log::Info("MixtureGBDT: Expert %d validation - prev_rmse=%.6f, new_rmse=%.6f, improvement=%.4f (threshold=%.4f)",
+            expert_idx, prev_rmse, new_rmse, improvement, config_->mixture_seq_min_improvement);
+
+  return improvement >= config_->mixture_seq_min_improvement;
+}
+
+void MixtureGBDT::SeqTransitionToNextExpert() {
+  seq_current_expert_++;
+  seq_actual_num_experts_++;
+
+  // Create new expert
+  experts_.emplace_back(new GBDT());
+  experts_[seq_current_expert_]->Init(
+      expert_configs_[seq_current_expert_].get(), train_data_, nullptr, {});
+
+  // Add existing validation datasets to the new expert
+  for (size_t v = 0; v < valid_datas_.size(); ++v) {
+    experts_[seq_current_expert_]->AddValidDataset(valid_datas_[v], {});
+  }
+
+  // Reset early stopping for this expert
+  seq_best_valid_loss_ = std::numeric_limits<double>::max();
+  seq_no_improve_count_ = 0;
+
+  Log::Info("MixtureGBDT: Starting Expert %d training on %d hard samples",
+            seq_current_expert_,
+            static_cast<int>(seq_hard_indices_.back().size()));
+}
+
+void MixtureGBDT::SeqTransitionToGatePhase() {
+  // Update gate config with actual number of experts
+  gate_config_->num_class = seq_actual_num_experts_;
+
+  // Create and initialize gate
+  gate_.reset(new GBDT());
+  gate_->Init(gate_config_.get(), train_data_, nullptr, {});
+
+  // Add all validation datasets to gate
+  for (size_t v = 0; v < valid_datas_.size(); ++v) {
+    gate_->AddValidDataset(valid_datas_[v], {});
+  }
+
+  // Update num_experts_ to reflect actual count
+  num_experts_ = seq_actual_num_experts_;
+
+  // Reallocate buffers for final expert count
+  size_t nk = static_cast<size_t>(num_data_) * num_experts_;
+  expert_pred_.resize(nk);
+  gate_proba_.resize(nk);
+  yhat_.resize(num_data_);
+
+  // Reallocate validation buffers
+  for (size_t v = 0; v < valid_datas_.size(); ++v) {
+    data_size_t num_valid = valid_datas_[v]->num_data();
+    size_t nk_valid = static_cast<size_t>(num_valid) * num_experts_;
+    expert_pred_valid_[v].resize(nk_valid, 0.0);
+    gate_proba_valid_[v].resize(nk_valid, 0.0);
+  }
+
+  // Reset gate early stopping
+  seq_gate_best_valid_loss_ = std::numeric_limits<double>::max();
+  seq_gate_no_improve_count_ = 0;
+
+  seq_phase_ = SeqPhase::GATE_TRAINING;
+
+  Log::Info("MixtureGBDT: Entering gate training phase with %d experts", num_experts_);
+}
+
+void MixtureGBDT::SeqTrainGateOneIter() {
+  // Compute gate gradients/hessians
+  std::vector<score_t> gate_grad(static_cast<size_t>(num_data_) * num_experts_);
+  std::vector<score_t> gate_hess(static_cast<size_t>(num_data_) * num_experts_);
+
+  SeqComputeGateLabels(gate_grad, gate_hess);
+
+  // Train gate for one iteration
+  gate_->TrainOneIter(gate_grad.data(), gate_hess.data());
+}
+
+void MixtureGBDT::SeqComputeGateLabels(std::vector<score_t>& gate_grad,
+                                         std::vector<score_t>& gate_hess) {
+  const label_t* labels = train_data_->metadata().label();
+
+  // Get all expert predictions
+  std::vector<std::vector<double>> all_preds(num_experts_);
+  for (int k = 0; k < num_experts_; ++k) {
+    all_preds[k].resize(num_data_);
+    int64_t out_len;
+    experts_[k]->GetPredictAt(0, all_preds[k].data(), &out_len);
+  }
+
+  // Get current gate probabilities
+  std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
+  int64_t out_len;
+  gate_->GetPredictAt(0, gate_raw.data(), &out_len);
+
+  std::vector<double> gate_proba(static_cast<size_t>(num_data_) * num_experts_);
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    std::vector<double> scores(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      scores[k] = gate_raw[k * num_data_ + i];
+    }
+    Softmax(scores.data(), num_experts_, gate_proba.data() + i * num_experts_);
+  }
+
+  if (config_->mixture_seq_gate_label == "hard") {
+    // Hard labels: argmin_k loss(expert_k, sample_i)
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double label = static_cast<double>(labels[i]);
+
+      // Find best expert for this sample
+      int best_k = 0;
+      double best_loss = std::numeric_limits<double>::max();
+      for (int k = 0; k < num_experts_; ++k) {
+        double diff = all_preds[k][i] - label;
+        double loss = diff * diff;
+        if (loss < best_loss) {
+          best_loss = loss;
+          best_k = k;
+        }
+      }
+
+      // Softmax cross-entropy gradient
+      for (int k = 0; k < num_experts_; ++k) {
+        size_t idx = i + k * num_data_;  // class-major order
+        double p = gate_proba[i * num_experts_ + k];
+
+        if (k == best_k) {
+          gate_grad[idx] = static_cast<score_t>(p - 1.0);
+        } else {
+          gate_grad[idx] = static_cast<score_t>(p);
+        }
+        gate_hess[idx] = static_cast<score_t>(std::max(p * (1.0 - p), kMixtureEpsilon));
+      }
+    }
+  } else {
+    // Soft labels: loss-inverse softmax
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double label = static_cast<double>(labels[i]);
+
+      // Compute inverse losses for soft targets
+      std::vector<double> inv_losses(num_experts_);
+      for (int k = 0; k < num_experts_; ++k) {
+        double diff = all_preds[k][i] - label;
+        double loss = diff * diff;
+        inv_losses[k] = 1.0 / (loss + kMixtureEpsilon);
+      }
+
+      // Softmax to get target probabilities
+      double sum_inv = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        sum_inv += inv_losses[k];
+      }
+      std::vector<double> target_proba(num_experts_);
+      for (int k = 0; k < num_experts_; ++k) {
+        target_proba[k] = inv_losses[k] / sum_inv;
+      }
+
+      // Cross-entropy gradient with soft targets
+      for (int k = 0; k < num_experts_; ++k) {
+        size_t idx = i + k * num_data_;  // class-major order
+        double p = gate_proba[i * num_experts_ + k];
+
+        gate_grad[idx] = static_cast<score_t>(p - target_proba[k]);
+        gate_hess[idx] = static_cast<score_t>(std::max(p * (1.0 - p), kMixtureEpsilon));
+      }
+    }
+  }
+}
+
+void MixtureGBDT::SeqUpdateCombinedPredictions() {
+  if (seq_phase_ == SeqPhase::EXPERT_TRAINING) {
+    // During expert training, yhat is just the current expert's prediction
+    // (or the best expert for each sample if multiple experts exist)
+    if (seq_actual_num_experts_ == 1) {
+      int64_t out_len;
+      experts_[0]->GetPredictAt(0, yhat_.data(), &out_len);
+    } else {
+      // Use the best expert (by loss) for each sample as a simple heuristic
+      const label_t* labels = train_data_->metadata().label();
+      std::vector<std::vector<double>> all_preds(seq_actual_num_experts_);
+      for (int k = 0; k < seq_actual_num_experts_; ++k) {
+        all_preds[k].resize(num_data_);
+        int64_t out_len;
+        experts_[k]->GetPredictAt(0, all_preds[k].data(), &out_len);
+      }
+
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        double best_loss = std::numeric_limits<double>::max();
+        int best_k = 0;
+        double label = static_cast<double>(labels[i]);
+        for (int k = 0; k < seq_actual_num_experts_; ++k) {
+          double diff = all_preds[k][i] - label;
+          double loss = diff * diff;
+          if (loss < best_loss) {
+            best_loss = loss;
+            best_k = k;
+          }
+        }
+        yhat_[i] = all_preds[best_k][i];
+      }
+    }
+
+    // Update validation predictions similarly
+    for (size_t v = 0; v < valid_datas_.size(); ++v) {
+      data_size_t num_valid = valid_datas_[v]->num_data();
+      int data_idx = static_cast<int>(v) + 1;
+
+      if (seq_actual_num_experts_ == 1) {
+        int64_t out_len;
+        experts_[0]->GetPredictAt(data_idx, yhat_valid_[v].data(), &out_len);
+      } else {
+        const label_t* vlabels = valid_datas_[v]->metadata().label();
+        std::vector<std::vector<double>> vpreds(seq_actual_num_experts_);
+        for (int k = 0; k < seq_actual_num_experts_; ++k) {
+          vpreds[k].resize(num_valid);
+          int64_t out_len;
+          experts_[k]->GetPredictAt(data_idx, vpreds[k].data(), &out_len);
+        }
+
+        for (data_size_t i = 0; i < num_valid; ++i) {
+          double best_loss = std::numeric_limits<double>::max();
+          int best_k = 0;
+          double label = static_cast<double>(vlabels[i]);
+          for (int k = 0; k < seq_actual_num_experts_; ++k) {
+            double diff = vpreds[k][i] - label;
+            double loss = diff * diff;
+            if (loss < best_loss) {
+              best_loss = loss;
+              best_k = k;
+            }
+          }
+          yhat_valid_[v][i] = vpreds[best_k][i];
+        }
+      }
+    }
+  } else if (seq_phase_ == SeqPhase::GATE_TRAINING || seq_phase_ == SeqPhase::DONE) {
+    // Use gate-weighted expert predictions (same as Forward)
+    // Get expert predictions
+    for (int k = 0; k < num_experts_; ++k) {
+      int64_t out_len;
+      experts_[k]->GetPredictAt(0, expert_pred_.data() + k * num_data_, &out_len);
+    }
+
+    // Get gate probabilities
+    std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
+    int64_t out_len;
+    gate_->GetPredictAt(0, gate_raw.data(), &out_len);
+
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      std::vector<double> scores(num_experts_);
+      for (int k = 0; k < num_experts_; ++k) {
+        scores[k] = gate_raw[k * num_data_ + i];
+      }
+      Softmax(scores.data(), num_experts_, gate_proba_.data() + i * num_experts_);
+
+      double sum = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        sum += gate_proba_[i * num_experts_ + k] * expert_pred_[k * num_data_ + i];
+      }
+      yhat_[i] = sum;
+    }
+
+    // Update validation predictions
+    for (size_t v = 0; v < valid_datas_.size(); ++v) {
+      data_size_t num_valid = valid_datas_[v]->num_data();
+      int data_idx = static_cast<int>(v) + 1;
+
+      for (int k = 0; k < num_experts_; ++k) {
+        int64_t vlen;
+        experts_[k]->GetPredictAt(data_idx,
+                                   expert_pred_valid_[v].data() + k * num_valid, &vlen);
+      }
+
+      std::vector<double> vgate_raw(static_cast<size_t>(num_valid) * num_experts_);
+      int64_t vlen;
+      gate_->GetPredictAt(data_idx, vgate_raw.data(), &vlen);
+
+      for (data_size_t i = 0; i < num_valid; ++i) {
+        std::vector<double> scores(num_experts_);
+        for (int k = 0; k < num_experts_; ++k) {
+          scores[k] = vgate_raw[k * num_valid + i];
+        }
+        Softmax(scores.data(), num_experts_,
+                gate_proba_valid_[v].data() + i * num_experts_);
+
+        double sum = 0.0;
+        for (int k = 0; k < num_experts_; ++k) {
+          sum += gate_proba_valid_[v][i * num_experts_ + k] *
+                 expert_pred_valid_[v][k * num_valid + i];
+        }
+        yhat_valid_[v][i] = sum;
+      }
+    }
+  }
+}
+
+bool MixtureGBDT::SeqCheckEarlyStopping() {
+  int patience = config_->mixture_seq_expert_patience;
+  int k = seq_current_expert_;
+
+  // Compute training loss for current expert
+  const label_t* labels = train_data_->metadata().label();
+  int64_t out_len;
+  std::vector<double> pred(num_data_);
+  experts_[k]->GetPredictAt(0, pred.data(), &out_len);
+
+  // If we have validation data, use it; otherwise use training data
+  double current_loss;
+  if (!valid_datas_.empty()) {
+    data_size_t num_valid = valid_datas_[0]->num_data();
+    const label_t* vlabels = valid_datas_[0]->metadata().label();
+    std::vector<double> vpred(num_valid);
+    experts_[k]->GetPredictAt(1, vpred.data(), &out_len);
+
+    double sse = 0.0;
+    for (data_size_t i = 0; i < num_valid; ++i) {
+      double diff = vpred[i] - static_cast<double>(vlabels[i]);
+      sse += diff * diff;
+    }
+    current_loss = std::sqrt(sse / num_valid);
+  } else {
+    // If expert k>0, only measure on hard samples
+    if (k > 0 && !seq_hard_indices_.empty()) {
+      const auto& hard = seq_hard_indices_[k - 1];
+      double sse = 0.0;
+      for (data_size_t idx : hard) {
+        double diff = pred[idx] - static_cast<double>(labels[idx]);
+        sse += diff * diff;
+      }
+      current_loss = std::sqrt(sse / hard.size());
+    } else {
+      double sse = 0.0;
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        double diff = pred[i] - static_cast<double>(labels[i]);
+        sse += diff * diff;
+      }
+      current_loss = std::sqrt(sse / num_data_);
+    }
+  }
+
+  if (current_loss < seq_best_valid_loss_ - kMixtureEpsilon) {
+    seq_best_valid_loss_ = current_loss;
+    seq_no_improve_count_ = 0;
+  } else {
+    seq_no_improve_count_++;
+  }
+
+  if (iter_ % 10 == 0) {
+    Log::Info("MixtureGBDT: Expert %d iter %d, loss=%.6f, best=%.6f, no_improve=%d/%d",
+              k, iter_, current_loss, seq_best_valid_loss_,
+              seq_no_improve_count_, patience);
+  }
+
+  return seq_no_improve_count_ >= patience;
+}
+
+bool MixtureGBDT::SeqCheckGateEarlyStopping() {
+  int patience = config_->mixture_seq_expert_patience;
+
+  // Compute gate-weighted prediction loss
+  double current_loss;
+  if (!valid_datas_.empty() && !yhat_valid_.empty()) {
+    data_size_t num_valid = valid_datas_[0]->num_data();
+    const label_t* vlabels = valid_datas_[0]->metadata().label();
+
+    double sse = 0.0;
+    for (data_size_t i = 0; i < num_valid; ++i) {
+      double diff = yhat_valid_[0][i] - static_cast<double>(vlabels[i]);
+      sse += diff * diff;
+    }
+    current_loss = std::sqrt(sse / num_valid);
+  } else {
+    double sse = 0.0;
+    const label_t* labels = train_data_->metadata().label();
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double diff = yhat_[i] - static_cast<double>(labels[i]);
+      sse += diff * diff;
+    }
+    current_loss = std::sqrt(sse / num_data_);
+  }
+
+  if (current_loss < seq_gate_best_valid_loss_ - kMixtureEpsilon) {
+    seq_gate_best_valid_loss_ = current_loss;
+    seq_gate_no_improve_count_ = 0;
+  } else {
+    seq_gate_no_improve_count_++;
+  }
+
+  if (iter_ % 10 == 0) {
+    Log::Info("MixtureGBDT: Gate iter %d, loss=%.6f, best=%.6f, no_improve=%d/%d",
+              iter_, current_loss, seq_gate_best_valid_loss_,
+              seq_gate_no_improve_count_, patience);
+  }
+
+  return seq_gate_no_improve_count_ >= patience;
+}
+
+double MixtureGBDT::OtsuThreshold(const std::vector<double>& values) const {
+  if (values.empty()) return 0.0;
+
+  // Find min/max
+  double min_val = *std::min_element(values.begin(), values.end());
+  double max_val = *std::max_element(values.begin(), values.end());
+
+  if (max_val - min_val < kMixtureEpsilon) return max_val;
+
+  // Build 256-bin histogram
+  const int num_bins = 256;
+  std::vector<int> histogram(num_bins, 0);
+  double bin_width = (max_val - min_val) / num_bins;
+
+  for (double v : values) {
+    int bin = static_cast<int>((v - min_val) / bin_width);
+    bin = std::min(bin, num_bins - 1);
+    histogram[bin]++;
+  }
+
+  int total = static_cast<int>(values.size());
+  double sum_total = 0.0;
+  for (int b = 0; b < num_bins; ++b) {
+    sum_total += b * histogram[b];
+  }
+
+  double best_between_var = 0.0;
+  int best_threshold = 0;
+
+  double sum_bg = 0.0;
+  int w_bg = 0;
+
+  for (int t = 0; t < num_bins - 1; ++t) {
+    w_bg += histogram[t];
+    if (w_bg == 0) continue;
+
+    int w_fg = total - w_bg;
+    if (w_fg == 0) break;
+
+    sum_bg += t * histogram[t];
+
+    double mu_bg = sum_bg / w_bg;
+    double mu_fg = (sum_total - sum_bg) / w_fg;
+
+    double between_var = static_cast<double>(w_bg) * w_fg * (mu_bg - mu_fg) * (mu_bg - mu_fg);
+    if (between_var > best_between_var) {
+      best_between_var = between_var;
+      best_threshold = t;
+    }
+  }
+
+  // Convert bin index back to value
+  return min_val + (best_threshold + 0.5) * bin_width;
 }
 
 }  // namespace LightGBM
