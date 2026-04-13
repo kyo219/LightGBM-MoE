@@ -57,7 +57,6 @@ class PrunedMoEModel:
         np.ndarray of shape ``(N, K_active)``
         """
         full_preds = self.original_model.predict_expert_pred(X)  # (N, K_orig)
-        K_orig = full_preds.shape[1]
         active_indices = np.where(self.active_mask)[0]
 
         result = np.empty((full_preds.shape[0], len(active_indices)), dtype=np.float64)
@@ -81,7 +80,7 @@ class PrunedMoEModel:
         np.ndarray of shape ``(N,)``
         """
         proba = self.predict_regime_proba(X)  # (N, K_active)
-        preds = self.predict_expert_pred(X)   # (N, K_active)
+        preds = self.predict_expert_pred(X)  # (N, K_active)
         return (proba * preds).sum(axis=1)
 
     def predict_regime(self, X):
@@ -151,7 +150,7 @@ def prune_experts(
     # Compute pairwise correlations among active experts
     pairs_to_merge = []
     for i_pos, i in enumerate(active_indices):
-        for j in active_indices[i_pos + 1:]:
+        for j in active_indices[i_pos + 1 :]:
             corr = float(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1])
             if corr > correlation_threshold:
                 pairs_to_merge.append((i, j, corr))

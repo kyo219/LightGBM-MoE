@@ -35,7 +35,6 @@ from .auto_k import select_num_experts
 from .diagnostics import diagnose_moe
 from .pruning import PrunedMoEModel, merge_experts, prune_experts
 
-
 _version_path = Path(__file__).resolve().parent / "VERSION.txt"
 if _version_path.is_file():
     __version__ = _version_path.read_text(encoding="utf-8").strip()

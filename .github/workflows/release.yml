@@ -100,37 +100,9 @@ jobs:
           path: python-package/dist/*.whl
           if-no-files-found: warn
 
-  build-wheels-windows:
-    name: Build wheels (Windows x86_64)
-    runs-on: windows-2022
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install build scikit-build-core cmake ninja setuptools-scm
-
-      - name: Build wheel
-        run: python -m build --wheel python-package
-
-      - name: Upload wheel
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheel-windows-x86_64
-          path: python-package/dist/*.whl
-          if-no-files-found: warn
-
   create-release:
     name: Create GitHub Release
-    needs: [build-sdist, build-wheels-linux, build-wheels-macos, build-wheels-windows]
+    needs: [build-sdist, build-wheels-linux, build-wheels-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

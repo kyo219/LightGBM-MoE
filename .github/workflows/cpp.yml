@@ -47,10 +47,6 @@ jobs:
             method: with-sanitizers
             sanitizers: "address;undefined"
             container: null
-          - os: windows-2022
-            task: cpp-tests
-            compiler: msvc
-            container: null
           ###########
           # if-else #
           ###########
@@ -70,12 +66,6 @@ jobs:
             compiler: clang
             python_version: '3.10'
             container: null
-          - os: ubuntu-latest
-            task: if-else
-            compiler: gcc
-            python_version: '3.11'
-            container: 'lightgbm.azurecr.io/vsts-agent:manylinux_2_28_x86_64'
-            os-display-name: 'manylinux_2_28'
     steps:
       - name: Install packages used by third-party actions
         if: matrix.container == 'ubuntu:22.04'

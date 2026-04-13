@@ -1179,14 +1179,14 @@ class _InnerPredictor:
                 preds = np.loadtxt(f.name, dtype=np.float64)
                 nrow = preds.shape[0]
         elif isinstance(data, scipy.sparse.csr_matrix):
-            preds, nrow = self.__pred_for_csr(
+            preds, nrow = self.__pred_for_csr(  # type: ignore[assignment]
                 csr=data,
                 start_iteration=start_iteration,
                 num_iteration=num_iteration,
                 predict_type=predict_type,
             )
         elif isinstance(data, scipy.sparse.csc_matrix):
-            preds, nrow = self.__pred_for_csc(
+            preds, nrow = self.__pred_for_csc(  # type: ignore[assignment]
                 csc=data,
                 start_iteration=start_iteration,
                 num_iteration=num_iteration,
@@ -1223,7 +1223,7 @@ class _InnerPredictor:
                 csr = scipy.sparse.csr_matrix(data)
             except BaseException as err:
                 raise TypeError(f"Cannot predict data for type {type(data).__name__}") from err
-            preds, nrow = self.__pred_for_csr(
+            preds, nrow = self.__pred_for_csr(  # type: ignore[assignment]
                 csr=csr,
                 start_iteration=start_iteration,
                 num_iteration=num_iteration,

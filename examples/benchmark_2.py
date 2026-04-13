@@ -153,7 +153,9 @@ def expert_collapse_stopper(
                 expert_ratio = (regime_pred == k).sum() / n_samples
                 if expert_ratio < min_expert_ratio:
                     if verbose:
-                        print(f"[iter {iteration}] Expert underutilization: E{k} ratio={expert_ratio:.1%} < {min_expert_ratio:.1%}")
+                        print(
+                            f"[iter {iteration}] Expert underutilization: E{k} ratio={expert_ratio:.1%} < {min_expert_ratio:.1%}"
+                        )
                     raise lgb.EarlyStopException(iteration, [])
 
         except lgb.EarlyStopException:
@@ -257,14 +259,18 @@ def create_objective_moe(
         # Search initialization method
         mixture_init = trial.suggest_categorical(
             "mixture_init",
-            ["uniform", "quantile", "random", "balanced_kmeans", "gmm", "tree_hierarchical"]
+            [
+                "uniform",
+                "quantile",
+                "random",
+                "balanced_kmeans",
+                "gmm",
+                "tree_hierarchical",
+            ],
         )
 
         # Search routing mode
-        routing_mode = trial.suggest_categorical(
-            "mixture_routing_mode",
-            ["token_choice", "expert_choice"]
-        )
+        routing_mode = trial.suggest_categorical("mixture_routing_mode", ["token_choice", "expert_choice"])
 
         num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
 
@@ -304,10 +310,15 @@ def create_objective_moe(
             params["mixture_expert_capacity_factor"] = trial.suggest_float("mixture_expert_capacity_factor", 0.8, 1.5)
             params["mixture_expert_choice_score"] = "gate"
             params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
-            params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
+            params["mixture_expert_choice_hard"] = trial.suggest_categorical(
+                "mixture_expert_choice_hard", [True, False]
+            )
 
         return evaluate_cv(
-            X, y, params, config,
+            X,
+            y,
+            params,
+            config,
             use_collapse_stopper=use_collapse_stopper,
             collapse_stopper_kwargs=collapse_stopper_kwargs,
         )
@@ -362,8 +373,7 @@ def analyze_moe(X, y, regime_true, best_params, config: BenchmarkConfig):
     for perm in permutations(range(K)):
         mapped = np.array([perm[p] % n_true_regimes for p in regime_pred])
         acc = (mapped == regime_true).mean()
-        if acc > best_acc:
-            best_acc = acc
+        best_acc = max(best_acc, acc)
 
     # Expert utilization
     expert_utilization = {}
@@ -431,7 +441,9 @@ def run_benchmark(
     study_moe = optuna.create_study(direction="minimize")
     study_moe.optimize(
         create_objective_moe(
-            X, y, config,
+            X,
+            y,
+            config,
             use_collapse_stopper=use_collapse_stopper,
             collapse_stopper_kwargs=collapse_stopper_kwargs,
         ),
@@ -499,15 +511,28 @@ def create_visualization(all_results: dict, output_path: str):
         ax.set_title(f"{name}")
 
         for bar, rmse in zip(bars, rmses, strict=True):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{rmse:.4f}",
-                    ha="center", va="bottom", fontsize=10)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{rmse:.4f}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+            )
 
         # Add MoE info
         moe_params = results["MoE"]["params"]
         routing = moe_params.get("mixture_routing_mode", "?")
         init = moe_params.get("mixture_init", "?")
-        ax.text(0.5, 0.02, f"routing={routing}, init={init}",
-                transform=ax.transAxes, ha="center", fontsize=9, style="italic")
+        ax.text(
+            0.5,
+            0.02,
+            f"routing={routing}, init={init}",
+            transform=ax.transAxes,
+            ha="center",
+            fontsize=9,
+            style="italic",
+        )
 
     plt.suptitle("Standard vs MoE Benchmark", fontsize=14, fontweight="bold")
     plt.tight_layout()
@@ -522,7 +547,9 @@ def print_final_summary(all_results: dict):
     print("FINAL SUMMARY")
     print("=" * 100)
 
-    print(f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'Impr':>8} {'K':>4} {'Routing':<14} {'Init':<18} {'Corr':>10}")
+    print(
+        f"\n{'Dataset':<12} {'Standard':>10} {'MoE':>10} {'Impr':>8} {'K':>4} {'Routing':<14} {'Init':<18} {'Corr':>10}"
+    )
     print("-" * 100)
 
     for name, results in all_results.items():
@@ -538,7 +565,9 @@ def print_final_summary(all_results: dict):
         analysis = results["analysis_moe"]
         corr = f"{analysis['expert_corr_min']:.2f}/{analysis['expert_corr_max']:.2f}"
 
-        print(f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {improvement:>+7.1f}% {K:>4} {routing:<14} {init:<18} {corr:>10}")
+        print(
+            f"{name:<12} {std_rmse:>10.4f} {moe_rmse:>10.4f} {improvement:>+7.1f}% {K:>4} {routing:<14} {init:<18} {corr:>10}"
+        )
 
     print("=" * 100)
 
@@ -553,9 +582,18 @@ def main():
     parser.add_argument("--splits", type=int, default=5, help="CV splits")
     parser.add_argument("--rounds", type=int, default=100, help="Boosting rounds")
     parser.add_argument("--no-viz", action="store_true", help="Skip visualization")
-    parser.add_argument("--collapse-stopper", action="store_true", help="Enable expert collapse early stopping")
+    parser.add_argument(
+        "--collapse-stopper",
+        action="store_true",
+        help="Enable expert collapse early stopping",
+    )
     parser.add_argument("--corr-threshold", type=float, default=0.7, help="Expert correlation threshold")
-    parser.add_argument("--min-expert-ratio", type=float, default=0.05, help="Minimum expert utilization ratio")
+    parser.add_argument(
+        "--min-expert-ratio",
+        type=float,
+        default=0.05,
+        help="Minimum expert utilization ratio",
+    )
     args = parser.parse_args()
 
     config = BenchmarkConfig(
@@ -578,7 +616,7 @@ def main():
         "verbose": True,
     }
     if args.collapse_stopper:
-        print(f"Expert Collapse Stopper: ENABLED")
+        print("Expert Collapse Stopper: ENABLED")
         print(f"  corr_threshold={args.corr_threshold}, min_expert_ratio={args.min_expert_ratio}")
 
     all_results = {}
@@ -590,7 +628,11 @@ def main():
 
         X, y, regime = generator(**params)
         all_results[name] = run_benchmark(
-            name, X, y, regime, config,
+            name,
+            X,
+            y,
+            regime,
+            config,
             use_collapse_stopper=args.collapse_stopper,
             collapse_stopper_kwargs=collapse_stopper_kwargs,
         )

@@ -95,7 +95,8 @@ def evaluate_cv(X, y, params, n_splits=5, num_boost_round=100, seed=42):
         valid_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
         try:
             model = lgb.train(
-                params, train_data,
+                params,
+                train_data,
                 num_boost_round=num_boost_round,
                 valid_sets=[valid_data],
                 callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
@@ -145,35 +146,42 @@ def _common_moe_params(trial, seed):
 
 def create_objective_baseline(X, y, seed, num_boost_round):
     """Baseline MoE (no progressive, no temperature annealing)."""
+
     def objective(trial):
         params = _common_moe_params(trial, seed)
         return evaluate_cv(X, y, params, num_boost_round=num_boost_round, seed=seed)
+
     return objective
 
 
 def create_objective_evomoe(X, y, seed, num_boost_round):
     """EvoMoE progressive training."""
+
     def objective(trial):
         params = _common_moe_params(trial, seed)
         params["mixture_progressive_mode"] = "evomoe"
         params["mixture_seed_iterations"] = trial.suggest_int("mixture_seed_iterations", 10, 60)
         params["mixture_spawn_perturbation"] = trial.suggest_float("mixture_spawn_perturbation", 0.1, 0.9)
         return evaluate_cv(X, y, params, num_boost_round=num_boost_round, seed=seed)
+
     return objective
 
 
 def create_objective_temperature(X, y, seed, num_boost_round):
     """Temperature annealing only."""
+
     def objective(trial):
         params = _common_moe_params(trial, seed)
         params["mixture_gate_temperature_init"] = trial.suggest_float("mixture_gate_temperature_init", 1.0, 5.0)
         params["mixture_gate_temperature_final"] = trial.suggest_float("mixture_gate_temperature_final", 0.1, 1.0)
         return evaluate_cv(X, y, params, num_boost_round=num_boost_round, seed=seed)
+
     return objective
 
 
 def create_objective_both(X, y, seed, num_boost_round):
     """EvoMoE + Temperature annealing."""
+
     def objective(trial):
         params = _common_moe_params(trial, seed)
         params["mixture_progressive_mode"] = "evomoe"
@@ -182,6 +190,7 @@ def create_objective_both(X, y, seed, num_boost_round):
         params["mixture_gate_temperature_init"] = trial.suggest_float("mixture_gate_temperature_init", 1.0, 5.0)
         params["mixture_gate_temperature_final"] = trial.suggest_float("mixture_gate_temperature_final", 0.1, 1.0)
         return evaluate_cv(X, y, params, num_boost_round=num_boost_round, seed=seed)
+
     return objective
 
 
@@ -201,14 +210,14 @@ def main():
 
     DATASETS = {
         "Synthetic": generate_synthetic_data(n_samples=2000, seed=seed),
-        "Hamilton":  generate_hamilton_data(n_samples=500, seed=seed),
+        "Hamilton": generate_hamilton_data(n_samples=500, seed=seed),
     }
 
     VARIANTS = {
-        "Baseline MoE":   create_objective_baseline,
-        "EvoMoE":         create_objective_evomoe,
-        "TempAnneal":     create_objective_temperature,
-        "EvoMoE+Temp":    create_objective_both,
+        "Baseline MoE": create_objective_baseline,
+        "EvoMoE": create_objective_evomoe,
+        "TempAnneal": create_objective_temperature,
+        "EvoMoE+Temp": create_objective_both,
     }
 
     print("=" * 80)
@@ -219,7 +228,7 @@ def main():
 
     all_results = {}
 
-    for ds_name, (X, y, regime) in DATASETS.items():
+    for ds_name, (X, y, _regime) in DATASETS.items():
         print(f"\n{'=' * 60}")
         print(f"Dataset: {ds_name}  (N={len(y)}, F={X.shape[1]})")
         print(f"{'=' * 60}")

@@ -211,9 +211,21 @@ raises-extend-require-match-for = ["*Exception", "*Error"]
     # import not at top-level
     "PLC0415"
 ]
+"python-package/lightgbm_moe/auto_k.py" = [
+    # (flake8-print) report printing
+    "T201"
+]
 "python-package/lightgbm_moe/basic.py" = [
     # (pylint) Using the global statement is discouraged
     "PLW0603"
+]
+"python-package/lightgbm_moe/diagnostics.py" = [
+    # (flake8-print) report printing
+    "T201"
+]
+"python-package/lightgbm_moe/pruning.py" = [
+    # (flake8-print) report printing
+    "T201"
 ]
 "tests/*" = [
     # (flake8-bugbear) Found useless expression

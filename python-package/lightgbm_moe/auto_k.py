@@ -8,11 +8,13 @@ import numpy as np
 
 from . import engine
 
+_DEFAULT_K_RANGE = range(2, 8)
+
 
 def select_num_experts(
     params,
     train_set,
-    k_range=range(2, 8),
+    k_range=_DEFAULT_K_RANGE,
     criterion="bic",
     num_boost_round=100,
     valid_sets=None,
@@ -81,12 +83,10 @@ def select_num_experts(
                 crit, detail = _eval_cv_rmse(p_k, train_set, num_boost_round, nfold, seed, callbacks)
                 models.append(None)
             else:
-                crit, detail, model = _eval_ic(
-                    p_k, train_set, num_boost_round, valid_sets, callbacks, criterion
-                )
+                crit, detail, model = _eval_ic(p_k, train_set, num_boost_round, valid_sets, callbacks, criterion)
                 models.append(model)
         except Exception as e:
-            warnings.warn(f"K={k} failed: {e}")
+            warnings.warn(f"K={k} failed: {e}", stacklevel=2)
             criterion_values.append(float("inf"))
             details.append({"error": str(e)})
             models.append(None)
