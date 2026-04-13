@@ -31,6 +31,10 @@ try:
 except ImportError:
     pass
 
+from .auto_k import select_num_experts
+from .diagnostics import diagnose_moe
+from .pruning import PrunedMoEModel, merge_experts, prune_experts
+
 
 _version_path = Path(__file__).resolve().parent / "VERSION.txt"
 if _version_path.is_file():
@@ -61,4 +65,9 @@ __all__ = [
     "plot_metric",
     "plot_tree",
     "create_tree_digraph",
+    "diagnose_moe",
+    "select_num_experts",
+    "PrunedMoEModel",
+    "prune_experts",
+    "merge_experts",
 ]
