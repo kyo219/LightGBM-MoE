@@ -725,47 +725,35 @@ def analyze_moe(X, y, regime_true, best_params, config: BenchmarkConfig, is_expe
     train_data = lgb.Dataset(X, label=y)
     model = lgb.train(full_params, train_data, num_boost_round=config.num_boost_round)
 
+    # Run label-free diagnostics
+    diag = lgb.diagnose_moe(model, X, y, print_report=False)
+
+    # Regime accuracy (with best permutation) — requires ground-truth labels
     regime_pred = model.predict_regime(X)
     regime_proba = model.predict_regime_proba(X)
     expert_preds = model.predict_expert_pred(X)
-    K = regime_proba.shape[1]  # Get actual K from model output
+    K = diag["K"]
 
-    # Gate check
-    gate_working = not np.allclose(regime_proba, 1.0 / K, atol=0.01)
-    proba_range = (regime_proba.min(), regime_proba.max())
-
-    # Expert differentiation (correlation between experts)
-    corrs = []
-    for i in range(K):
-        for j in range(i + 1, K):
-            corrs.append(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1])
-    expert_corr_max = max(corrs)  # Most similar pair (collapse detection)
-    expert_corr_min = min(corrs)  # Most differentiated pair
-    experts_different = expert_corr_max < 0.99
-
-    # Regime accuracy (with best permutation)
-    # Map predicted experts to true regimes, find best mapping
     n_true_regimes = len(np.unique(regime_true))
     best_acc = 0
     for perm in permutations(range(K)):
-        # Map expert k to regime perm[k] % n_true_regimes
         mapped = np.array([perm[p] % n_true_regimes for p in regime_pred])
         acc = (mapped == regime_true).mean()
         best_acc = max(best_acc, acc)
 
-    return {
-        "K": K,
-        "gate_working": gate_working,
-        "proba_range": proba_range,
-        "experts_different": experts_different,
-        "expert_corr_max": expert_corr_max,
-        "expert_corr_min": expert_corr_min,
-        "regime_accuracy": best_acc,
-        "regime_pred": regime_pred,
-        "regime_proba": regime_proba,
-        "expert_preds": expert_preds,
-        "regime_true": regime_true,
-    }
+    # Merge diagnostics + regime accuracy + raw arrays (backward compat)
+    result = dict(diag)
+    result["regime_accuracy"] = best_acc
+    result["regime_pred"] = regime_pred
+    result["regime_proba"] = regime_proba
+    result["expert_preds"] = expert_preds
+    result["regime_true"] = regime_true
+    # Backward-compatible aliases
+    result["gate_working"] = not diag["expert_collapsed"] and diag["confidence_ratio"] > 0.1
+    result["proba_range"] = (regime_proba.min(), regime_proba.max())
+    result["experts_different"] = not diag["expert_collapsed"]
+
+    return result
 
 
 # =============================================================================
@@ -871,15 +859,15 @@ def run_benchmark(
     results["analysis_moe_pe"] = analysis_moe_pe
 
     # Print analysis
-    print(f"  MoE ({moe_routing}):")
-    print(f"    Gate working: {'Yes' if analysis_moe['gate_working'] else 'NO!'}")
-    print(f"    Expert corr (max/min): {analysis_moe['expert_corr_max']:.2f} / {analysis_moe['expert_corr_min']:.2f}")
+    print(f"  MoE ({moe_routing}) -> {analysis_moe['verdict']}")
+    print(f"    Routing gain: {analysis_moe['routing_gain']:+.1f}%  |  "
+          f"Specialization: {analysis_moe['specialization_rate']:.1%}  |  "
+          f"Corr: {analysis_moe['expert_corr_max']:.2f}")
     print(f"    Regime accuracy: {analysis_moe['regime_accuracy']:.1%}")
-    print(f"  MoE-PE ({moe_pe_routing}):")
-    print(f"    Gate working: {'Yes' if analysis_moe_pe['gate_working'] else 'NO!'}")
-    print(
-        f"    Expert corr (max/min): {analysis_moe_pe['expert_corr_max']:.2f} / {analysis_moe_pe['expert_corr_min']:.2f}"
-    )
+    print(f"  MoE-PE ({moe_pe_routing}) -> {analysis_moe_pe['verdict']}")
+    print(f"    Routing gain: {analysis_moe_pe['routing_gain']:+.1f}%  |  "
+          f"Specialization: {analysis_moe_pe['specialization_rate']:.1%}  |  "
+          f"Corr: {analysis_moe_pe['expert_corr_max']:.2f}")
     print(f"    Regime accuracy: {analysis_moe_pe['regime_accuracy']:.1%}")
 
     # Summary

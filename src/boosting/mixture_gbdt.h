@@ -100,6 +100,7 @@ class MixtureGBDT : public GBDTBase {
 
   double GetLeafValue(int tree_idx, int leaf_idx) const override;
   void SetLeafValue(int tree_idx, int leaf_idx, double val) override;
+  int GetNumLeavesForTree(int tree_idx) const override;
 
   const char* SubModelName() const override { return "mixture"; }
   std::string GetLoadedParam() const override;
@@ -354,6 +355,19 @@ class MixtureGBDT : public GBDTBase {
   void ConvertSelectionToResponsibilities();
 
   /*!
+   * \brief Spawn K experts from a trained seed GBDT (EvoMoE progressive training)
+   */
+  void SpawnExpertsFromSeed();
+
+  /*!
+   * \brief Compute current gate temperature based on MoE iteration progress
+   * \param moe_iter Current iteration within MoE phase
+   * \param total_moe_iters Total number of MoE phase iterations
+   * \return Current temperature value
+   */
+  double ComputeTemperature(int moe_iter, int total_moe_iters) const;
+
+  /*!
    * \brief Forward pass for validation data: compute expert predictions and gate probabilities
    * \param valid_idx Index of validation dataset
    */
@@ -391,6 +405,23 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief Previous gate probabilities for Markov mode validation */
   std::vector<std::vector<double>> prev_gate_proba_valid_;
+
+  // ===== Progressive training (EvoMoE) =====
+  /*! \brief Whether progressive mode is enabled */
+  bool use_progressive_;
+
+  /*! \brief Number of seed training iterations */
+  int seed_iterations_;
+
+  /*! \brief Seed GBDT for progressive training */
+  std::unique_ptr<GBDT> seed_expert_;
+
+  /*! \brief Whether seed phase has finished */
+  bool seed_phase_complete_;
+
+  // ===== Gate temperature annealing =====
+  /*! \brief Current gate temperature */
+  double gate_temperature_;
 
   // ===== Early stopping =====
   /*! \brief Number of rounds for early stopping (0 = disabled) */

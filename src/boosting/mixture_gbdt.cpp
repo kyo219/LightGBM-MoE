@@ -40,6 +40,10 @@ MixtureGBDT::MixtureGBDT()
       label_idx_(0),
       use_markov_(false),
       use_momentum_(false),
+      use_progressive_(false),
+      seed_iterations_(0),
+      seed_phase_complete_(false),
+      gate_temperature_(1.0),
       early_stopping_round_(0),
       early_stopping_min_delta_(0.0),
       es_first_metric_only_(false) {
@@ -98,6 +102,14 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   gate_config_->learning_rate = config_->mixture_gate_learning_rate;
   gate_config_->lambda_l2 = config_->mixture_gate_lambda_l2;
 
+  // Progressive training mode (EvoMoE)
+  use_progressive_ = (config_->mixture_progressive_mode == "evomoe");
+  seed_iterations_ = config_->mixture_seed_iterations;
+  seed_phase_complete_ = false;
+
+  // Gate temperature annealing
+  gate_temperature_ = config_->mixture_gate_temperature_init;
+
   // Initialize experts
   // Note: We pass nullptr for objective_function because we use custom gradients
   // (responsibility-weighted) in MStepExperts. The main objective is stored in
@@ -139,40 +151,76 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
                num_experts_, static_cast<int>(config_->mixture_expert_extra_trees.size()));
   }
 
-  experts_.clear();
-  experts_.reserve(num_experts_);
-  expert_configs_.clear();
-  expert_configs_.reserve(num_experts_);
-  for (int k = 0; k < num_experts_; ++k) {
-    Log::Debug("MixtureGBDT::Init - creating expert %d", k);
-    // Create per-expert config with different seed for symmetry breaking
-    expert_configs_.emplace_back(new Config(*expert_config_));
-    expert_configs_[k]->seed = config_->seed + k + 1;  // Different seed per expert
+  if (use_progressive_) {
+    // EvoMoE progressive mode: create only a single seed expert
+    Log::Info("MixtureGBDT: Progressive mode (EvoMoE) enabled, "
+              "seed_iterations=%d, perturbation=%.2f",
+              seed_iterations_, config_->mixture_spawn_perturbation);
 
-    // Apply per-expert hyperparameters if specified
-    if (use_per_expert_max_depth) {
-      expert_configs_[k]->max_depth = config_->mixture_expert_max_depths[k];
-    }
-    if (use_per_expert_num_leaves) {
-      expert_configs_[k]->num_leaves = config_->mixture_expert_num_leaves[k];
-    }
-    if (use_per_expert_min_data_in_leaf) {
-      expert_configs_[k]->min_data_in_leaf = config_->mixture_expert_min_data_in_leaf[k];
-    }
-    if (use_per_expert_min_gain_to_split) {
-      expert_configs_[k]->min_gain_to_split = config_->mixture_expert_min_gain_to_split[k];
-    }
-    if (use_per_expert_extra_trees) {
-      expert_configs_[k]->extra_trees = (config_->mixture_expert_extra_trees[k] != 0);
-    }
+    seed_expert_.reset(new GBDT());
+    seed_expert_->Init(expert_config_.get(), train_data_, nullptr, {});
 
-    experts_.emplace_back(new GBDT());
-    Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d, max_depth=%d, num_leaves=%d, min_data=%d, min_gain=%.4f, extra_trees=%d",
-               k, expert_configs_[k]->seed, expert_configs_[k]->max_depth,
-               expert_configs_[k]->num_leaves, expert_configs_[k]->min_data_in_leaf,
-               expert_configs_[k]->min_gain_to_split, expert_configs_[k]->extra_trees ? 1 : 0);
-    experts_[k]->Init(expert_configs_[k].get(), train_data_, nullptr, {});
-    Log::Debug("MixtureGBDT::Init - expert %d initialized", k);
+    // Don't create K experts yet - they will be spawned after seed phase
+    // But we still need expert_configs_ for later use in SpawnExpertsFromSeed
+    expert_configs_.clear();
+    expert_configs_.reserve(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_configs_.emplace_back(new Config(*expert_config_));
+      expert_configs_[k]->seed = config_->seed + k + 1;
+
+      if (use_per_expert_max_depth) {
+        expert_configs_[k]->max_depth = config_->mixture_expert_max_depths[k];
+      }
+      if (use_per_expert_num_leaves) {
+        expert_configs_[k]->num_leaves = config_->mixture_expert_num_leaves[k];
+      }
+      if (use_per_expert_min_data_in_leaf) {
+        expert_configs_[k]->min_data_in_leaf = config_->mixture_expert_min_data_in_leaf[k];
+      }
+      if (use_per_expert_min_gain_to_split) {
+        expert_configs_[k]->min_gain_to_split = config_->mixture_expert_min_gain_to_split[k];
+      }
+      if (use_per_expert_extra_trees) {
+        expert_configs_[k]->extra_trees = (config_->mixture_expert_extra_trees[k] != 0);
+      }
+    }
+  } else {
+    // Standard mode: create K experts from scratch
+    experts_.clear();
+    experts_.reserve(num_experts_);
+    expert_configs_.clear();
+    expert_configs_.reserve(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      Log::Debug("MixtureGBDT::Init - creating expert %d", k);
+      // Create per-expert config with different seed for symmetry breaking
+      expert_configs_.emplace_back(new Config(*expert_config_));
+      expert_configs_[k]->seed = config_->seed + k + 1;  // Different seed per expert
+
+      // Apply per-expert hyperparameters if specified
+      if (use_per_expert_max_depth) {
+        expert_configs_[k]->max_depth = config_->mixture_expert_max_depths[k];
+      }
+      if (use_per_expert_num_leaves) {
+        expert_configs_[k]->num_leaves = config_->mixture_expert_num_leaves[k];
+      }
+      if (use_per_expert_min_data_in_leaf) {
+        expert_configs_[k]->min_data_in_leaf = config_->mixture_expert_min_data_in_leaf[k];
+      }
+      if (use_per_expert_min_gain_to_split) {
+        expert_configs_[k]->min_gain_to_split = config_->mixture_expert_min_gain_to_split[k];
+      }
+      if (use_per_expert_extra_trees) {
+        expert_configs_[k]->extra_trees = (config_->mixture_expert_extra_trees[k] != 0);
+      }
+
+      experts_.emplace_back(new GBDT());
+      Log::Debug("MixtureGBDT::Init - initializing expert %d with seed %d, max_depth=%d, num_leaves=%d, min_data=%d, min_gain=%.4f, extra_trees=%d",
+                 k, expert_configs_[k]->seed, expert_configs_[k]->max_depth,
+                 expert_configs_[k]->num_leaves, expert_configs_[k]->min_data_in_leaf,
+                 expert_configs_[k]->min_gain_to_split, expert_configs_[k]->extra_trees ? 1 : 0);
+      experts_[k]->Init(expert_configs_[k].get(), train_data_, nullptr, {});
+      Log::Debug("MixtureGBDT::Init - expert %d initialized", k);
+    }
   }
 
   // Check smoothing modes
@@ -257,8 +305,16 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   early_stopping_min_delta_ = config_->early_stopping_min_delta;
   es_first_metric_only_ = config_->first_metric_only;
 
-  // Initialize responsibilities
-  InitResponsibilities();
+  // Initialize responsibilities (skip during progressive seed phase)
+  if (!use_progressive_) {
+    InitResponsibilities();
+  }
+
+  // Log temperature annealing config
+  if (config_->mixture_gate_temperature_init != config_->mixture_gate_temperature_final) {
+    Log::Info("MixtureGBDT: Gate temperature annealing enabled (init=%.2f, final=%.2f)",
+              config_->mixture_gate_temperature_init, config_->mixture_gate_temperature_final);
+  }
 
   Log::Info("MixtureGBDT: Initialization complete (smoothing=%s)",
             config_->mixture_r_smoothing.c_str());
@@ -1062,6 +1118,69 @@ double MixtureGBDT::ComputePointwiseLoss(double y, double pred) const {
   return diff * diff;
 }
 
+double MixtureGBDT::ComputeTemperature(int moe_iter, int total_moe_iters) const {
+  double t_init = config_->mixture_gate_temperature_init;
+  double t_final = config_->mixture_gate_temperature_final;
+  if (t_init == t_final) return t_init;  // No annealing
+
+  // Exponential decay: T(t) = T_init * (T_final/T_init)^(t/T_total)
+  double progress = std::min(1.0, static_cast<double>(moe_iter) / std::max(1, total_moe_iters));
+  return t_init * std::pow(t_final / t_init, progress);
+}
+
+void MixtureGBDT::SpawnExpertsFromSeed() {
+  const double perturbation = config_->mixture_spawn_perturbation;
+  Log::Info("MixtureGBDT: Spawning %d experts from seed "
+            "(perturbation=%.2f, seed has %d trees)",
+            num_experts_, perturbation, seed_expert_->NumberOfTotalModel());
+
+  experts_.clear();
+  experts_.reserve(num_experts_);
+
+  for (int k = 0; k < num_experts_; ++k) {
+    experts_.emplace_back(new GBDT());
+    // Init creates full training infrastructure (tree_learner, score_updater, etc.)
+    experts_[k]->Init(expert_configs_[k].get(), train_data_, nullptr, {});
+
+    for (size_t v = 0; v < valid_datas_.size(); ++v) {
+      experts_[k]->AddValidDataset(valid_datas_[v], {});
+    }
+
+    // Merge seed trees into this expert (copies all trees, sets num_init_iteration_)
+    experts_[k]->MergeFrom(seed_expert_.get());
+
+    // Sync score updaters with merged trees so GetPredictAt returns correct values
+    experts_[k]->SyncScoresFromMergedTrees();
+
+    // Apply perturbation: randomly perturb leaf values to break symmetry
+    if (perturbation > 0.0 && k > 0) {
+      // Expert 0 keeps the exact seed copy; others get perturbed
+      const int num_trees = seed_expert_->NumberOfTotalModel();
+      std::mt19937 rng(config_->seed + k + 10000);
+      std::uniform_real_distribution<double> drop_dist(0.0, 1.0);
+      std::normal_distribution<double> noise_dist(0.0, 1.0);
+
+      for (int t = 0; t < num_trees; ++t) {
+        if (drop_dist(rng) < perturbation) {
+          // Perturb this tree's leaf values
+          const int num_leaves = experts_[k]->GetNumLeavesForTree(t);
+          for (int l = 0; l < num_leaves; ++l) {
+            double orig = experts_[k]->GetLeafValue(t, l);
+            double noise_scale = std::max(std::abs(orig), 0.01);
+            double new_val = orig + noise_scale * noise_dist(rng) * 0.5;
+            experts_[k]->SetLeafValue(t, l, new_val);
+          }
+        }
+      }
+    }
+  }
+
+  Log::Info("MixtureGBDT: Experts spawned from seed successfully");
+
+  // Free seed expert
+  seed_expert_.reset();
+}
+
 void MixtureGBDT::Forward() {
   // Get expert predictions
   for (int k = 0; k < num_experts_; ++k) {
@@ -1079,12 +1198,14 @@ void MixtureGBDT::Forward() {
   // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
   // gate_proba_ is in sample-major order: gate_proba_[i * num_experts_ + k]
   // expert_bias_ is added to encourage balanced expert usage (Loss-Free Balancing)
+  // Gate temperature annealing: divide logits by temperature before softmax
+  // High temperature → uniform routing (exploration), low → sharp routing (exploitation)
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    // Copy to sample-major order for this sample, adding expert bias
+    // Copy to sample-major order for this sample, adding expert bias and applying temperature
     std::vector<double> scores(num_experts_);
     for (int k = 0; k < num_experts_; ++k) {
-      scores[k] = gate_raw[k * num_data_ + i] + expert_bias_[k];  // Add bias for load balancing
+      scores[k] = (gate_raw[k * num_data_ + i] + expert_bias_[k]) / gate_temperature_;
     }
     Softmax(scores.data(), num_experts_,
             gate_proba_.data() + i * num_experts_);
@@ -1157,14 +1278,14 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
   int64_t out_len;
   gate_->GetPredictAt(data_idx, gate_raw.data(), &out_len);
 
-  // Apply softmax per sample with expert bias
+  // Apply softmax per sample with expert bias and temperature scaling
   // gate_raw is in class-major order: gate_raw[k * num_valid + i]
   // gate_proba is in sample-major order: gate_proba[i * num_experts_ + k]
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_valid; ++i) {
     std::vector<double> scores(num_experts_);
     for (int k = 0; k < num_experts_; ++k) {
-      scores[k] = gate_raw[k * num_valid + i] + expert_bias_[k];
+      scores[k] = (gate_raw[k * num_valid + i] + expert_bias_[k]) / gate_temperature_;
     }
     Softmax(scores.data(), num_experts_, gate_proba.data() + i * num_experts_);
   }
@@ -1813,7 +1934,74 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   (void)gradients;
   (void)hessians;
 
-  Log::Debug("MixtureGBDT::TrainOneIter - starting iteration %d", iter_);
+  // === SEED PHASE (progressive mode) ===
+  if (use_progressive_ && !seed_phase_complete_) {
+    if (iter_ < seed_iterations_) {
+      // Train seed expert on all data
+      int64_t out_len;
+      seed_expert_->GetPredictAt(0, yhat_.data(), &out_len);
+
+      // Compute objective gradients on seed predictions
+      if (objective_function_ != nullptr) {
+        objective_function_->GetGradients(yhat_.data(), gradients_.data(), hessians_.data());
+      } else {
+        // Default MSE
+        const label_t* labels = train_data_->metadata().label();
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          double diff = yhat_[i] - labels[i];
+          gradients_[i] = static_cast<score_t>(2.0 * diff);
+          hessians_[i] = static_cast<score_t>(2.0);
+        }
+      }
+
+      // Train seed expert
+      seed_expert_->TrainOneIter(gradients_.data(), hessians_.data());
+
+      // Update training predictions from seed
+      seed_expert_->GetPredictAt(0, yhat_.data(), &out_len);
+
+      // Update validation predictions from seed (needed for early stopping / metrics)
+      for (size_t v = 0; v < valid_datas_.size(); ++v) {
+        int64_t vlen;
+        seed_expert_->GetPredictAt(static_cast<int>(v) + 1,
+                                    yhat_valid_[v].data(), &vlen);
+      }
+
+      ++iter_;
+
+      if (iter_ % 10 == 0 || iter_ == seed_iterations_) {
+        Log::Info("MixtureGBDT: Seed phase iteration %d/%d",
+                  iter_, seed_iterations_);
+      }
+
+      return false;
+    } else {
+      // Seed phase complete → spawn K experts
+      SpawnExpertsFromSeed();
+      seed_phase_complete_ = true;
+
+      // Initialize responsibilities for the new experts
+      InitResponsibilities();
+
+      Log::Info("MixtureGBDT: Seed phase complete, entering MoE phase at iteration %d",
+                iter_);
+    }
+  }
+
+  // === Update gate temperature ===
+  {
+    int moe_iter = use_progressive_ ? (iter_ - seed_iterations_) : iter_;
+    int total_moe_iters = use_progressive_
+        ? (config_->num_iterations - seed_iterations_)
+        : config_->num_iterations;
+    gate_temperature_ = ComputeTemperature(moe_iter, total_moe_iters);
+
+    if (moe_iter % 10 == 0 &&
+        config_->mixture_gate_temperature_init != config_->mixture_gate_temperature_final) {
+      Log::Info("MixtureGBDT: Gate temperature = %.4f (moe_iter=%d/%d)",
+                gate_temperature_, moe_iter, total_moe_iters);
+    }
+  }
 
   // Forward pass - compute expert predictions and gate probabilities
   Forward();
@@ -1824,8 +2012,9 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   // prediction=0, causing EStep to compute uniform responsibilities and
   // all experts train identically.
   const int warmup_iters = config_->mixture_warmup_iters;
+  const int moe_iter = use_progressive_ ? (iter_ - seed_iterations_) : iter_;
 
-  if (iter_ >= warmup_iters) {
+  if (moe_iter >= warmup_iters) {
     if (use_expert_choice_) {
       EStepExpertChoice();
     } else {
@@ -1894,10 +2083,15 @@ int MixtureGBDT::GetCurrentIteration() const {
 
 void MixtureGBDT::RollbackOneIter() {
   if (iter_ > 0) {
-    for (int k = 0; k < num_experts_; ++k) {
-      experts_[k]->RollbackOneIter();
+    if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
+      // During seed phase, rollback the seed expert
+      seed_expert_->RollbackOneIter();
+    } else {
+      for (int k = 0; k < num_experts_; ++k) {
+        experts_[k]->RollbackOneIter();
+      }
+      gate_->RollbackOneIter();
     }
-    gate_->RollbackOneIter();
     --iter_;
   }
 }
@@ -2330,8 +2524,15 @@ void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
   }
 
   // Add validation data to each expert and gate (they will manage their own ScoreUpdaters)
-  for (int k = 0; k < num_experts_; ++k) {
-    experts_[k]->AddValidDataset(valid_data, {});  // No metrics at expert level
+  if (use_progressive_ && !seed_phase_complete_) {
+    // During seed phase, only add to seed expert
+    if (seed_expert_) {
+      seed_expert_->AddValidDataset(valid_data, {});
+    }
+  } else {
+    for (int k = 0; k < num_experts_; ++k) {
+      experts_[k]->AddValidDataset(valid_data, {});  // No metrics at expert level
+    }
   }
   gate_->AddValidDataset(valid_data, {});  // No metrics at gate level
 
@@ -2419,10 +2620,19 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   ss << "\n";
 
   // Expert models
-  for (int k = 0; k < num_experts_; ++k) {
-    ss << "[expert_model_" << k << "]\n";
-    ss << experts_[k]->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
-    ss << "\n";
+  if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
+    // Still in seed phase - save seed expert as all experts
+    for (int k = 0; k < num_experts_; ++k) {
+      ss << "[expert_model_" << k << "]\n";
+      ss << seed_expert_->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
+      ss << "\n";
+    }
+  } else {
+    for (int k = 0; k < num_experts_; ++k) {
+      ss << "[expert_model_" << k << "]\n";
+      ss << experts_[k]->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
+      ss << "\n";
+    }
   }
 
   return ss.str();
@@ -2622,10 +2832,14 @@ int MixtureGBDT::LabelIdx() const {
 
 int MixtureGBDT::NumberOfTotalModel() const {
   int total = 0;
-  for (int k = 0; k < num_experts_; ++k) {
-    total += experts_[k]->NumberOfTotalModel();
+  if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
+    total += seed_expert_->NumberOfTotalModel();
+  } else {
+    for (int k = 0; k < num_experts_; ++k) {
+      total += experts_[k]->NumberOfTotalModel();
+    }
+    total += gate_->NumberOfTotalModel();
   }
-  total += gate_->NumberOfTotalModel();
   return total;
 }
 
@@ -2661,6 +2875,12 @@ void MixtureGBDT::SetLeafValue(int tree_idx, int leaf_idx, double val) {
   (void)leaf_idx;
   (void)val;
   Log::Fatal("MixtureGBDT::SetLeafValue is not implemented for mixture models");
+}
+
+int MixtureGBDT::GetNumLeavesForTree(int tree_idx) const {
+  (void)tree_idx;
+  Log::Fatal("MixtureGBDT::GetNumLeavesForTree is not implemented for mixture models");
+  return 0;
 }
 
 std::string MixtureGBDT::GetLoadedParam() const {

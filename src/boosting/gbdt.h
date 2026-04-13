@@ -86,6 +86,35 @@ class GBDT : public GBDTBase {
     num_iteration_for_pred_ = static_cast<int>(models_.size()) / num_tree_per_iteration_;
   }
 
+  /*!
+   * \brief Sync score updaters with init iteration trees after MergeFrom.
+   *
+   * After MergeFrom, the merged trees are stored as init iterations but their
+   * predictions are not reflected in train/valid score updaters. This method
+   * adds the init tree predictions to all score updaters.
+   */
+  void SyncScoresFromMergedTrees() {
+    if (!train_score_updater_ || num_init_iteration_ <= 0) return;
+    for (int i = 0; i < num_init_iteration_; ++i) {
+      for (int j = 0; j < num_tree_per_iteration_; ++j) {
+        int idx = i * num_tree_per_iteration_ + j;
+        if (idx < static_cast<int>(models_.size())) {
+          train_score_updater_->AddScore(models_[idx].get(), j);
+        }
+      }
+    }
+    for (auto& score_updater : valid_score_updater_) {
+      for (int i = 0; i < num_init_iteration_; ++i) {
+        for (int j = 0; j < num_tree_per_iteration_; ++j) {
+          int idx = i * num_tree_per_iteration_ + j;
+          if (idx < static_cast<int>(models_.size())) {
+            score_updater->AddScore(models_[idx].get(), j);
+          }
+        }
+      }
+    }
+  }
+
   void ShuffleModels(int start_iter, int end_iter) override {
     int total_iter = static_cast<int>(models_.size()) / num_tree_per_iteration_;
     start_iter = std::max(0, start_iter);
@@ -458,6 +487,11 @@ class GBDT : public GBDTBase {
     CHECK(tree_idx >= 0 && static_cast<size_t>(tree_idx) < models_.size());
     CHECK(leaf_idx >= 0 && leaf_idx < models_[tree_idx]->num_leaves());
     models_[tree_idx]->SetLeafOutput(leaf_idx, val);
+  }
+
+  inline int GetNumLeavesForTree(int tree_idx) const override {
+    CHECK(tree_idx >= 0 && static_cast<size_t>(tree_idx) < models_.size());
+    return models_[tree_idx]->num_leaves();
   }
 
   /*!

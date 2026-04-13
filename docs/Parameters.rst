@@ -1598,6 +1598,30 @@ Mixture-of-Experts Parameters
 
    -  recommended range: 0.01-0.1
 
+-  ``mixture_hard_m_step`` :raw-html:`<a id="mixture_hard_m_step" title="Permalink to this parameter" href="#mixture_hard_m_step">&#x1F517;&#xFE0E;</a>`, default = ``true``, type = bool
+
+   -  use hard (argmax) assignment in M-step instead of soft responsibility weighting
+
+   -  when true, each sample's gradient goes only to the expert with highest responsibility
+
+   -  other experts receive zero gradient for that sample
+
+   -  this forces experts to learn from completely different data subsets, preventing collapse
+
+   -  recommended: ``true`` for most use cases
+
+-  ``mixture_diversity_lambda`` :raw-html:`<a id="mixture_diversity_lambda" title="Permalink to this parameter" href="#mixture_diversity_lambda">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_diversity_lambda <= 1.0``
+
+   -  diversity regularization coefficient for expert predictions
+
+   -  adds gradient penalty that pushes expert predictions apart
+
+   -  for expert k at sample i: grad += lambda * sum_{j!=k} r_ij * (f_k - f_j) / (K-1)
+
+   -  0.0 means no diversity regularization (default)
+
+   -  recommended range: 0.1-0.5
+
 -  ``mixture_expert_dropout_rate`` :raw-html:`<a id="mixture_expert_dropout_rate" title="Permalink to this parameter" href="#mixture_expert_dropout_rate">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_expert_dropout_rate < 1.0``
 
    -  dropout rate for experts during training
@@ -1614,13 +1638,13 @@ Mixture-of-Experts Parameters
 
    -  note: at least one expert is always kept (never drops all experts)
 
--  ``mixture_routing_mode`` :raw-html:`<a id="mixture_routing_mode" title="Permalink to this parameter" href="#mixture_routing_mode">&#x1F517;&#xFE0E;</a>`, default = ``expert_choice``, type = enum, options: ``expert_choice``, ``token_choice``
+-  ``mixture_routing_mode`` :raw-html:`<a id="mixture_routing_mode" title="Permalink to this parameter" href="#mixture_routing_mode">&#x1F517;&#xFE0E;</a>`, default = ``token_choice``, type = enum, options: ``token_choice``, ``expert_choice``
 
    -  routing strategy for Mixture-of-Experts
 
-   -  ``expert_choice``: each expert selects samples (recommended, prevents Expert Collapse)
+   -  ``token_choice``: each sample selects experts (default, standard EM-based)
 
-   -  ``token_choice``: each sample selects experts (WARNING: prone to Expert Collapse)
+   -  ``expert_choice``: each expert selects samples (better load balance, but experimental)
 
 -  ``mixture_expert_capacity_factor`` :raw-html:`<a id="mixture_expert_capacity_factor" title="Permalink to this parameter" href="#mixture_expert_capacity_factor">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``0.0 < mixture_expert_capacity_factor <= 3.0``
 
@@ -1630,15 +1654,15 @@ Mixture-of-Experts Parameters
 
    -  1.0 means exact balanced capacity, >1.0 allows overlap
 
--  ``mixture_expert_choice_score`` :raw-html:`<a id="mixture_expert_choice_score" title="Permalink to this parameter" href="#mixture_expert_choice_score">&#x1F517;&#xFE0E;</a>`, default = ``gate``, type = enum, options: ``gate``, ``loss``, ``combined``
+-  ``mixture_expert_choice_score`` :raw-html:`<a id="mixture_expert_choice_score" title="Permalink to this parameter" href="#mixture_expert_choice_score">&#x1F517;&#xFE0E;</a>`, default = ``combined``, type = enum, options: ``gate``, ``loss``, ``combined``
 
    -  score function for expert sample selection (only for expert_choice routing)
 
-   -  ``gate``: use gate probability as affinity (recommended, prevents Expert Collapse)
+   -  ``gate``: use gate probability as affinity
 
-   -  ``loss``: use negative loss as affinity (WARNING: causes Expert Collapse)
+   -  ``loss``: use negative loss as affinity
 
-   -  ``combined``: gate + alpha * (-loss) (WARNING: causes Expert Collapse)
+   -  ``combined``: gate + alpha * (-loss) (default, uses both routing quality and expert fit)
 
 -  ``mixture_expert_choice_boost`` :raw-html:`<a id="mixture_expert_choice_boost" title="Permalink to this parameter" href="#mixture_expert_choice_boost">&#x1F517;&#xFE0E;</a>`, default = ``10.0``, type = double, constraints: ``1.0 < mixture_expert_choice_boost <= 100.0``
 
@@ -1653,6 +1677,48 @@ Mixture-of-Experts Parameters
    -  when true, only selected samples contribute to each expert's gradient
 
    -  this forces stronger specialization but may reduce gradient signal
+
+-  ``mixture_progressive_mode`` :raw-html:`<a id="mixture_progressive_mode" title="Permalink to this parameter" href="#mixture_progressive_mode">&#x1F517;&#xFE0E;</a>`, default = ``none``, type = enum, options: ``none``, ``evomoe``
+
+   -  progressive training mode
+
+   -  ``none``: standard MoE training (all experts initialized separately)
+
+   -  ``evomoe``: train a single seed GBDT first, then duplicate into K experts with perturbation
+
+-  ``mixture_seed_iterations`` :raw-html:`<a id="mixture_seed_iterations" title="Permalink to this parameter" href="#mixture_seed_iterations">&#x1F517;&#xFE0E;</a>`, default = ``50``, type = int, constraints: ``mixture_seed_iterations >= 0``
+
+   -  number of iterations for seed GBDT training in progressive mode
+
+   -  during this phase, a single GBDT is trained on all data (no gating)
+
+   -  after this, the seed is duplicated into K experts with perturbation
+
+-  ``mixture_spawn_perturbation`` :raw-html:`<a id="mixture_spawn_perturbation" title="Permalink to this parameter" href="#mixture_spawn_perturbation">&#x1F517;&#xFE0E;</a>`, default = ``0.5``, type = double, constraints: ``0.0 <= mixture_spawn_perturbation <= 1.0``
+
+   -  perturbation ratio for expert spawning in progressive mode
+
+   -  controls how much each expert differs from the seed model after duplication
+
+   -  0.0 = exact copy (no perturbation), 1.0 = complete reset of perturbed trees
+
+   -  recommended: 0.5 (Drop-Upcycling optimal ratio)
+
+-  ``mixture_gate_temperature_init`` :raw-html:`<a id="mixture_gate_temperature_init" title="Permalink to this parameter" href="#mixture_gate_temperature_init">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``mixture_gate_temperature_init > 0.0``
+
+   -  initial temperature for gate softmax (high = near-uniform routing)
+
+   -  1.0 = no annealing (standard softmax)
+
+   -  recommended: 2.0-3.0 for exploration in early training
+
+-  ``mixture_gate_temperature_final`` :raw-html:`<a id="mixture_gate_temperature_final" title="Permalink to this parameter" href="#mixture_gate_temperature_final">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``mixture_gate_temperature_final > 0.0``
+
+   -  final temperature for gate softmax (low = sharp routing)
+
+   -  temperature decays exponentially from init to final over training
+
+   -  recommended: 0.3-1.0 for exploitation in late training
 
 .. end params list
 

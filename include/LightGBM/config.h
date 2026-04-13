@@ -1361,6 +1361,41 @@ struct Config {
   // desc = this forces stronger specialization but may reduce gradient signal
   bool mixture_expert_choice_hard = false;
 
+  // Progressive training (EvoMoE-style)
+  // type = enum
+  // options = none, evomoe
+  // desc = progressive training mode
+  // desc = ``none``: standard MoE training (all experts initialized separately)
+  // desc = ``evomoe``: train a single seed GBDT first, then duplicate into K experts with perturbation
+  std::string mixture_progressive_mode = "none";
+
+  // check = >=0
+  // desc = number of iterations for seed GBDT training in progressive mode
+  // desc = during this phase, a single GBDT is trained on all data (no gating)
+  // desc = after this, the seed is duplicated into K experts with perturbation
+  int mixture_seed_iterations = 50;
+
+  // check = >=0.0
+  // check = <=1.0
+  // desc = perturbation ratio for expert spawning in progressive mode
+  // desc = controls how much each expert differs from the seed model after duplication
+  // desc = 0.0 = exact copy (no perturbation), 1.0 = complete reset of perturbed trees
+  // desc = recommended: 0.5 (Drop-Upcycling optimal ratio)
+  double mixture_spawn_perturbation = 0.5;
+
+  // Gate temperature annealing
+  // check = >0.0
+  // desc = initial temperature for gate softmax (high = near-uniform routing)
+  // desc = 1.0 = no annealing (standard softmax)
+  // desc = recommended: 2.0-3.0 for exploration in early training
+  double mixture_gate_temperature_init = 1.0;
+
+  // check = >0.0
+  // desc = final temperature for gate softmax (low = sharp routing)
+  // desc = temperature decays exponentially from init to final over training
+  // desc = recommended: 0.3-1.0 for exploitation in late training
+  double mixture_gate_temperature_final = 1.0;
+
   #ifndef __NVCC__
   #pragma endregion
 
