@@ -331,6 +331,29 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Uniform distribution for dropout probability */
   mutable std::uniform_real_distribution<double> dropout_dist_;
 
+  // Sparse activation buffers (#10) — held as members so the pointers passed
+  // to GBDT::SetBaggingData remain valid for the entire lifetime of each
+  // expert's data_partition_->used_data_indices_, not just the duration of a
+  // single MStepExperts call. Using stack-allocated buffers here caused
+  // segfaults (#16) when the same indices were re-read on subsequent
+  // BeforeTrain() calls.
+  std::vector<std::vector<data_size_t>> expert_sample_indices_;
+  std::vector<data_size_t> all_data_indices_;
+
+  // MStepGateLeafReuse scratch / cache (#16 perf follow-up).
+  // - leaf_reuse_iters_: BinIterator* indexed by inner_feat for O(1) lookup.
+  //   Replaces the per-thread std::unordered_map that was the hot-path
+  //   bottleneck at 300+ Optuna trials with deep trees.
+  // - leaf_reuse_iter_features_: tracks which slots in leaf_reuse_iters_
+  //   currently own a heap-allocated iterator (for cleanup on tree-shape change).
+  // - sample_leaf_buf_, leaf_expert_sum_buf_, leaf_count_buf_: per-iteration
+  //   scratch buffers, retained across calls to avoid heap churn.
+  std::vector<class BinIterator*> leaf_reuse_iters_;
+  std::vector<int> leaf_reuse_iter_features_;
+  std::vector<int> sample_leaf_buf_;
+  std::vector<double> leaf_expert_sum_buf_;
+  std::vector<int> leaf_count_buf_;
+
   // Adaptive per-expert learning rate members
   /*! \brief Per-expert loss history (ring buffer per expert) */
   std::vector<std::vector<double>> expert_loss_history_;

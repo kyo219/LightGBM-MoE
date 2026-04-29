@@ -52,6 +52,9 @@ MixtureGBDT::MixtureGBDT()
 }
 
 MixtureGBDT::~MixtureGBDT() {
+  for (BinIterator* p : leaf_reuse_iters_) {
+    delete p;
+  }
 }
 
 void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
@@ -96,6 +99,21 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // Create expert config (same as original but for regression)
   expert_config_ = std::unique_ptr<Config>(new Config(*config));
   // Experts use the same objective as the mixture
+  //
+  // Disable per-expert bagging. With hard M-step sparse activation (#10) we
+  // already restrict each expert to its assigned samples via SetBaggingData
+  // from MStepExperts; if the user also sets bagging_fraction<1.0 / bagging_freq>0
+  // then GBDT::TrainOneIter's internal Bagging() overwrites our restriction
+  // with a random bag of the *full* dataset. Combined with the sparse-gradient
+  // vector we hand the expert (zero grad for unassigned samples), this produces
+  // degenerate per-bin histograms where the "best" split has one side empty —
+  // the LightGBM split finder then trips CHECK_GT(left_count/right_count, 0)
+  // (issue #16; doesn't reproduce on standard GBDT because every sample carries
+  // a real gradient there). Sparse activation is MoE's equivalent of bagging.
+  expert_config_->bagging_fraction = 1.0;
+  expert_config_->bagging_freq = 0;
+  expert_config_->pos_bagging_fraction = 1.0;
+  expert_config_->neg_bagging_fraction = 1.0;
 
   // Create gate config (multiclass classification)
   gate_config_ = std::unique_ptr<Config>(new Config(*config));
@@ -1768,8 +1786,16 @@ void MixtureGBDT::MStepExperts() {
   const double diversity_lambda = config_->mixture_diversity_lambda;
   std::vector<int> best_expert(num_data_, 0);
 
-  // Per-expert sample index lists (only used for hard M-step sparse activation)
-  std::vector<std::vector<data_size_t>> expert_sample_indices(num_experts_);
+  // Per-expert sample index lists for sparse activation. Stored as a member
+  // (expert_sample_indices_) so the buffer outlives the MStepExperts call —
+  // the pointer passed to SetBaggingData is held by data_partition_ and may
+  // be re-read on the next BeforeTrain() if no fresh SetBaggingData is made.
+  if (static_cast<int>(expert_sample_indices_.size()) != num_experts_) {
+    expert_sample_indices_.assign(num_experts_, std::vector<data_size_t>());
+  }
+  for (int k = 0; k < num_experts_; ++k) {
+    expert_sample_indices_[k].clear();
+  }
 
   if (hard_m_step) {
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
@@ -1786,10 +1812,10 @@ void MixtureGBDT::MStepExperts() {
 
     // Build per-expert sample index lists for sparse histogram construction
     for (int k = 0; k < num_experts_; ++k) {
-      expert_sample_indices[k].reserve(num_data_ / num_experts_);
+      expert_sample_indices_[k].reserve(num_data_ / num_experts_);
     }
     for (data_size_t i = 0; i < num_data_; ++i) {
-      expert_sample_indices[best_expert[i]].push_back(i);
+      expert_sample_indices_[best_expert[i]].push_back(i);
     }
   }
 
@@ -1956,30 +1982,58 @@ void MixtureGBDT::MStepExperts() {
     }
   }
 
-  // Phase 2: Train all experts in parallel using std::thread
-  const int total_threads = OMP_NUM_THREADS();
-  const int threads_per_expert = std::max(1, total_threads / num_experts_);
-  OMP_SET_NUM_THREADS(threads_per_expert);
+  // Lazily build the [0..num_data_-1] identity index buffer used as the
+  // "no sparse restriction" fallback for SetBaggingData. Holding it on the
+  // class keeps the pointer stable across iterations (data_partition_ caches
+  // the pointer until SetBaggingData is called again).
+  if (static_cast<data_size_t>(all_data_indices_.size()) != num_data_) {
+    all_data_indices_.resize(num_data_);
+    std::iota(all_data_indices_.begin(), all_data_indices_.end(),
+              static_cast<data_size_t>(0));
+  }
 
-  std::vector<std::thread> expert_threads;
-  expert_threads.reserve(num_experts_);
+  // Phase 2: Train experts sequentially.
+  //
+  // Earlier versions trained experts concurrently via std::thread (#9), but
+  // running OpenMP parallel regions from multiple non-OMP host threads
+  // simultaneously crashes inside libgomp on certain Optuna parameter
+  // combinations (see issue #16 — segfault in LeafSplits::Init's OMP fn,
+  // plus the spurious "num_threads changed during training" warnings caused
+  // by mutating LGBM_DEFAULT_NUM_THREADS, a process global, from the host
+  // thread). Each expert's tree learner uses its own OpenMP team internally,
+  // so sequential training keeps the inner parallelism while avoiding the
+  // unsafe nested host-thread + OMP interaction.
   for (int k = 0; k < num_experts_; ++k) {
-    expert_threads.emplace_back([this, k, &all_grads, &all_hess,
-                                  hard_m_step, &expert_sample_indices]() {
-      // Sparse activation: restrict histogram construction to assigned samples only
-      if (hard_m_step && !expert_sample_indices[k].empty()) {
-        experts_[k]->SetBaggingData(expert_sample_indices[k].data(),
-                                     static_cast<data_size_t>(expert_sample_indices[k].size()));
-      }
+    // Always call SetBaggingData with a member-owned buffer. data_partition_
+    // stores the raw pointer and re-reads it on every BeforeTrain(). Passing
+    // a stack pointer (the original #10 implementation) left a dangling
+    // reference once MStepExperts returned, leading to the segfault in #16.
+    //
+    // Sparse activation: restrict to assigned samples only when there's
+    // enough data — SerialTreeLearner can otherwise pick a "best" split with
+    // one side empty, tripping CHECK_GT(*_count, 0) at
+    // serial_tree_learner.cpp:859/869. Falling back to the full dataset
+    // (with zero gradients on non-assigned rows) is the pre-#10 behavior
+    // and is safe for tiny experts.
+    const int min_data = expert_configs_[k]->min_data_in_leaf;
+    const int min_safe = std::max(2 * min_data, 16);
+    const data_size_t assigned =
+        static_cast<data_size_t>(expert_sample_indices_[k].size());
+    if (hard_m_step && assigned >= static_cast<data_size_t>(min_safe)) {
+      experts_[k]->SetBaggingData(expert_sample_indices_[k].data(), assigned);
+    } else {
+      experts_[k]->SetBaggingData(all_data_indices_.data(), num_data_);
+    }
+    try {
       experts_[k]->TrainOneIter(all_grads[k].data(), all_hess[k].data());
-    });
+    } catch (const std::exception& e) {
+      Log::Warning("MixtureGBDT: expert %d skipped iter %d (%s)",
+                   k, iter_, e.what());
+    } catch (...) {
+      Log::Warning("MixtureGBDT: expert %d skipped iter %d (unknown error)",
+                   k, iter_);
+    }
   }
-  for (auto& t : expert_threads) {
-    t.join();
-  }
-
-  // Restore original thread count
-  OMP_SET_NUM_THREADS(total_threads);
 }
 
 void MixtureGBDT::MStepGate() {
@@ -2096,79 +2150,114 @@ void MixtureGBDT::MStepGateLeafReuse() {
 
   const int num_leaves = routing_tree->num_leaves();
   const int num_internal = num_leaves - 1;  // number of split nodes
+  const int num_features = train_data_->num_features();
 
-  // Collect the set of inner feature indices used in this tree's splits
-  std::unordered_set<int> used_inner_features;
-  for (int node = 0; node < num_internal; ++node) {
-    used_inner_features.insert(routing_tree->split_feature_inner(node));
+  // Build a flat lookup table BinIterator* indexed by inner_feat. Replaces a
+  // per-thread std::unordered_map lookup that previously fired on every node
+  // traversal — at 300 trials × 5 CV × 100 rounds × 2000 samples × tree depth
+  // the hash lookup dominated runtime (issue #16 follow-up).
+  //
+  // BinIterator::RawGet is a stateless read of bin_data_, so a single iterator
+  // per feature is shared safely across OMP threads. Iterators are also held
+  // as a class member (leaf_reuse_iters_) so they are allocated once per
+  // tree-shape change instead of per call.
+  if (static_cast<int>(leaf_reuse_iters_.size()) != num_features) {
+    for (BinIterator* p : leaf_reuse_iters_) {
+      delete p;
+    }
+    leaf_reuse_iters_.assign(num_features, nullptr);
+    leaf_reuse_iter_features_.clear();
   }
 
-  // Create per-thread BinIterators for features used in splits
-  const int num_threads = OMP_NUM_THREADS();
-  std::vector<int> used_features_vec(used_inner_features.begin(), used_inner_features.end());
-  std::vector<std::unordered_map<int, BinIterator*>> thread_iterators(num_threads);
-  for (int t = 0; t < num_threads; ++t) {
-    for (int inner_feat : used_features_vec) {
-      thread_iterators[t][inner_feat] = train_data_->FeatureIterator(inner_feat);
+  // Track which features have iterators allocated, so only those are torn down
+  // when the tree shape changes. We rebuild on each call — cheap because the
+  // set of split features is small (≤ num_internal).
+  for (int inner_feat : leaf_reuse_iter_features_) {
+    delete leaf_reuse_iters_[inner_feat];
+    leaf_reuse_iters_[inner_feat] = nullptr;
+  }
+  leaf_reuse_iter_features_.clear();
+  for (int node = 0; node < num_internal; ++node) {
+    const int inner_feat = routing_tree->split_feature_inner(node);
+    if (leaf_reuse_iters_[inner_feat] == nullptr) {
+      leaf_reuse_iters_[inner_feat] = train_data_->FeatureIterator(inner_feat);
+      leaf_reuse_iter_features_.push_back(inner_feat);
     }
   }
 
-  // Step 1: Get leaf index for each sample via bin-based tree traversal
-  std::vector<int> sample_leaf(num_data_);
+  // Step 1: Get leaf index for each sample via bin-based tree traversal.
+  // Pre-cache split metadata in flat arrays so the inner loop touches only
+  // raw int reads (no virtual calls per node, no unordered_map lookups).
+  std::vector<BinIterator*> node_iter(num_internal);
+  std::vector<uint32_t> node_threshold(num_internal);
+  std::vector<int> node_left(num_internal);
+  std::vector<int> node_right(num_internal);
+  for (int node = 0; node < num_internal; ++node) {
+    node_iter[node] = leaf_reuse_iters_[routing_tree->split_feature_inner(node)];
+    node_threshold[node] = routing_tree->threshold_in_bin(node);
+    node_left[node] = routing_tree->left_child(node);
+    node_right[node] = routing_tree->right_child(node);
+  }
 
-  #pragma omp parallel for num_threads(num_threads) schedule(static)
+  if (static_cast<data_size_t>(sample_leaf_buf_.size()) != num_data_) {
+    sample_leaf_buf_.resize(num_data_);
+  }
+  int* sample_leaf = sample_leaf_buf_.data();
+
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    const int tid = omp_get_thread_num();
-    auto& iters = thread_iterators[tid];
     int node = 0;
     while (node >= 0) {
-      int inner_feat = routing_tree->split_feature_inner(node);
-      uint32_t bin_val = iters[inner_feat]->RawGet(i);
-      uint32_t bin_threshold = routing_tree->threshold_in_bin(node);
-      if (bin_val <= bin_threshold) {
-        node = routing_tree->left_child(node);
-      } else {
-        node = routing_tree->right_child(node);
-      }
+      const uint32_t bin_val = node_iter[node]->RawGet(i);
+      node = (bin_val <= node_threshold[node])
+                 ? node_left[node]
+                 : node_right[node];
     }
     sample_leaf[i] = ~node;  // leaf index
   }
 
-  // Cleanup iterators
-  for (int t = 0; t < num_threads; ++t) {
-    for (auto& pair : thread_iterators[t]) {
-      delete pair.second;
-    }
+  // Step 2: Aggregate responsibility distribution per leaf using a flat
+  // [num_leaves * num_experts_] buffer (member-owned to avoid per-call allocs).
+  const size_t leaf_buf_sz = static_cast<size_t>(num_leaves) * num_experts_;
+  if (leaf_expert_sum_buf_.size() < leaf_buf_sz) {
+    leaf_expert_sum_buf_.resize(leaf_buf_sz);
   }
-
-  // Step 2: Aggregate responsibility distribution per leaf
-  std::vector<std::vector<double>> leaf_expert_sum(
-      num_leaves, std::vector<double>(num_experts_, 0.0));
-  std::vector<int> leaf_count(num_leaves, 0);
+  if (static_cast<int>(leaf_count_buf_.size()) < num_leaves) {
+    leaf_count_buf_.resize(num_leaves);
+  }
+  std::fill(leaf_expert_sum_buf_.begin(),
+            leaf_expert_sum_buf_.begin() + leaf_buf_sz, 0.0);
+  std::fill(leaf_count_buf_.begin(),
+            leaf_count_buf_.begin() + num_leaves, 0);
 
   for (data_size_t i = 0; i < num_data_; ++i) {
-    int leaf = sample_leaf[i];
+    const int leaf = sample_leaf[i];
     if (leaf >= 0 && leaf < num_leaves) {
-      ++leaf_count[leaf];
+      ++leaf_count_buf_[leaf];
+      const size_t leaf_off = static_cast<size_t>(leaf) * num_experts_;
+      const size_t resp_off = static_cast<size_t>(i) * num_experts_;
       for (int k = 0; k < num_experts_; ++k) {
-        leaf_expert_sum[leaf][k] += responsibilities_[i * num_experts_ + k];
+        leaf_expert_sum_buf_[leaf_off + k] += responsibilities_[resp_off + k];
       }
     }
   }
 
-  // Normalize to per-leaf routing probabilities
-  std::vector<std::vector<double>> leaf_routing(
-      num_leaves, std::vector<double>(num_experts_, 1.0 / num_experts_));
+  // Normalize to per-leaf routing probabilities (in-place into the same buf).
+  const double uniform = 1.0 / num_experts_;
   for (int l = 0; l < num_leaves; ++l) {
-    if (leaf_count[l] > 0) {
-      double sum = 0.0;
+    const size_t off = static_cast<size_t>(l) * num_experts_;
+    double sum = 0.0;
+    if (leaf_count_buf_[l] > 0) {
+      for (int k = 0; k < num_experts_; ++k) sum += leaf_expert_sum_buf_[off + k];
+    }
+    if (sum > 0.0) {
+      const double inv = 1.0 / sum;
       for (int k = 0; k < num_experts_; ++k) {
-        sum += leaf_expert_sum[l][k];
+        leaf_expert_sum_buf_[off + k] *= inv;
       }
-      if (sum > 0.0) {
-        for (int k = 0; k < num_experts_; ++k) {
-          leaf_routing[l][k] = leaf_expert_sum[l][k] / sum;
-        }
+    } else {
+      for (int k = 0; k < num_experts_; ++k) {
+        leaf_expert_sum_buf_[off + k] = uniform;
       }
     }
   }
@@ -2178,22 +2267,25 @@ void MixtureGBDT::MStepGateLeafReuse() {
   for (data_size_t i = 0; i < num_data_; ++i) {
     int leaf = sample_leaf[i];
     if (leaf >= 0 && leaf < num_leaves) {
+      const size_t leaf_off = static_cast<size_t>(leaf) * num_experts_;
       for (int k = 0; k < num_experts_; ++k) {
-        gate_proba_[i * num_experts_ + k] = leaf_routing[leaf][k];
+        gate_proba_[i * num_experts_ + k] = leaf_expert_sum_buf_[leaf_off + k];
       }
     }
   }
 
-  // Step 4: Periodically retrain gate GBDT for inference on new data
+  // Step 4: Periodically retrain gate GBDT for inference on new data.
+  //
+  // On non-retrain iterations we used to call gate_->TrainOneIter with
+  // zero gradients to keep the tree count in sync, but that produced empty
+  // trees, made the gate's tree_learner share_state diverge from the active
+  // OMP thread count, and contributed to the issue #16 crash. The gate's
+  // iteration count is not actually required between retrains here — Forward
+  // pulls gate_proba_ directly when mixture_gate_type == "leaf_reuse", so
+  // skipping the no-op call is safe.
   const int retrain_interval = config_->mixture_gate_retrain_interval;
   if (iter_ % retrain_interval == 0) {
     MStepGate();
-  } else {
-    // Advance gate iteration count with trivial update
-    std::vector<score_t> zero_grad(static_cast<size_t>(num_data_) * num_experts_, 0.0);
-    std::vector<score_t> tiny_hess(static_cast<size_t>(num_data_) * num_experts_,
-                                    static_cast<score_t>(kMixtureEpsilon));
-    gate_->TrainOneIter(zero_grad.data(), tiny_hess.data());
   }
 }
 

@@ -36,6 +36,8 @@ class BenchConfig:
     n_splits: int = 5
     num_boost_round: int = 100
     seed: int = 42
+    num_threads: int = 4
+    n_jobs: int = 1
 
 
 # =============================================================================
@@ -105,7 +107,7 @@ def create_objective_standard(X, y, cfg):
     def objective(trial):
         params = {
             "objective": "regression", "boosting": "gbdt", "verbose": -1,
-            "num_threads": 4, "seed": cfg.seed,
+            "num_threads": cfg.num_threads, "seed": cfg.seed,
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
             "max_depth": trial.suggest_int("max_depth", 3, 12),
             "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 100),
@@ -125,7 +127,7 @@ def create_objective_moe(X, y, cfg, gate_type):
     def objective(trial):
         params = {
             "objective": "regression", "verbose": -1,
-            "num_threads": 4, "seed": cfg.seed,
+            "num_threads": cfg.num_threads, "seed": cfg.seed,
             # Tree params
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
             "max_depth": trial.suggest_int("max_depth", 3, 12),
@@ -165,10 +167,15 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--splits", type=int, default=5)
+    parser.add_argument("--threads", type=int, default=4,
+                        help="OMP threads per LightGBM call")
+    parser.add_argument("--n-jobs", type=int, default=1,
+                        help="Optuna parallel trials (uses Python threads)")
     args = parser.parse_args()
 
     cfg = BenchConfig(n_trials=args.trials, seed=args.seed,
-                      num_boost_round=args.rounds, n_splits=args.splits)
+                      num_boost_round=args.rounds, n_splits=args.splits,
+                      num_threads=args.threads, n_jobs=args.n_jobs)
 
     print("=" * 72)
     print("  Gate Type Benchmark: gbdt vs none vs leaf_reuse")
@@ -191,7 +198,8 @@ def main():
         t0 = time.perf_counter()
         study = optuna.create_study(direction="minimize",
                                      sampler=optuna.samplers.TPESampler(seed=cfg.seed))
-        study.optimize(create_objective_standard(X, y, cfg), n_trials=cfg.n_trials)
+        study.optimize(create_objective_standard(X, y, cfg),
+                       n_trials=cfg.n_trials, n_jobs=cfg.n_jobs)
         elapsed = time.perf_counter() - t0
         results["Standard"] = {
             "rmse": study.best_value, "time": elapsed, "params": study.best_params}
@@ -204,7 +212,8 @@ def main():
                 direction="minimize",
                 sampler=optuna.samplers.TPESampler(seed=cfg.seed))
             study.optimize(
-                create_objective_moe(X, y, cfg, gate_type), n_trials=cfg.n_trials)
+                create_objective_moe(X, y, cfg, gate_type),
+                n_trials=cfg.n_trials, n_jobs=cfg.n_jobs)
             elapsed = time.perf_counter() - t0
             results[f"MoE_{gate_type}"] = {
                 "rmse": study.best_value, "time": elapsed, "params": study.best_params}
