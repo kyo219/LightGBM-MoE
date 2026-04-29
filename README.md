@@ -1441,77 +1441,106 @@ For self-hosted training builds, additionally pass `-DUSE_NATIVE_ARCH=ON` to CMa
 
 ## Benchmark
 
-**Setup**: 500 Optuna trials, 5-fold time-series CV, early stopping (50 rounds).
+> **Headline study** ([`examples/comparative_study.py`](examples/comparative_study.py)): 1000 Optuna trials × 2 variants (Standard, MoE) × 3 datasets (Synthetic, Hamilton, VIX), 5-fold time-series CV, early stopping. Full per-trial dump in [`bench_results/study_1k.json`](bench_results/study_1k.json), generated report in [`bench_results/study_1k_report.md`](bench_results/study_1k_report.md).
 
-### RMSE Comparison
+### Accuracy: which variant wins?
 
-| Dataset | Standard | MoE | MoE-PE | Best Improvement |
-|---------|----------|-----|--------|------------------|
-| Synthetic | 4.9991 | **4.6837** | 4.8449 | +6.3% |
-| Hamilton | 0.7053 | **0.6996** | 0.7040 | +0.8% |
+| Dataset | Shape | Standard best RMSE | MoE best RMSE | Improvement |
+|---|---|---|---|---|
+| **Synthetic** (feature-driven regime) | 2000 × 5 | 4.96 | **3.41** | **+31 % MoE** |
+| Hamilton (latent regime + TS features) | 500 × 12 | 0.6990 | 0.6985 | tie |
+| VIX | 1000 × 5 | 0.0115 | 0.0115 | tie |
 
-### Expert Differentiation (Regime Separation)
+**MoE only helps when the regime is observable from the features.** On Hamilton (latent regime, even after engineered TS features) and VIX, MoE matches Standard but does not beat it; the extra machinery costs compute without buying accuracy.
 
-| Dataset | MoE K | MoE-PE K | MoE Corr (min/max) | MoE-PE Corr (min/max) | MoE Regime Acc | MoE-PE Regime Acc |
-|---------|-------|----------|--------------------|-----------------------|----------------|-------------------|
-| Synthetic | 3 | 3 | -0.62/0.09 | -0.26/0.07 | 64.9% | 58.6% |
-| Hamilton | 2 | 2 | 0.40/0.40 | -0.35/-0.35 | 64.8% | 60.2% |
+### Speed: median train time per CV fold
 
-- **K**: Number of experts selected by Optuna
-- **Expert Corr (min/max)**: Pairwise correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
-- **Regime Acc**: Classification accuracy of predicted regime vs true regime
+| Dataset | Standard | MoE | MoE penalty |
+|---|---|---|---|
+| Synthetic | 0.231 s | 0.251 s | 1.09 × |
+| Hamilton | 0.077 s | 0.138 s | 1.79 × |
+| VIX | 0.072 s | 0.110 s | 1.53 × |
 
-**Key Findings**:
-- MoE achieves **+6.3% improvement** on Synthetic data with expert correlation of **-0.62** (experts specialize on opposite regimes)
-- **Hamilton: MoE beats Standard GBDT** (+0.8%) with time-series features (moving averages, volatility). Expert correlation **-0.35** (MoE-PE) confirms regime-switching is working
-- Time-series features (rolling mean, volatility, sign) make latent regimes partially observable, enabling effective regime-switching
+So on the two datasets where MoE doesn't lift accuracy, it is also 1.5-1.8× slower per fold. Combined with the verdict above, *use MoE when accuracy says yes, not by default*.
 
-### Selected Hyperparameters (Synthetic Dataset)
+### Recommended hyperparameters from the study
 
-**MoE (Shared Tree Structure):**
-- num_experts: 3, max_depth: 10, num_leaves: 126, learning_rate: 0.099, alpha: 1.35, gate_depth: 10, gate_leaves: 58
+The categorical breakdown below uses **best (min) RMSE per value** rather than mean — the per-variant Optuna run produced a long tail of catastrophic configurations whose mean would mislead.
 
-**MoE-PerExpert (Per-Expert Tree Structure):**
-- num_experts: 3, learning_rate: 0.147, alpha: 2.51, gate_depth: 10, gate_leaves: 55
+#### Universal — same value won across all 3 datasets (in MoE)
 
-| Expert | max_depth | num_leaves | min_data_in_leaf |
-|--------|-----------|------------|------------------|
-| E0 | 9 | 52 | 9 |
-| E1 | 4 | 45 | 35 |
-| E2 | 9 | 105 | 28 |
+| Parameter | Recommended | Notes |
+|---|---|---|
+| `mixture_num_experts` | **3-4** | Q4 quartile mean wins on all 3 datasets |
+| `mixture_gate_type` | **`gbdt`** | Best minimum RMSE on every dataset; the alternative gates (`leaf_reuse`, `none`) never produced the absolute best |
+| `mixture_routing_mode` | **`token_choice`** | Best minimum RMSE on every dataset |
+| `extra_trees` | **`true`** | Best minimum RMSE on every dataset (also clear winner for Standard on Hamilton/VIX) |
+| `mixture_diversity_lambda` | **search 0.0–0.5** | Consistently top-3 in fANOVA importance for MoE (no single best value, but matters) |
 
-### Run Benchmark
+#### Dataset-dependent — search these per problem
 
-The benchmark script (`examples/benchmark.py`) compares Standard GBDT vs MoE GBDT on synthetic datasets using Optuna hyperparameter optimization. It evaluates RMSE, expert differentiation (correlation), regime accuracy, and expert utilization.
+| Parameter | Synthetic | Hamilton | VIX |
+|---|---|---|---|
+| `mixture_e_step_mode` | `em` | `gate_only` | `gate_only` |
+| `mixture_init` | `gmm` | `random` | `gmm` |
+| `mixture_r_smoothing` | `markov` | `markov` | `ema` |
+| `mixture_hard_m_step` | `true` | `true` | `false` |
+| `learning_rate` (best Q) | 0.20-0.24 | 0.10-0.13 | 0.26+ |
 
-**Datasets:**
+#### fANOVA importance (top contributors)
 
-| Dataset | Samples | Features | Characteristics |
-|---------|---------|----------|-----------------|
-| Synthetic | 2000 | 5 | Feature-driven regimes (ideal for MoE) |
-| Hamilton | 500 | 12 | Latent regime + time-series features (MA, volatility, regime indicators) |
+For **Standard GBDT**, `min_data_in_leaf` dominates (importance 0.48-0.80 across the 3 datasets), with `learning_rate` distantly second. **A well-tuned `min_data_in_leaf` carries most of the win.**
 
-**Dependencies:**
+For **MoE**, the picture is more spread:
+
+| Dataset | Top contributor | Second | Third |
+|---|---|---|---|
+| Synthetic | `min_data_in_leaf` (0.87) | `mixture_gate_type` (0.034) | `mixture_diversity_lambda` (0.017) |
+| Hamilton | `learning_rate` (0.53) | `mixture_diversity_lambda` (0.16) | `bagging_fraction` (0.077) |
+| VIX | `lambda_l1` (0.44) | `mixture_diversity_lambda` (0.20) | `mixture_gate_type` (0.088) |
+
+Across all three MoE runs, `mixture_diversity_lambda` is in the top 3 — **searching it is critical, the value is not.**
+
+### Run the comparative study yourself
 
 ```bash
-pip install optuna matplotlib shap scikit-learn
+# Full study (~17 min on 12-core / 24-thread machine, n_jobs=6)
+python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+
+# Quick smoke check (~30 seconds)
+python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+
+# Subset of datasets
+python examples/comparative_study.py --trials 1000 \
+    --datasets synthetic,hamilton --out bench_results/two_ds.json
 ```
 
-**Usage:**
+The script writes `bench_results/study_1k.json` (full per-trial dump for re-analysis) plus a sibling `*_report.md` (the analysis above, automatically generated) and `slice_<dataset>_<variant>.png` files (Optuna slice plots showing each parameter's value vs RMSE).
+
+### Legacy: 500-trial benchmark with MoE-PE
+
+The original [`examples/benchmark.py`](examples/benchmark.py) script (Standard / MoE / MoE-PE on Synthetic + Hamilton, 500 trials) is still present for the per-expert-hyperparameters story; it is not the headline anymore but is kept as the reference for MoE-PE's expert differentiation analysis.
 
 ```bash
-# Full benchmark (Standard vs MoE vs MoE-PE, 100 trials default)
-python examples/benchmark.py
-
-# More trials for better optimization
 python examples/benchmark.py --trials 200
-
-# Quick test
-python examples/benchmark.py --trials 10
-
-# Output to markdown
 python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--trials` | 100 | Number of Optuna trials |
+| `--seed` | 42 | Random seed |
+| `--splits` | 5 | CV splits (TimeSeriesSplit) |
+| `--rounds` | 100 | Boosting rounds |
+| `--no-viz` | - | Skip visualization |
+| `--no-demo` | - | Skip regime demo visualization |
+| `--no-shap` | - | Skip SHAP beeswarm visualization |
+| `--output-md` | - | Output markdown file path |
+| `--collapse-stopper` | - | Enable expert collapse early stopping |
+| `--corr-threshold` | 0.7 | Expert correlation threshold for collapse detection |
+| `--min-expert-ratio` | 0.05 | Minimum expert utilization ratio |
+| `--check-every` | 20 | Collapse check frequency (iterations) |
+| `--min-iters` | 50 | Minimum iterations before collapse checking |
 
 **All CLI options:**
 
@@ -2923,80 +2952,90 @@ params = {
 
 ## ベンチマーク
 
-**設定**: 500 Optunaトライアル、5分割時系列CV、early stopping (50 rounds)。
+> **メインのスタディ** ([`examples/comparative_study.py`](examples/comparative_study.py)): 1000 Optuna trials × 2 variants (Standard / MoE) × 3 datasets (Synthetic, Hamilton, VIX)、5分割時系列CV、early stopping。trial 単位の生データは [`bench_results/study_1k.json`](bench_results/study_1k.json)、自動生成された分析レポートは [`bench_results/study_1k_report.md`](bench_results/study_1k_report.md) にあります。
 
-### RMSE比較
+### 精度: どのバリアントが勝つか
 
-| データセット | Standard | MoE | MoE-PE | 改善率 |
-|-------------|----------|-----|--------|--------|
-| Synthetic | 4.9991 | **4.6837** | 4.8449 | +6.3% |
-| Hamilton | 0.7053 | **0.6996** | 0.7040 | +0.8% |
+| データセット | shape | Standard best RMSE | MoE best RMSE | 改善 |
+|---|---|---|---|---|
+| **Synthetic** (特徴量ベースのregime) | 2000 × 5 | 4.96 | **3.41** | **+31% MoE勝利** |
+| Hamilton (潜在regime + 時系列特徴量) | 500 × 12 | 0.6990 | 0.6985 | 同等 |
+| VIX | 1000 × 5 | 0.0115 | 0.0115 | 同等 |
 
-### Expert分化（レジーム分離）
+**MoE が効くのは regime が特徴量から見える時だけ**。Hamilton (潜在 regime、時系列特徴量を入れても) や VIX では MoE は Standard と互角で勝てない。MoE の追加機構は計算コストがかかるだけ。
 
-| データセット | MoE K | MoE-PE K | MoE相関 (min/max) | MoE-PE相関 (min/max) | MoE Regime精度 | MoE-PE Regime精度 |
-|-------------|-------|----------|-------------------|----------------------|----------------|-------------------|
-| Synthetic | 3 | 3 | -0.62/0.09 | -0.26/0.07 | 64.9% | 58.6% |
-| Hamilton | 2 | 2 | 0.40/0.40 | -0.35/-0.35 | 64.8% | 60.2% |
+### 速度: CV fold あたりの中央値訓練時間
 
-- **K**: Optunaで選択されたExpert数
-- **Expert相関 (min/max)**: Expert間の予測相関（低い=分化している、負=逆の予測）
-- **Regime精度**: 予測regimeと真のregimeの分類精度
+| データセット | Standard | MoE | MoE penalty |
+|---|---|---|---|
+| Synthetic | 0.231 s | 0.251 s | 1.09 × |
+| Hamilton | 0.077 s | 0.138 s | 1.79 × |
+| VIX | 0.072 s | 0.110 s | 1.53 × |
 
-**重要な発見**:
-- MoEがSyntheticデータで **+6.3%の改善**、Expert相関 **-0.62**（Expertが逆のレジームに特化）
-- **Hamilton: MoEがStandard GBDTに勝利**（+0.8%）。時系列特徴量（移動平均、ボラティリティ）を追加することで潜在レジームを間接的に観測可能に
-- MoE-PEのExpert相関 **-0.35** がレジームスイッチングの成功を確認
-- 時系列特徴量（移動平均、ボラティリティ、符号）が潜在レジームの検出に有効
+つまり **MoE が精度貢献しない 2 dataset では、1.5-1.8 倍遅くなるだけ**。精度評価が「MoE で勝てる」と言う場合だけ MoE を採用する判断が良い。
 
-### 選択されたハイパーパラメータ（Syntheticデータセット）
+### スタディから得られた推奨ハイパラ
 
-**MoE（共有木構造）:**
-- num_experts: 3, max_depth: 10, num_leaves: 126, learning_rate: 0.099, alpha: 1.35, gate_depth: 10, gate_leaves: 58
+> 注: 下表のカテゴリカル分析は **値ごとの best (min) RMSE** で判定しています。Optuna の長尾配下で破綻 trial が混じるため、mean RMSE は誤解を招くため使いません。
 
-**MoE-PerExpert（Expertごとの木構造）:**
-- num_experts: 3, learning_rate: 0.147, alpha: 2.51, gate_depth: 10, gate_leaves: 55
+#### 普遍ルール — 全 3 dataset で MoE の勝者値が一致する設定
 
-| Expert | max_depth | num_leaves | min_data_in_leaf |
-|--------|-----------|------------|------------------|
-| E0 | 9 | 52 | 9 |
-| E1 | 4 | 45 | 35 |
-| E2 | 9 | 105 | 28 |
+| パラメータ | 推奨 | 根拠 |
+|---|---|---|
+| `mixture_num_experts` | **3-4** | Q4 quartile mean が 3 dataset 全てで勝つ |
+| `mixture_gate_type` | **`gbdt`** | 3 dataset 全てで minimum RMSE 1位。`leaf_reuse` / `none` が絶対 best を取った dataset はゼロ |
+| `mixture_routing_mode` | **`token_choice`** | 3 dataset 全てで minimum RMSE 1位 |
+| `extra_trees` | **`true`** | 3 dataset 全てで minimum RMSE 1位 (Standard 側でも Hamilton/VIX で勝者) |
+| `mixture_diversity_lambda` | **0.0–0.5 を search** | MoE で fANOVA importance が常に top-3。最適値は dataset 依存だが、**search する価値が常にある** |
 
-### ベンチマーク実行
+#### dataset 依存 — 問題ごとに探索すべき
 
-ベンチマークスクリプト (`examples/benchmark.py`) は、合成データセットでStandard GBDT vs MoE GBDTをOptunaハイパーパラメータ最適化で比較します。RMSE、Expert分化（相関）、レジーム精度、Expert利用率を評価します。
+| パラメータ | Synthetic | Hamilton | VIX |
+|---|---|---|---|
+| `mixture_e_step_mode` | `em` | `gate_only` | `gate_only` |
+| `mixture_init` | `gmm` | `random` | `gmm` |
+| `mixture_r_smoothing` | `markov` | `markov` | `ema` |
+| `mixture_hard_m_step` | `true` | `true` | `false` |
+| `learning_rate` (best Q) | 0.20-0.24 | 0.10-0.13 | 0.26+ |
 
-**データセット:**
+#### fANOVA importance (上位寄与パラメータ)
 
-| データセット | サンプル数 | 特徴量数 | 特性 |
-|-------------|-----------|----------|------|
-| Synthetic | 2000 | 5 | 特徴量ベースのレジーム（MoEに最適） |
-| Hamilton | 500 | 12 | 潜在レジーム + 時系列特徴量（移動平均、ボラティリティ、レジーム指標） |
+**Standard GBDT** では `min_data_in_leaf` が支配的 (3 dataset で重要度 0.48-0.80)、`learning_rate` が距離を空けて 2 位。**`min_data_in_leaf` を CV でちゃんと探索すれば 95% 終わり**。
 
-**依存パッケージ:**
+**MoE** では分散している:
+
+| データセット | 1位 | 2位 | 3位 |
+|---|---|---|---|
+| Synthetic | `min_data_in_leaf` (0.87) | `mixture_gate_type` (0.034) | `mixture_diversity_lambda` (0.017) |
+| Hamilton | `learning_rate` (0.53) | `mixture_diversity_lambda` (0.16) | `bagging_fraction` (0.077) |
+| VIX | `lambda_l1` (0.44) | `mixture_diversity_lambda` (0.20) | `mixture_gate_type` (0.088) |
+
+3 dataset 全てで **`mixture_diversity_lambda` が top-3 入り**。**値より「探索すること自体」が重要**。
+
+### スタディの再現方法
 
 ```bash
-pip install optuna matplotlib shap scikit-learn
+# 本番 (24-thread / 12-core で約17分)
+python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+
+# 動作確認 (~30秒)
+python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+
+# データセット絞る
+python examples/comparative_study.py --trials 1000 \
+    --datasets synthetic,hamilton --out bench_results/two_ds.json
 ```
 
-**使用方法:**
+`bench_results/study_1k.json` に全 trial を、自動生成される `*_report.md` (上記の分析テーブル) と `slice_<dataset>_<variant>.png` (Optuna slice plot、各パラメータ値 vs RMSE 散布図) を出力。
+
+### 旧版: 500-trial ベンチマーク (MoE-PE 含む)
+
+[`examples/benchmark.py`](examples/benchmark.py) は元々の Standard / MoE / MoE-PE × Synthetic + Hamilton (500 trials) ベンチで、**MoE-PE (Per-Expert tree HP) の Expert 分化分析の参考として** 残してあります。本セクションのメインベンチではありません。
 
 ```bash
-# フルベンチマーク (Standard vs MoE vs MoE-PE、デフォルト100 trials)
-python examples/benchmark.py
-
-# より多くのtrials
 python examples/benchmark.py --trials 200
-
-# 軽めのテスト
-python examples/benchmark.py --trials 10
-
-# Markdown出力
 python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
-
-**全CLIオプション:**
 
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
