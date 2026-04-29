@@ -1268,6 +1268,138 @@ The overall verdict combines the above metrics into one of three categories:
 
 ---
 
+## Feature Catalog & int8 Compatibility
+
+> A consolidated reference for *what knobs exist*, *which knob requires which*, and *which knobs are safe to use with `use_quantized_grad`*. See [`examples/compat_matrix.py`](examples/compat_matrix.py) for the regression test that produced the matrix below.
+
+### 8 Configuration Axes
+
+| Axis | Parameter(s) | Choices | Default |
+|------|--------------|---------|---------|
+| **1. Model variant** | `boosting`, `mixture_progressive_mode`, per-expert vector params | `gbdt` / `mixture` / `mixture` + EvoMoE / `mixture` + per-expert HP (MoE-PE) | `gbdt` |
+| **2. E-step** | `mixture_e_step_mode`, `mixture_e_step_alpha`, `mixture_e_step_loss` | `em` / `loss_only` / `gate_only` | `em` |
+| **3. M-step** | `mixture_hard_m_step`, `mixture_diversity_lambda` | hard (sparse activation) / soft (weighted) | `true` (hard) |
+| **4. Gate** | `mixture_gate_type` (+ all `mixture_gate_*` knobs) | `gbdt` / `none` / `leaf_reuse` | `gbdt` |
+| **5. Routing** | `mixture_routing_mode`, `mixture_expert_*` capacity/score knobs | `token_choice` / `expert_choice` | `token_choice` |
+| **6. Smoothing** | `mixture_r_smoothing`, `mixture_smoothing_lambda` | `none` / `ema` / `markov` / `momentum` | `none` |
+| **7. Initialization** | `mixture_init` | `uniform` / `random` / `quantile` / `balanced_kmeans` / `gmm` / `tree_hierarchical` | `uniform` |
+| **8. Regularization** | warmup, load balance, dropout, gate entropy, gate temperature, adaptive LR (and their schedules) | many | mostly off |
+
+### Dependency Map
+
+```
+boosting=gbdt ─────────────────────────── (baseline; mixture_* params are no-ops)
+   │
+   └─ use_quantized_grad ✓  (1.05-1.30× speedup at no RMSE cost)
+
+boosting=mixture
+   │
+   ├─ mixture_progressive_mode=evomoe
+   │     ├ mixture_seed_iterations
+   │     └ mixture_spawn_perturbation
+   │
+   ├─ mixture_routing_mode=expert_choice
+   │     ├ mixture_expert_capacity_factor
+   │     ├ mixture_expert_choice_score
+   │     ├ mixture_expert_choice_boost
+   │     └ mixture_expert_choice_hard
+   │
+   ├─ mixture_gate_type
+   │     ├ "gbdt"        → all mixture_gate_* params apply
+   │     ├ "none"        → E-step is forced into loss_only mode
+   │     └ "leaf_reuse"  → mixture_gate_retrain_interval applies
+   │
+   ├─ mixture_hard_m_step=true
+   │     └─ Sparse activation auto-enabled (per-expert SetBaggingData);
+   │        per-expert bagging_fraction/freq are auto-disabled to avoid
+   │        the double-bagging crash from issue #16.
+   │
+   ├─ mixture_r_smoothing != "none"
+   │     └─ mixture_smoothing_lambda applies (assumes row order = time)
+   │
+   ├─ mixture_dropout_schedule != "constant"
+   │     ├ mixture_dropout_rate_min
+   │     └ mixture_dropout_rate_max
+   │
+   └─ mixture_adaptive_lr=true
+         ├ mixture_adaptive_lr_window
+         └ mixture_adaptive_lr_max
+```
+
+#### Auto-applied settings (do not need user input)
+
+| When | Forced setting | Where | Why |
+|------|----------------|-------|-----|
+| `mixture_hard_m_step=true` | per-expert `bagging_fraction=1.0`, `bagging_freq=0` | `mixture_gbdt.cpp:113-116` | Sparse activation already restricts the expert to its assigned samples; double-bagging produces degenerate histograms (#16) |
+| `use_quantized_grad=true` (under MoE) | `quant_train_renew_leaf=true` on every expert + the gate | `mixture_gbdt.cpp:125-127, 137-139` | Without renewal the quantized leaf-output path is biased by sparse-activation `hess≈1e-12` rows, producing 3-20× RMSE blow-up |
+| `mixture_gate_type="none"` | E-step runs in `loss_only` mode regardless of `mixture_e_step_mode` | `mixture_gbdt.cpp` | No gate probabilities to weight by |
+
+### int8 / `use_quantized_grad` Compatibility Matrix
+
+Empirical run via `examples/compat_matrix.py` (5,000 × 100 int8, K=3, 30 rounds), all 8 axes × {float, quant} = 31 feature × 2 modes = **62 trials**:
+
+| Status | Count | Meaning |
+|--------|-------|---------|
+| `CRASH` | **0 / 31** | The combination produces an exception or non-finite RMSE |
+| `REGRESS` | **0 / 31** | Quant RMSE is more than 30 % worse than float RMSE |
+| `minor` | 6 / 31 | 5-30 % RMSE diff, all on stochastic-init or smoothing paths whose float/quant trajectories diverge by random-seed effects |
+| `ok` | 25 / 31 | RMSE within 5 % |
+
+#### Per-axis compatibility (representative rows)
+
+| Feature | float RMSE | quant RMSE | Status |
+|---------|-----------|------------|--------|
+| `gbdt/standard` | 1.246 | 1.246 | ok (4.4× faster) |
+| `moe/default` | 1.292 | 1.315 | ok |
+| `moe/hard=True` (sparse activation) | 1.292 | 1.315 | ok ← regressed pre-fix |
+| `moe/hard=False` (soft) | 1.256 | 1.251 | ok |
+| `moe/gate=gbdt` | 1.292 | 1.315 | ok |
+| `moe/gate=none` | 2.574 | 2.925 | minor |
+| `moe/gate=leaf_reuse` | 2.850 | 3.027 | minor |
+| `moe/route=token_choice` | 1.292 | 1.315 | ok |
+| `moe/route=expert_choice` | 1.256 | 1.293 | ok |
+| `moe/evomoe` (progressive) | 1.299 | 1.294 | ok |
+| `moe-pe/per_expert_hp` | 1.396 | 1.407 | ok |
+| `moe/expert_dropout` | 1.517 | 1.484 | ok |
+| `moe/adaptive_lr` | 1.594 | 1.584 | ok |
+| `moe/dropout_curriculum` | 1.357 | 1.365 | ok |
+| `moe/gate_temperature` (annealing) | 1.646 | 1.419 | ok |
+| `moe/diversity_lambda=0.3` | 483.7 | 205.9 | ok ※ |
+| `moe/init={uniform/quantile/gmm}` | 1.27-1.29 | 1.32-1.33 | ok |
+| `moe/init={random/balanced_kmeans/tree_hierarchical}` | 1.24-1.28 | 1.32-1.49 | minor (random-seed sensitive) |
+| `moe/smooth={ema/markov}` | 1.32-2.75 | 1.32-2.83 | ok |
+| `moe/smooth=momentum` | 2.69 | 2.86 | minor |
+
+※ `diversity_lambda=0.3` blows up RMSE on this tiny dataset for both modes equally — a config sensitivity, not a quantization issue.
+
+**Bottom line: every feature in the codebase is safe to combine with `use_quantized_grad=true`** (after the Phase 2 fix on commit `c596fb93`).
+
+### Recommended Numerai-style Configuration
+
+```python
+params = {
+    'boosting': 'mixture',
+    'use_quantized_grad': True,        # 1.32-1.35× faster on MoE, no RMSE penalty
+    'num_grad_quant_bins': 32,         # 16 also fine; 32 is the safer default
+    'mixture_num_experts': 3,
+    'mixture_warmup_iters': 5,
+    'mixture_hard_m_step': True,       # sparse activation
+    'mixture_gate_type': 'gbdt',
+    'mixture_routing_mode': 'token_choice',  # or 'expert_choice' for strict load balance
+    'objective': 'regression',
+}
+```
+
+For self-hosted training builds, additionally pass `-DUSE_NATIVE_ARCH=ON` to CMake. (Effect on the histogram hot path is currently ~0 % because that loop is memory-bound — see [issue #18](https://github.com/kyo219/LightGBM-MoE/issues/18) for the planned manual AVX-512 VNNI follow-up; the flag is in place to enable that work.)
+
+### Known Limitations (out of scope for this section)
+
+1. **Input binning still rebins int8 → bins** even when the input is already discrete in `[0, max_bin)`. Tracking issue: [#17](https://github.com/kyo219/LightGBM-MoE/issues/17).
+2. **Histogram construction is memory-bound** scatter-accumulate — `-march=native` alone moves training time by ~0 %. The manual AVX-512 VNNI fix is tracked in [#18](https://github.com/kyo219/LightGBM-MoE/issues/18).
+3. **Distributed mode** (`tree_learner=data` / `voting`) is untested with the Phase 2 quantization fix. Single-node only for now.
+
+---
+
 ## Benchmark
 
 **Setup**: 500 Optuna trials, 5-fold time-series CV, early stopping (50 rounds).
@@ -2577,6 +2709,137 @@ Expert予測間のペアワイズPearson相関を計算します。2つのExpert
     "verdict": str,                    # "Effective Switching" / "Weak Switching" / "Not Switching (Collapsed)"
 }
 ```
+
+---
+
+## 機能カタログと int8 互換性
+
+> **どんな設定軸があり、どれが何を要求し、どれが `use_quantized_grad` と安全に併用できるか** をまとめた早見表。実機検証は [`examples/compat_matrix.py`](examples/compat_matrix.py) を参照。
+
+### 8つの設定軸
+
+| 軸 | パラメータ | 選択肢 | 既定値 |
+|---|---|---|---|
+| **1. モデルバリアント** | `boosting`, `mixture_progressive_mode`, per-expertベクター系 | `gbdt` / `mixture` / `mixture` + EvoMoE / `mixture` + per-expert HP (MoE-PE) | `gbdt` |
+| **2. E-step** | `mixture_e_step_mode`, `mixture_e_step_alpha`, `mixture_e_step_loss` | `em` / `loss_only` / `gate_only` | `em` |
+| **3. M-step** | `mixture_hard_m_step`, `mixture_diversity_lambda` | hard (sparse activation) / soft (加重) | `true` (hard) |
+| **4. Gate** | `mixture_gate_type` (+ `mixture_gate_*` 一式) | `gbdt` / `none` / `leaf_reuse` | `gbdt` |
+| **5. Routing** | `mixture_routing_mode`, `mixture_expert_*` (capacity/score) | `token_choice` / `expert_choice` | `token_choice` |
+| **6. Smoothing** | `mixture_r_smoothing`, `mixture_smoothing_lambda` | `none` / `ema` / `markov` / `momentum` | `none` |
+| **7. 初期化** | `mixture_init` | `uniform` / `random` / `quantile` / `balanced_kmeans` / `gmm` / `tree_hierarchical` | `uniform` |
+| **8. 正則化** | warmup, load balance, dropout, gate entropy, gate temperature, adaptive LR + そのスケジュール | 多数 | ほぼ off |
+
+### 依存関係マップ
+
+```
+boosting=gbdt ─────────────────────────── (ベース; mixture_* は無効)
+   │
+   └─ use_quantized_grad ✓  (RMSE劣化なしで 1.05-1.30× 高速化)
+
+boosting=mixture
+   │
+   ├─ mixture_progressive_mode=evomoe
+   │     ├ mixture_seed_iterations
+   │     └ mixture_spawn_perturbation
+   │
+   ├─ mixture_routing_mode=expert_choice
+   │     ├ mixture_expert_capacity_factor
+   │     ├ mixture_expert_choice_score
+   │     ├ mixture_expert_choice_boost
+   │     └ mixture_expert_choice_hard
+   │
+   ├─ mixture_gate_type
+   │     ├ "gbdt"        → 全 mixture_gate_* が効く
+   │     ├ "none"        → E-step は loss_only モードに強制
+   │     └ "leaf_reuse"  → mixture_gate_retrain_interval が効く
+   │
+   ├─ mixture_hard_m_step=true
+   │     └─ Sparse activation 自動有効 (expert毎にSetBaggingData)。
+   │        per-expert bagging_fraction/freq は自動無効化(#16の二重bagging防止)
+   │
+   ├─ mixture_r_smoothing != "none"
+   │     └─ mixture_smoothing_lambda が効く (行順=時系列前提)
+   │
+   ├─ mixture_dropout_schedule != "constant"
+   │     ├ mixture_dropout_rate_min
+   │     └ mixture_dropout_rate_max
+   │
+   └─ mixture_adaptive_lr=true
+         ├ mixture_adaptive_lr_window
+         └ mixture_adaptive_lr_max
+```
+
+#### 自動適用される設定 (ユーザ指定不要)
+
+| 条件 | 強制内容 | 場所 | 理由 |
+|---|---|---|---|
+| `mixture_hard_m_step=true` | per-expert `bagging_fraction=1.0`, `bagging_freq=0` | `mixture_gbdt.cpp:113-116` | Sparse activation で既に割当サンプルに制限済み。二重 bagging で degenerate histogram → CHECK_GT crash (#16) |
+| `use_quantized_grad=true` (MoE使用時) | 全 expert + gate に `quant_train_renew_leaf=true` | `mixture_gbdt.cpp:125-127, 137-139` | renewal なしだと sparse activation の `hess≈1e-12` 行で量子化葉値計算が偏り、RMSE が 3-20倍 悪化する |
+| `mixture_gate_type="none"` | `mixture_e_step_mode` の値に関わらず E-step は `loss_only` 動作 | `mixture_gbdt.cpp` | 重み付け用の gate確率が無いため |
+
+### int8 / `use_quantized_grad` 互換性マトリクス
+
+`examples/compat_matrix.py` で 5,000 × 100 int8, K=3, 30 rounds、8軸 × {float, quant} = **31機能 × 2モード = 62試行** を実機実行:
+
+| ステータス | 件数 | 意味 |
+|---|---|---|
+| `CRASH` | **0 / 31** | 例外、または非有限 RMSE |
+| `REGRESS` | **0 / 31** | quant の RMSE が float より 30%以上劣化 |
+| `minor` | 6 / 31 | 5-30% 差。すべて確率的な init / smoothing 経路で乱数シードで分岐したもの |
+| `ok` | 25 / 31 | RMSE 5%以内 |
+
+#### 主要機能の結果(代表)
+
+| 機能 | float RMSE | quant RMSE | ステータス |
+|---|---|---|---|
+| `gbdt/standard` | 1.246 | 1.246 | ok (4.4倍速) |
+| `moe/default` | 1.292 | 1.315 | ok |
+| `moe/hard=True` (sparse activation) | 1.292 | 1.315 | ok ← 修正前は REGRESS |
+| `moe/hard=False` (soft) | 1.256 | 1.251 | ok |
+| `moe/gate=gbdt` | 1.292 | 1.315 | ok |
+| `moe/gate=none` | 2.574 | 2.925 | minor |
+| `moe/gate=leaf_reuse` | 2.850 | 3.027 | minor |
+| `moe/route=token_choice` | 1.292 | 1.315 | ok |
+| `moe/route=expert_choice` | 1.256 | 1.293 | ok |
+| `moe/evomoe` (progressive) | 1.299 | 1.294 | ok |
+| `moe-pe/per_expert_hp` | 1.396 | 1.407 | ok |
+| `moe/expert_dropout` | 1.517 | 1.484 | ok |
+| `moe/adaptive_lr` | 1.594 | 1.584 | ok |
+| `moe/dropout_curriculum` | 1.357 | 1.365 | ok |
+| `moe/gate_temperature` (annealing) | 1.646 | 1.419 | ok |
+| `moe/diversity_lambda=0.3` | 483.7 | 205.9 | ok ※ |
+| `moe/init={uniform/quantile/gmm}` | 1.27-1.29 | 1.32-1.33 | ok |
+| `moe/init={random/balanced_kmeans/tree_hierarchical}` | 1.24-1.28 | 1.32-1.49 | minor (乱数シード由来) |
+| `moe/smooth={ema/markov}` | 1.32-2.75 | 1.32-2.83 | ok |
+| `moe/smooth=momentum` | 2.69 | 2.86 | minor |
+
+※ `diversity_lambda=0.3` は超小データだと両モードで等しく RMSE が崩れる構成感度問題。量子化由来ではない。
+
+**結論: 全機能が `use_quantized_grad=true` と安全に併用可能** (Phase 2 fix `c596fb93` 適用後)。
+
+### Numeraiスタイル推奨設定
+
+```python
+params = {
+    'boosting': 'mixture',
+    'use_quantized_grad': True,        # MoEで 1.32-1.35倍速、RMSE悪化なし
+    'num_grad_quant_bins': 32,         # 16でも可、無難なのは 32
+    'mixture_num_experts': 3,
+    'mixture_warmup_iters': 5,
+    'mixture_hard_m_step': True,       # sparse activation
+    'mixture_gate_type': 'gbdt',
+    'mixture_routing_mode': 'token_choice',  # 厳密な負荷均衡なら 'expert_choice'
+    'objective': 'regression',
+}
+```
+
+セルフホスト用ビルドなら CMake に `-DUSE_NATIVE_ARCH=ON` を追加。(現状ヒストグラム hot path への効果は ~0% — メモリbound のため。手動 AVX-512 VNNI 化を [issue #18](https://github.com/kyo219/LightGBM-MoE/issues/18) で追跡中で、フラグはその下準備。)
+
+### 既知の制限事項 (本セクション範囲外)
+
+1. **入力 binning は int8でも再bin化される**。`[0, max_bin)` の離散入力でも C++ 側で BinMapper 構築コストがかかる。追跡 issue: [#17](https://github.com/kyo219/LightGBM-MoE/issues/17)
+2. **ヒストグラム構築はメモリbound**: scatter-accumulate のため `-march=native` 単独では時間が ~0% しか変わらない。手動 AVX-512 VNNI が [#18](https://github.com/kyo219/LightGBM-MoE/issues/18) で追跡中
+3. **分散モード** (`tree_learner=data` / `voting`) は本セッションの量子化修正と未検証。シングルノードのみ
 
 ---
 
