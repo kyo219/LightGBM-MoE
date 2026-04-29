@@ -2870,48 +2870,7 @@ int LGBM_BoosterPredictRegime(BoosterHandle handle,
   mixture->InitPredict(0, -1, false);
 
   // Get row accessor based on data type
-  std::function<std::vector<double>(int)> get_row;
-  if (data_type == C_API_DTYPE_FLOAT32) {
-    const float* data_ptr = reinterpret_cast<const float*>(data);
-    if (is_row_major) {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        auto tmp_ptr = data_ptr + static_cast<size_t>(ncol) * row_idx;
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = static_cast<double>(tmp_ptr[i]);
-        }
-        return ret;
-      };
-    } else {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = static_cast<double>(data_ptr[static_cast<size_t>(nrow) * i + row_idx]);
-        }
-        return ret;
-      };
-    }
-  } else {
-    const double* data_ptr = reinterpret_cast<const double*>(data);
-    if (is_row_major) {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        auto tmp_ptr = data_ptr + static_cast<size_t>(ncol) * row_idx;
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = tmp_ptr[i];
-        }
-        return ret;
-      };
-    } else {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = data_ptr[static_cast<size_t>(nrow) * i + row_idx];
-        }
-        return ret;
-      };
-    }
-  }
+  auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
 
   // Predict regime for each row
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
@@ -2947,48 +2906,7 @@ int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
   int num_experts = mixture->NumExperts();
 
   // Get row accessor based on data type
-  std::function<std::vector<double>(int)> get_row;
-  if (data_type == C_API_DTYPE_FLOAT32) {
-    const float* data_ptr = reinterpret_cast<const float*>(data);
-    if (is_row_major) {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        auto tmp_ptr = data_ptr + static_cast<size_t>(ncol) * row_idx;
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = static_cast<double>(tmp_ptr[i]);
-        }
-        return ret;
-      };
-    } else {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = static_cast<double>(data_ptr[static_cast<size_t>(nrow) * i + row_idx]);
-        }
-        return ret;
-      };
-    }
-  } else {
-    const double* data_ptr = reinterpret_cast<const double*>(data);
-    if (is_row_major) {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        auto tmp_ptr = data_ptr + static_cast<size_t>(ncol) * row_idx;
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = tmp_ptr[i];
-        }
-        return ret;
-      };
-    } else {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = data_ptr[static_cast<size_t>(nrow) * i + row_idx];
-        }
-        return ret;
-      };
-    }
-  }
+  auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
 
   // Predict regime probabilities for each row
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
@@ -3022,48 +2940,7 @@ int LGBM_BoosterPredictExpertPred(BoosterHandle handle,
   int num_experts = mixture->NumExperts();
 
   // Get row accessor based on data type
-  std::function<std::vector<double>(int)> get_row;
-  if (data_type == C_API_DTYPE_FLOAT32) {
-    const float* data_ptr = reinterpret_cast<const float*>(data);
-    if (is_row_major) {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        auto tmp_ptr = data_ptr + static_cast<size_t>(ncol) * row_idx;
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = static_cast<double>(tmp_ptr[i]);
-        }
-        return ret;
-      };
-    } else {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = static_cast<double>(data_ptr[static_cast<size_t>(nrow) * i + row_idx]);
-        }
-        return ret;
-      };
-    }
-  } else {
-    const double* data_ptr = reinterpret_cast<const double*>(data);
-    if (is_row_major) {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        auto tmp_ptr = data_ptr + static_cast<size_t>(ncol) * row_idx;
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = tmp_ptr[i];
-        }
-        return ret;
-      };
-    } else {
-      get_row = [=](int row_idx) {
-        std::vector<double> ret(ncol);
-        for (int i = 0; i < ncol; ++i) {
-          ret[i] = data_ptr[static_cast<size_t>(nrow) * i + row_idx];
-        }
-        return ret;
-      };
-    }
-  }
+  auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
 
   // Predict expert predictions for each row
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
@@ -3109,6 +2986,8 @@ RowFunctionFromDenseMatrix(const void* data, int num_row, int num_col, int data_
     return RowFunctionFromDenseMatrix_helper<float>(data, num_row, num_col, is_row_major);
   } else if (data_type == C_API_DTYPE_FLOAT64) {
     return RowFunctionFromDenseMatrix_helper<double>(data, num_row, num_col, is_row_major);
+  } else if (data_type == C_API_DTYPE_INT8) {
+    return RowFunctionFromDenseMatrix_helper<int8_t>(data, num_row, num_col, is_row_major);
   }
   Log::Fatal("Unknown data type in RowFunctionFromDenseMatrix");
   return nullptr;

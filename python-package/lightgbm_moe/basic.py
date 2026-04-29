@@ -188,7 +188,7 @@ def _get_sample_count(total_nrow: int, params: str) -> int:
 
 def _np2d_to_np1d(mat: np.ndarray) -> Tuple[np.ndarray, int]:
     dtype: "np.typing.DTypeLike"
-    if mat.dtype in (np.float32, np.float64):
+    if mat.dtype in (np.float32, np.float64, np.int8):
         dtype = mat.dtype
     else:
         dtype = np.float32
@@ -691,6 +691,7 @@ _C_API_DTYPE_FLOAT32 = 0
 _C_API_DTYPE_FLOAT64 = 1
 _C_API_DTYPE_INT32 = 2
 _C_API_DTYPE_INT64 = 3
+_C_API_DTYPE_INT8 = 4
 
 """Macro definition of data order in matrix"""
 _C_API_IS_COL_MAJOR = 0
@@ -739,7 +740,7 @@ def _convert_from_sliced_object(data: np.ndarray) -> np.ndarray:
 
 
 def _c_float_array(data: np.ndarray) -> Tuple[_ctypes_float_ptr, int, np.ndarray]:
-    """Get pointer of float numpy array / list."""
+    """Get pointer of float/int8 numpy array / list."""
     if _is_1d_list(data):
         data = np.asarray(data)
     if _is_numpy_1d_array(data):
@@ -752,8 +753,11 @@ def _c_float_array(data: np.ndarray) -> Tuple[_ctypes_float_ptr, int, np.ndarray
         elif data.dtype == np.float64:
             ptr_data = data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
             type_data = _C_API_DTYPE_FLOAT64
+        elif data.dtype == np.int8:
+            ptr_data = data.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+            type_data = _C_API_DTYPE_INT8
         else:
-            raise TypeError(f"Expected np.float32 or np.float64, met type({data.dtype})")
+            raise TypeError(f"Expected np.float32, np.float64 or np.int8, met type({data.dtype})")
     else:
         raise TypeError(f"Unknown type({type(data).__name__})")
     return (ptr_data, type_data, data)  # return `data` to avoid the temporary copy is freed
@@ -4812,9 +4816,12 @@ class Booster:
         if not self.is_mixture():
             raise LightGBMError("predict_regime can only be used with MoE models")
 
-        # Convert data to numpy array
+        # Convert data to numpy array, preserving int8
         if isinstance(data, np.ndarray):
-            data_array = np.ascontiguousarray(data, dtype=np.float64)
+            if data.dtype == np.int8:
+                data_array = np.ascontiguousarray(data)
+            else:
+                data_array = np.ascontiguousarray(data, dtype=np.float64)
         elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
             data_array = np.ascontiguousarray(data.values, dtype=np.float64)
         else:
@@ -4822,14 +4829,21 @@ class Booster:
 
         nrow, ncol = data_array.shape
 
+        if data_array.dtype == np.int8:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+            dtype_code = _C_API_DTYPE_INT8
+        else:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            dtype_code = _C_API_DTYPE_FLOAT64
+
         out_len = ctypes.c_int64(0)
         out_result = np.empty(nrow, dtype=np.int32)
 
         _safe_call(
             _LIB.LGBM_BoosterPredictRegime(
                 self._handle,
-                data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-                ctypes.c_int(1),  # C_API_DTYPE_FLOAT64
+                ptr_data,
+                ctypes.c_int(dtype_code),
                 ctypes.c_int32(nrow),
                 ctypes.c_int32(ncol),
                 ctypes.c_int(1),  # is_row_major
@@ -4870,9 +4884,12 @@ class Booster:
 
         num_experts = self.num_experts()
 
-        # Convert data to numpy array
+        # Convert data to numpy array, preserving int8
         if isinstance(data, np.ndarray):
-            data_array = np.ascontiguousarray(data, dtype=np.float64)
+            if data.dtype == np.int8:
+                data_array = np.ascontiguousarray(data)
+            else:
+                data_array = np.ascontiguousarray(data, dtype=np.float64)
         elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
             data_array = np.ascontiguousarray(data.values, dtype=np.float64)
         else:
@@ -4880,14 +4897,21 @@ class Booster:
 
         nrow, ncol = data_array.shape
 
+        if data_array.dtype == np.int8:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+            dtype_code = _C_API_DTYPE_INT8
+        else:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            dtype_code = _C_API_DTYPE_FLOAT64
+
         out_len = ctypes.c_int64(0)
         out_result = np.empty((nrow, num_experts), dtype=np.float64)
 
         _safe_call(
             _LIB.LGBM_BoosterPredictRegimeProba(
                 self._handle,
-                data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-                ctypes.c_int(1),  # C_API_DTYPE_FLOAT64
+                ptr_data,
+                ctypes.c_int(dtype_code),
                 ctypes.c_int32(nrow),
                 ctypes.c_int32(ncol),
                 ctypes.c_int(1),  # is_row_major
@@ -4928,9 +4952,12 @@ class Booster:
 
         num_experts = self.num_experts()
 
-        # Convert data to numpy array
+        # Convert data to numpy array, preserving int8
         if isinstance(data, np.ndarray):
-            data_array = np.ascontiguousarray(data, dtype=np.float64)
+            if data.dtype == np.int8:
+                data_array = np.ascontiguousarray(data)
+            else:
+                data_array = np.ascontiguousarray(data, dtype=np.float64)
         elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
             data_array = np.ascontiguousarray(data.values, dtype=np.float64)
         else:
@@ -4938,14 +4965,21 @@ class Booster:
 
         nrow, ncol = data_array.shape
 
+        if data_array.dtype == np.int8:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+            dtype_code = _C_API_DTYPE_INT8
+        else:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            dtype_code = _C_API_DTYPE_FLOAT64
+
         out_len = ctypes.c_int64(0)
         out_result = np.empty((nrow, num_experts), dtype=np.float64)
 
         _safe_call(
             _LIB.LGBM_BoosterPredictExpertPred(
                 self._handle,
-                data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-                ctypes.c_int(1),  # C_API_DTYPE_FLOAT64
+                ptr_data,
+                ctypes.c_int(dtype_code),
                 ctypes.c_int32(nrow),
                 ctypes.c_int32(ncol),
                 ctypes.c_int(1),  # is_row_major
