@@ -1199,9 +1199,14 @@ void MixtureGBDT::Forward() {
   }
 
   // Get gate probabilities
-  if (config_->mixture_gate_type == "none") {
-    // No gate model: use previous responsibilities as routing probabilities
-    std::copy(responsibilities_.begin(), responsibilities_.end(), gate_proba_.begin());
+  if (config_->mixture_gate_type == "none" || config_->mixture_gate_type == "leaf_reuse") {
+    // "none": use previous responsibilities as routing probabilities
+    // "leaf_reuse": gate_proba_ was set by MStepGate's leaf statistics (keep as-is)
+    // On first iteration, responsibilities are from InitResponsibilities
+    if (config_->mixture_gate_type == "none") {
+      std::copy(responsibilities_.begin(), responsibilities_.end(), gate_proba_.begin());
+    }
+    // For leaf_reuse, gate_proba_ is already set from previous MStepGate call
   } else {
     // GBDT gate: softmax of gate raw predictions
     std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
@@ -1357,6 +1362,7 @@ void MixtureGBDT::EStep() {
   const double alpha = config_->mixture_e_step_alpha;
   const double lb_alpha = config_->mixture_load_balance_alpha;
   // When gate_type="none", force loss_only mode (no gate probabilities available)
+  // leaf_reuse has valid gate_proba from leaf statistics, so use configured mode
   const std::string mode = (config_->mixture_gate_type == "none")
       ? "loss_only" : config_->mixture_e_step_mode;
 
@@ -2068,6 +2074,104 @@ void MixtureGBDT::MStepGate() {
   }
 }
 
+void MixtureGBDT::MStepGateLeafReuse() {
+  // Derive gate probabilities from expert tree leaf statistics
+  // instead of training a full GBDT gate every iteration.
+  //
+  // Algorithm:
+  // 1. For each sample, get leaf index from each expert's latest tree
+  // 2. For each expert's leaf, compute which expert is "best" (from responsibilities)
+  // 3. Set gate_proba_ from these leaf-level routing statistics
+  // 4. Periodically retrain gate GBDT for inference on new data
+
+  const int num_features = train_data_->num_features();
+  if (!train_data_->has_raw() || num_features == 0) {
+    // Fallback to standard gate if raw features unavailable
+    MStepGate();
+    return;
+  }
+
+  // Use expert 0's latest tree as the primary routing tree
+  // (could also use the expert with most assigned samples)
+  const Tree* routing_tree = experts_[0]->GetLatestTree();
+  if (routing_tree == nullptr || routing_tree->num_leaves() <= 1) {
+    // No tree built yet (first iteration), use standard gate
+    MStepGate();
+    return;
+  }
+
+  const int num_leaves = routing_tree->num_leaves();
+
+  // Step 1: Get leaf index for each sample using the routing tree
+  std::vector<int> sample_leaf(num_data_);
+  std::vector<double> features_buf(num_features);
+
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) \
+      firstprivate(features_buf)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    for (int f = 0; f < num_features; ++f) {
+      features_buf[f] = static_cast<double>(train_data_->raw_index(f)[i]);
+    }
+    sample_leaf[i] = routing_tree->PredictLeafIndex(features_buf.data());
+  }
+
+  // Step 2: For each leaf, compute expert distribution from responsibilities
+  // leaf_expert_sum[leaf][k] = sum of responsibilities for expert k in that leaf
+  std::vector<std::vector<double>> leaf_expert_sum(
+      num_leaves, std::vector<double>(num_experts_, 0.0));
+  std::vector<int> leaf_count(num_leaves, 0);
+
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    int leaf = sample_leaf[i];
+    if (leaf >= 0 && leaf < num_leaves) {
+      ++leaf_count[leaf];
+      for (int k = 0; k < num_experts_; ++k) {
+        leaf_expert_sum[leaf][k] += responsibilities_[i * num_experts_ + k];
+      }
+    }
+  }
+
+  // Normalize to get per-leaf routing probabilities
+  std::vector<std::vector<double>> leaf_routing(
+      num_leaves, std::vector<double>(num_experts_, 1.0 / num_experts_));
+  for (int l = 0; l < num_leaves; ++l) {
+    if (leaf_count[l] > 0) {
+      double sum = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        sum += leaf_expert_sum[l][k];
+      }
+      if (sum > 0.0) {
+        for (int k = 0; k < num_experts_; ++k) {
+          leaf_routing[l][k] = leaf_expert_sum[l][k] / sum;
+        }
+      }
+    }
+  }
+
+  // Step 3: Set gate_proba_ from leaf routing statistics
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    int leaf = sample_leaf[i];
+    if (leaf >= 0 && leaf < num_leaves) {
+      for (int k = 0; k < num_experts_; ++k) {
+        gate_proba_[i * num_experts_ + k] = leaf_routing[leaf][k];
+      }
+    }
+  }
+
+  // Step 4: Periodically retrain gate GBDT for inference on new data
+  const int retrain_interval = config_->mixture_gate_retrain_interval;
+  if (iter_ % retrain_interval == 0) {
+    MStepGate();
+  } else {
+    // Still need to advance gate iteration count with trivial update
+    std::vector<score_t> zero_grad(static_cast<size_t>(num_data_) * num_experts_, 0.0);
+    std::vector<score_t> tiny_hess(static_cast<size_t>(num_data_) * num_experts_,
+                                    static_cast<score_t>(kMixtureEpsilon));
+    gate_->TrainOneIter(zero_grad.data(), tiny_hess.data());
+  }
+}
+
 bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians) {
   // MixtureGBDT ignores external gradients/hessians
   // (custom objective is handled internally via responsibility weighting)
@@ -2175,11 +2279,11 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   // M-step: update gate
   if (config_->mixture_gate_type == "gbdt") {
     // Gate should always be trained, even during warmup.
-    // During warmup, responsibilities are fixed from initialization (quantile-based),
-    // so gate learns to predict these fixed responsibilities.
     MStepGate();
+  } else if (config_->mixture_gate_type == "leaf_reuse") {
+    MStepGateLeafReuse();
   }
-  // "none": skip gate training entirely — E-step uses loss_only, inference uses uniform 1/K
+  // "none": skip gate training entirely
 
   ++iter_;
 

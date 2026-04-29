@@ -1327,11 +1327,19 @@ struct Config {
   // desc = recommended range: 0.1-0.3
   // desc = note: at least one expert is always kept (never drops all experts)
   // type = enum
-  // options = gbdt, none
+  // options = gbdt, none, leaf_reuse
   // desc = gate model type for Mixture-of-Experts routing
   // desc = ``gbdt``: full multiclass GBDT gate, trained every iteration (default)
-  // desc = ``none``: no gate model. E-step uses loss_only mode, inference uses uniform 1/K
+  // desc = ``none``: no gate model. E-step uses loss_only mode, routing uses responsibilities
+  // desc = ``leaf_reuse``: derive routing from expert tree leaf statistics,
+  // desc =   gate GBDT retrained periodically for inference only
   std::string mixture_gate_type = "gbdt";
+
+  // check = >=1
+  // desc = how often to retrain the gate GBDT when mixture_gate_type=leaf_reuse
+  // desc = the gate GBDT is needed for inference on new data
+  // desc = higher = faster training, lower = better inference routing
+  int mixture_gate_retrain_interval = 10;
 
   double mixture_expert_dropout_rate = 0.0;
 

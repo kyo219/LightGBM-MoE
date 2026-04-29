@@ -455,6 +455,13 @@ class GBDT : public GBDTBase {
   inline int NumberOfTotalModel() const override { return static_cast<int>(models_.size()); }
 
   /*!
+   * \brief Get the most recently added tree (nullptr if no trees yet)
+   */
+  const Tree* GetLatestTree() const {
+    return models_.empty() ? nullptr : models_.back().get();
+  }
+
+  /*!
   * \brief Get number of tree per iteration
   * \return number of tree per iteration
   */

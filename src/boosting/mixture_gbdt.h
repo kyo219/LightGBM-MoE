@@ -213,6 +213,13 @@ class MixtureGBDT : public GBDTBase {
   void MStepGate();
 
   /*!
+   * \brief M-step for gate using leaf-reuse routing.
+   * Derives gate probabilities from expert tree leaf statistics
+   * and periodically retrains gate GBDT for inference.
+   */
+  void MStepGateLeafReuse();
+
+  /*!
    * \brief Compute pointwise loss for E-step
    */
   double ComputePointwiseLoss(double y, double pred) const;
