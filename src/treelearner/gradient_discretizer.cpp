@@ -104,6 +104,13 @@ void GradientDiscretizer::DiscretizeGradients(
   }
   max_gradient_abs_ = max_gradient;
   max_hessian_abs_ = max_hessian;
+  // Guard against degenerate scale when |grad| or |hess| collapses to ~0.
+  // Trips in MoE with hard_m_step when an expert briefly receives no
+  // assigned samples — without the floor, scale=0 ⇒ 1/0=inf ⇒ NaN cascade
+  // through the discretized histogram path (catastrophic RMSE blow-up).
+  constexpr double kMinAbsForScale = 1e-30;
+  if (max_gradient_abs_ < kMinAbsForScale) max_gradient_abs_ = kMinAbsForScale;
+  if (max_hessian_abs_ < kMinAbsForScale) max_hessian_abs_ = kMinAbsForScale;
   gradient_scale_ = max_gradient_abs_ / static_cast<double>(num_grad_quant_bins_ / 2);
   if (is_constant_hessian_) {
     hessian_scale_ = max_hessian_abs_;

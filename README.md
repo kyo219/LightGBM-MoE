@@ -1268,79 +1268,279 @@ The overall verdict combines the above metrics into one of three categories:
 
 ---
 
+## Feature Catalog & int8 Compatibility
+
+> A consolidated reference for *what knobs exist*, *which knob requires which*, and *which knobs are safe to use with `use_quantized_grad`*. See [`examples/compat_matrix.py`](examples/compat_matrix.py) for the regression test that produced the matrix below.
+
+### "int8" — three independent layers
+
+People say "int8" to mean three different things in this project. They live at different layers and are **set independently**: passing an int8 input array does **not** auto-enable `use_quantized_grad`, and vice versa.
+
+```
+Layer 1: Python input dtype                        — controlled by:  X.astype(np.int8)
+   ↓ (C API boundary)
+Layer 2: C++ bin storage dtype (uint8 / uint16)    — controlled by:  max_bin (auto)
+   ↓ (training loop)
+Layer 3: gradient/hessian quantization             — controlled by:  use_quantized_grad=True
+```
+
+| Layer | What it does | How to enable | Effect | Code |
+|---|---|---|---|---|
+| **1. Python input int8** | numpy.int8 array reaches the C API without a Python-side float32 conversion | `X.astype(np.int8)` | 4× Python-process memory reduction (e.g. 954 MB vs 3.73 GB for 500K × 2000) | `830181bd`; `python-package/lightgbm_moe/basic.py`, `src/c_api.cpp` |
+| **2. Bin storage** | After binning, bin indices are held as `uint8_t` when `num_bin ≤ 256`, `uint16_t` up to 65535 | Always automatic (just keep `max_bin ≤ 255` for the smallest type) | C++-side memory minimized; this layer has *always* been int8 for moderate `max_bin` | `src/io/dense_bin.hpp` `template<VAL_T>` |
+| **3. Quantized gradients** | Training-time `grad`/`hess` are scaled and packed to int8 (16/32-bit accumulators); histogram construction reads the smaller types | `params['use_quantized_grad'] = True` (+ `num_grad_quant_bins`, `stochastic_rounding`) | 1.05–1.30× speedup with negligible RMSE change (Standard); same on MoE *after the Phase 2 fix on this branch* | upstream `GradientDiscretizer` + `c596fb93` |
+
+#### Common misconceptions
+
+- **"I passed `np.int8` so the gradients are int8 too"** — no. Layer 1 only saves Python memory; the C++ side still computes float gradients unless Layer 3 is on.
+- **"Layer 2 needs me to set anything"** — no. The bin-storage type is chosen automatically from `max_bin`. For `[0, 4]`-style Numerai features, num_bin = 5 → uint8 storage with no flags.
+- **"Layers depend on each other"** — they don't. Any combination is valid. The full speedup template for Numerai-style data turns on layer 1 and layer 3 explicitly:
+
+  ```python
+  X_int8 = X.astype(np.int8)             # Layer 1: Python memory ↓ 4×
+  ds = lgb.Dataset(X_int8, label=y)      # Layer 2: uint8 bins automatic
+  params = {
+      "use_quantized_grad": True,         # Layer 3: int8 grad/hess
+      "num_grad_quant_bins": 32,
+      "max_bin": 255,                     # ensure layer 2 stays in uint8
+      ...
+  }
+  ```
+
+#### Why aren't they coupled?
+
+Input dtype is a property of the *data* (Numerai features happen to be `[0, 4]` integers; image features are `[0, 255]`). Quantized gradients depend on the *loss landscape* (gradient magnitudes are objective-dependent). Auto-coupling would silently quantize gradients for users who only wanted the Python-side memory win, with surprising RMSE consequences on some objectives. The library keeps the two layers as separate explicit knobs.
+
+### 8 Configuration Axes
+
+| Axis | Parameter(s) | Choices | Default |
+|------|--------------|---------|---------|
+| **1. Model variant** | `boosting`, `mixture_progressive_mode`, per-expert vector params | `gbdt` / `mixture` / `mixture` + EvoMoE / `mixture` + per-expert HP (MoE-PE) | `gbdt` |
+| **2. E-step** | `mixture_e_step_mode`, `mixture_e_step_alpha`, `mixture_e_step_loss` | `em` / `loss_only` / `gate_only` | `em` |
+| **3. M-step** | `mixture_hard_m_step`, `mixture_diversity_lambda` | hard (sparse activation) / soft (weighted) | `true` (hard) |
+| **4. Gate** | `mixture_gate_type` (+ all `mixture_gate_*` knobs) | `gbdt` / `none` / `leaf_reuse` | `gbdt` |
+| **5. Routing** | `mixture_routing_mode`, `mixture_expert_*` capacity/score knobs | `token_choice` / `expert_choice` | `token_choice` |
+| **6. Smoothing** | `mixture_r_smoothing`, `mixture_smoothing_lambda` | `none` / `ema` / `markov` / `momentum` | `none` |
+| **7. Initialization** | `mixture_init` | `uniform` / `random` / `quantile` / `balanced_kmeans` / `gmm` / `tree_hierarchical` | `uniform` |
+| **8. Regularization** | warmup, load balance, dropout, gate entropy, gate temperature, adaptive LR (and their schedules) | many | mostly off |
+
+### Dependency Map
+
+```
+boosting=gbdt ─────────────────────────── (baseline; mixture_* params are no-ops)
+   │
+   └─ use_quantized_grad ✓  (1.05-1.30× speedup at no RMSE cost)
+
+boosting=mixture
+   │
+   ├─ mixture_progressive_mode=evomoe
+   │     ├ mixture_seed_iterations
+   │     └ mixture_spawn_perturbation
+   │
+   ├─ mixture_routing_mode=expert_choice
+   │     ├ mixture_expert_capacity_factor
+   │     ├ mixture_expert_choice_score
+   │     ├ mixture_expert_choice_boost
+   │     └ mixture_expert_choice_hard
+   │
+   ├─ mixture_gate_type
+   │     ├ "gbdt"        → all mixture_gate_* params apply
+   │     ├ "none"        → E-step is forced into loss_only mode
+   │     └ "leaf_reuse"  → mixture_gate_retrain_interval applies
+   │
+   ├─ mixture_hard_m_step=true
+   │     └─ Sparse activation auto-enabled (per-expert SetBaggingData);
+   │        per-expert bagging_fraction/freq are auto-disabled to avoid
+   │        the double-bagging crash from issue #16.
+   │
+   ├─ mixture_r_smoothing != "none"
+   │     └─ mixture_smoothing_lambda applies (assumes row order = time)
+   │
+   ├─ mixture_dropout_schedule != "constant"
+   │     ├ mixture_dropout_rate_min
+   │     └ mixture_dropout_rate_max
+   │
+   └─ mixture_adaptive_lr=true
+         ├ mixture_adaptive_lr_window
+         └ mixture_adaptive_lr_max
+```
+
+#### Auto-applied settings (do not need user input)
+
+| When | Forced setting | Where | Why |
+|------|----------------|-------|-----|
+| `mixture_hard_m_step=true` | per-expert `bagging_fraction=1.0`, `bagging_freq=0` | `mixture_gbdt.cpp:113-116` | Sparse activation already restricts the expert to its assigned samples; double-bagging produces degenerate histograms (#16) |
+| `use_quantized_grad=true` (under MoE) | `quant_train_renew_leaf=true` on every expert + the gate | `mixture_gbdt.cpp:125-127, 137-139` | Without renewal the quantized leaf-output path is biased by sparse-activation `hess≈1e-12` rows, producing 3-20× RMSE blow-up |
+| `mixture_gate_type="none"` | E-step runs in `loss_only` mode regardless of `mixture_e_step_mode` | `mixture_gbdt.cpp` | No gate probabilities to weight by |
+
+### int8 / `use_quantized_grad` Compatibility Matrix
+
+Empirical run via `examples/compat_matrix.py` (5,000 × 100 int8, K=3, 30 rounds), all 8 axes × {float, quant} = 31 feature × 2 modes = **62 trials**:
+
+| Status | Count | Meaning |
+|--------|-------|---------|
+| `CRASH` | **0 / 31** | The combination produces an exception or non-finite RMSE |
+| `REGRESS` | **0 / 31** | Quant RMSE is more than 30 % worse than float RMSE |
+| `minor` | 6 / 31 | 5-30 % RMSE diff, all on stochastic-init or smoothing paths whose float/quant trajectories diverge by random-seed effects |
+| `ok` | 25 / 31 | RMSE within 5 % |
+
+#### Per-axis compatibility (representative rows)
+
+| Feature | float RMSE | quant RMSE | Status |
+|---------|-----------|------------|--------|
+| `gbdt/standard` | 1.246 | 1.246 | ok (4.4× faster) |
+| `moe/default` | 1.292 | 1.315 | ok |
+| `moe/hard=True` (sparse activation) | 1.292 | 1.315 | ok ← regressed pre-fix |
+| `moe/hard=False` (soft) | 1.256 | 1.251 | ok |
+| `moe/gate=gbdt` | 1.292 | 1.315 | ok |
+| `moe/gate=none` | 2.574 | 2.925 | minor |
+| `moe/gate=leaf_reuse` | 2.850 | 3.027 | minor |
+| `moe/route=token_choice` | 1.292 | 1.315 | ok |
+| `moe/route=expert_choice` | 1.256 | 1.293 | ok |
+| `moe/evomoe` (progressive) | 1.299 | 1.294 | ok |
+| `moe-pe/per_expert_hp` | 1.396 | 1.407 | ok |
+| `moe/expert_dropout` | 1.517 | 1.484 | ok |
+| `moe/adaptive_lr` | 1.594 | 1.584 | ok |
+| `moe/dropout_curriculum` | 1.357 | 1.365 | ok |
+| `moe/gate_temperature` (annealing) | 1.646 | 1.419 | ok |
+| `moe/diversity_lambda=0.3` | 483.7 | 205.9 | ok ※ |
+| `moe/init={uniform/quantile/gmm}` | 1.27-1.29 | 1.32-1.33 | ok |
+| `moe/init={random/balanced_kmeans/tree_hierarchical}` | 1.24-1.28 | 1.32-1.49 | minor (random-seed sensitive) |
+| `moe/smooth={ema/markov}` | 1.32-2.75 | 1.32-2.83 | ok |
+| `moe/smooth=momentum` | 2.69 | 2.86 | minor |
+
+※ `diversity_lambda=0.3` blows up RMSE on this tiny dataset for both modes equally — a config sensitivity, not a quantization issue.
+
+**Bottom line: every feature in the codebase is safe to combine with `use_quantized_grad=true`** (after the Phase 2 fix on commit `c596fb93`).
+
+### Recommended Numerai-style Configuration
+
+```python
+params = {
+    'boosting': 'mixture',
+    'use_quantized_grad': True,        # 1.32-1.35× faster on MoE, no RMSE penalty
+    'num_grad_quant_bins': 32,         # 16 also fine; 32 is the safer default
+    'mixture_num_experts': 3,
+    'mixture_warmup_iters': 5,
+    'mixture_hard_m_step': True,       # sparse activation
+    'mixture_gate_type': 'gbdt',
+    'mixture_routing_mode': 'token_choice',  # or 'expert_choice' for strict load balance
+    'objective': 'regression',
+}
+```
+
+For self-hosted training builds, additionally pass `-DUSE_NATIVE_ARCH=ON` to CMake. (Effect on the histogram hot path is currently ~0 % because that loop is memory-bound — see [issue #18](https://github.com/kyo219/LightGBM-MoE/issues/18) for the planned manual AVX-512 VNNI follow-up; the flag is in place to enable that work.)
+
+### Known Limitations (out of scope for this section)
+
+1. **Input binning still rebins int8 → bins** even when the input is already discrete in `[0, max_bin)`. Tracking issue: [#17](https://github.com/kyo219/LightGBM-MoE/issues/17).
+2. **Histogram construction is memory-bound** scatter-accumulate — `-march=native` alone moves training time by ~0 %. The manual AVX-512 VNNI fix is tracked in [#18](https://github.com/kyo219/LightGBM-MoE/issues/18).
+3. **Distributed mode** (`tree_learner=data` / `voting`) is untested with the Phase 2 quantization fix. Single-node only for now.
+
+---
+
 ## Benchmark
 
-**Setup**: 500 Optuna trials, 5-fold time-series CV, early stopping (50 rounds).
+> **Headline study** ([`examples/comparative_study.py`](examples/comparative_study.py)): 1000 Optuna trials × 2 variants (Standard, MoE) × 3 datasets (Synthetic, Hamilton, VIX), 5-fold time-series CV, early stopping. Full per-trial dump in [`bench_results/study_1k.json`](bench_results/study_1k.json), generated report in [`bench_results/study_1k_report.md`](bench_results/study_1k_report.md).
 
-### RMSE Comparison
+### Accuracy: which variant wins?
 
-| Dataset | Standard | MoE | MoE-PE | Best Improvement |
-|---------|----------|-----|--------|------------------|
-| Synthetic | 4.9991 | **4.6837** | 4.8449 | +6.3% |
-| Hamilton | 0.7053 | **0.6996** | 0.7040 | +0.8% |
+| Dataset | Shape | Standard best RMSE | MoE best RMSE | Improvement |
+|---|---|---|---|---|
+| **Synthetic** (feature-driven regime) | 2000 × 5 | 4.96 | **3.41** | **+31 % MoE** |
+| Hamilton (latent regime + TS features) | 500 × 12 | 0.6990 | 0.6985 | tie |
+| VIX | 1000 × 5 | 0.0115 | 0.0115 | tie |
 
-### Expert Differentiation (Regime Separation)
+**MoE only helps when the regime is observable from the features.** On Hamilton (latent regime, even after engineered TS features) and VIX, MoE matches Standard but does not beat it; the extra machinery costs compute without buying accuracy.
 
-| Dataset | MoE K | MoE-PE K | MoE Corr (min/max) | MoE-PE Corr (min/max) | MoE Regime Acc | MoE-PE Regime Acc |
-|---------|-------|----------|--------------------|-----------------------|----------------|-------------------|
-| Synthetic | 3 | 3 | -0.62/0.09 | -0.26/0.07 | 64.9% | 58.6% |
-| Hamilton | 2 | 2 | 0.40/0.40 | -0.35/-0.35 | 64.8% | 60.2% |
+### Speed: median train time per CV fold
 
-- **K**: Number of experts selected by Optuna
-- **Expert Corr (min/max)**: Pairwise correlation between expert predictions (lower = more differentiated, negative = opposite predictions)
-- **Regime Acc**: Classification accuracy of predicted regime vs true regime
+| Dataset | Standard | MoE | MoE penalty |
+|---|---|---|---|
+| Synthetic | 0.231 s | 0.251 s | 1.09 × |
+| Hamilton | 0.077 s | 0.138 s | 1.79 × |
+| VIX | 0.072 s | 0.110 s | 1.53 × |
 
-**Key Findings**:
-- MoE achieves **+6.3% improvement** on Synthetic data with expert correlation of **-0.62** (experts specialize on opposite regimes)
-- **Hamilton: MoE beats Standard GBDT** (+0.8%) with time-series features (moving averages, volatility). Expert correlation **-0.35** (MoE-PE) confirms regime-switching is working
-- Time-series features (rolling mean, volatility, sign) make latent regimes partially observable, enabling effective regime-switching
+So on the two datasets where MoE doesn't lift accuracy, it is also 1.5-1.8× slower per fold. Combined with the verdict above, *use MoE when accuracy says yes, not by default*.
 
-### Selected Hyperparameters (Synthetic Dataset)
+### Recommended hyperparameters from the study
 
-**MoE (Shared Tree Structure):**
-- num_experts: 3, max_depth: 10, num_leaves: 126, learning_rate: 0.099, alpha: 1.35, gate_depth: 10, gate_leaves: 58
+The categorical breakdown below uses **best (min) RMSE per value** rather than mean — the per-variant Optuna run produced a long tail of catastrophic configurations whose mean would mislead.
 
-**MoE-PerExpert (Per-Expert Tree Structure):**
-- num_experts: 3, learning_rate: 0.147, alpha: 2.51, gate_depth: 10, gate_leaves: 55
+#### Universal — same value won across all 3 datasets (in MoE)
 
-| Expert | max_depth | num_leaves | min_data_in_leaf |
-|--------|-----------|------------|------------------|
-| E0 | 9 | 52 | 9 |
-| E1 | 4 | 45 | 35 |
-| E2 | 9 | 105 | 28 |
+| Parameter | Recommended | Notes |
+|---|---|---|
+| `mixture_num_experts` | **3-4** | Q4 quartile mean wins on all 3 datasets |
+| `mixture_gate_type` | **`gbdt`** | Best minimum RMSE on every dataset; the alternative gates (`leaf_reuse`, `none`) never produced the absolute best |
+| `mixture_routing_mode` | **`token_choice`** | Best minimum RMSE on every dataset |
+| `extra_trees` | **`true`** | Best minimum RMSE on every dataset (also clear winner for Standard on Hamilton/VIX) |
+| `mixture_diversity_lambda` | **search 0.0–0.5** | Consistently top-3 in fANOVA importance for MoE (no single best value, but matters) |
 
-### Run Benchmark
+#### Dataset-dependent — search these per problem
 
-The benchmark script (`examples/benchmark.py`) compares Standard GBDT vs MoE GBDT on synthetic datasets using Optuna hyperparameter optimization. It evaluates RMSE, expert differentiation (correlation), regime accuracy, and expert utilization.
+| Parameter | Synthetic | Hamilton | VIX |
+|---|---|---|---|
+| `mixture_e_step_mode` | `em` | `gate_only` | `gate_only` |
+| `mixture_init` | `gmm` | `random` | `gmm` |
+| `mixture_r_smoothing` | `markov` | `markov` | `ema` |
+| `mixture_hard_m_step` | `true` | `true` | `false` |
+| `learning_rate` (best Q) | 0.20-0.24 | 0.10-0.13 | 0.26+ |
 
-**Datasets:**
+#### fANOVA importance (top contributors)
 
-| Dataset | Samples | Features | Characteristics |
-|---------|---------|----------|-----------------|
-| Synthetic | 2000 | 5 | Feature-driven regimes (ideal for MoE) |
-| Hamilton | 500 | 12 | Latent regime + time-series features (MA, volatility, regime indicators) |
+For **Standard GBDT**, `min_data_in_leaf` dominates (importance 0.48-0.80 across the 3 datasets), with `learning_rate` distantly second. **A well-tuned `min_data_in_leaf` carries most of the win.**
 
-**Dependencies:**
+For **MoE**, the picture is more spread:
+
+| Dataset | Top contributor | Second | Third |
+|---|---|---|---|
+| Synthetic | `min_data_in_leaf` (0.87) | `mixture_gate_type` (0.034) | `mixture_diversity_lambda` (0.017) |
+| Hamilton | `learning_rate` (0.53) | `mixture_diversity_lambda` (0.16) | `bagging_fraction` (0.077) |
+| VIX | `lambda_l1` (0.44) | `mixture_diversity_lambda` (0.20) | `mixture_gate_type` (0.088) |
+
+Across all three MoE runs, `mixture_diversity_lambda` is in the top 3 — **searching it is critical, the value is not.**
+
+### Run the comparative study yourself
 
 ```bash
-pip install optuna matplotlib shap scikit-learn
+# Full study (~17 min on 12-core / 24-thread machine, n_jobs=6)
+python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+
+# Quick smoke check (~30 seconds)
+python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+
+# Subset of datasets
+python examples/comparative_study.py --trials 1000 \
+    --datasets synthetic,hamilton --out bench_results/two_ds.json
 ```
 
-**Usage:**
+The script writes `bench_results/study_1k.json` (full per-trial dump for re-analysis) plus a sibling `*_report.md` (the analysis above, automatically generated) and `slice_<dataset>_<variant>.png` files (Optuna slice plots showing each parameter's value vs RMSE).
+
+### Legacy: 500-trial benchmark with MoE-PE
+
+The original [`examples/benchmark.py`](examples/benchmark.py) script (Standard / MoE / MoE-PE on Synthetic + Hamilton, 500 trials) is still present for the per-expert-hyperparameters story; it is not the headline anymore but is kept as the reference for MoE-PE's expert differentiation analysis.
 
 ```bash
-# Full benchmark (Standard vs MoE vs MoE-PE, 100 trials default)
-python examples/benchmark.py
-
-# More trials for better optimization
 python examples/benchmark.py --trials 200
-
-# Quick test
-python examples/benchmark.py --trials 10
-
-# Output to markdown
 python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--trials` | 100 | Number of Optuna trials |
+| `--seed` | 42 | Random seed |
+| `--splits` | 5 | CV splits (TimeSeriesSplit) |
+| `--rounds` | 100 | Boosting rounds |
+| `--no-viz` | - | Skip visualization |
+| `--no-demo` | - | Skip regime demo visualization |
+| `--no-shap` | - | Skip SHAP beeswarm visualization |
+| `--output-md` | - | Output markdown file path |
+| `--collapse-stopper` | - | Enable expert collapse early stopping |
+| `--corr-threshold` | 0.7 | Expert correlation threshold for collapse detection |
+| `--min-expert-ratio` | 0.05 | Minimum expert utilization ratio |
+| `--check-every` | 20 | Collapse check frequency (iterations) |
+| `--min-iters` | 50 | Minimum iterations before collapse checking |
 
 **All CLI options:**
 
@@ -2580,82 +2780,262 @@ Expert予測間のペアワイズPearson相関を計算します。2つのExpert
 
 ---
 
+## 機能カタログと int8 互換性
+
+> **どんな設定軸があり、どれが何を要求し、どれが `use_quantized_grad` と安全に併用できるか** をまとめた早見表。実機検証は [`examples/compat_matrix.py`](examples/compat_matrix.py) を参照。
+
+### 「int8」は **3つの独立したレイヤー** がある
+
+このプロジェクトで「int8」と一口に言うとき、実は **3つの別の概念** を指していることがあります。それぞれ別レイヤーにあり、**互いに独立**して有効化されます。**int8 配列を入力したからといって `use_quantized_grad` が自動 ON にはならない** し、逆もまた然り。
+
+```
+レイヤー1: Python 入力 dtype                       — 制御方法:  X.astype(np.int8)
+   ↓ (C API 境界)
+レイヤー2: C++ bin storage dtype (uint8 / uint16)   — 制御方法:  max_bin (自動)
+   ↓ (訓練ループ)
+レイヤー3: gradient/hessian 量子化                   — 制御方法:  use_quantized_grad=True
+```
+
+| レイヤー | 何をするか | 有効化方法 | 効果 | コード |
+|---|---|---|---|---|
+| **1. Python 入力 int8** | numpy.int8 配列を float32 への昇格コピーなしで C API に渡す | `X.astype(np.int8)` を渡す | Python プロセスメモリ 4倍削減 (例: 500K × 2000 で 954 MB vs 3.73 GB) | `830181bd`; `python-package/lightgbm_moe/basic.py`, `src/c_api.cpp` |
+| **2. bin storage** | binning 後、bin index を `num_bin ≤ 256` なら `uint8_t`、≤65535 なら `uint16_t` で保持 | 常時自動 (最小型を狙うなら `max_bin ≤ 255` に維持) | C++ 側メモリ最小化。このレイヤーは元から常に int8 (中規模 max_bin の場合) | `src/io/dense_bin.hpp` の `template<VAL_T>` |
+| **3. 量子化勾配** | 訓練中の `grad`/`hess` をスケール量子化して int8 にパック (16/32bit accumulator)。ヒストグラム構築が小さい型で動く | `params['use_quantized_grad'] = True` (+ `num_grad_quant_bins`, `stochastic_rounding`) | 1.05–1.30倍高速化、RMSE 劣化ほぼなし (Standard)。MoE は **本ブランチの Phase 2 fix 後に同等に動作** | upstream `GradientDiscretizer` + `c596fb93` |
+
+#### よくある誤解
+
+- **「`np.int8` で渡したから勾配も int8 だろう」** — 違います。レイヤー1 は Python メモリだけの話。C++ 側はレイヤー3 を ON にしない限り float 勾配で動きます
+- **「レイヤー2 は何か設定がいる」** — 不要。`max_bin` から自動選択されます。Numerai の `[0, 4]` 型なら num_bin = 5 → uint8 storage が自動
+- **「レイヤー間に依存がある」** — ありません。8通りの組合せが全て有効。Numerai 風データで全部入りにするテンプレ:
+
+  ```python
+  X_int8 = X.astype(np.int8)             # レイヤー1: Python メモリ 4倍削減
+  ds = lgb.Dataset(X_int8, label=y)      # レイヤー2: uint8 bins 自動
+  params = {
+      "use_quantized_grad": True,         # レイヤー3: int8 grad/hess
+      "num_grad_quant_bins": 32,
+      "max_bin": 255,                     # レイヤー2 を uint8 に保証
+      ...
+  }
+  ```
+
+#### なぜ自動連動しないのか
+
+入力 dtype は **データの性質** に依存 (Numerai は `[0, 4]` の整数、画像は `[0, 255]` の整数)。量子化勾配は **損失関数のスケール** に依存 (勾配の絶対値分布は目的関数次第)。自動連動させると「Python メモリだけ削減したかった人」の勾配まで黙って量子化され、損失関数によっては意図せぬ RMSE 変動が起きる可能性があるため、ライブラリは両者を別々の明示フラグとして残しています。
+
+### 8つの設定軸
+
+| 軸 | パラメータ | 選択肢 | 既定値 |
+|---|---|---|---|
+| **1. モデルバリアント** | `boosting`, `mixture_progressive_mode`, per-expertベクター系 | `gbdt` / `mixture` / `mixture` + EvoMoE / `mixture` + per-expert HP (MoE-PE) | `gbdt` |
+| **2. E-step** | `mixture_e_step_mode`, `mixture_e_step_alpha`, `mixture_e_step_loss` | `em` / `loss_only` / `gate_only` | `em` |
+| **3. M-step** | `mixture_hard_m_step`, `mixture_diversity_lambda` | hard (sparse activation) / soft (加重) | `true` (hard) |
+| **4. Gate** | `mixture_gate_type` (+ `mixture_gate_*` 一式) | `gbdt` / `none` / `leaf_reuse` | `gbdt` |
+| **5. Routing** | `mixture_routing_mode`, `mixture_expert_*` (capacity/score) | `token_choice` / `expert_choice` | `token_choice` |
+| **6. Smoothing** | `mixture_r_smoothing`, `mixture_smoothing_lambda` | `none` / `ema` / `markov` / `momentum` | `none` |
+| **7. 初期化** | `mixture_init` | `uniform` / `random` / `quantile` / `balanced_kmeans` / `gmm` / `tree_hierarchical` | `uniform` |
+| **8. 正則化** | warmup, load balance, dropout, gate entropy, gate temperature, adaptive LR + そのスケジュール | 多数 | ほぼ off |
+
+### 依存関係マップ
+
+```
+boosting=gbdt ─────────────────────────── (ベース; mixture_* は無効)
+   │
+   └─ use_quantized_grad ✓  (RMSE劣化なしで 1.05-1.30× 高速化)
+
+boosting=mixture
+   │
+   ├─ mixture_progressive_mode=evomoe
+   │     ├ mixture_seed_iterations
+   │     └ mixture_spawn_perturbation
+   │
+   ├─ mixture_routing_mode=expert_choice
+   │     ├ mixture_expert_capacity_factor
+   │     ├ mixture_expert_choice_score
+   │     ├ mixture_expert_choice_boost
+   │     └ mixture_expert_choice_hard
+   │
+   ├─ mixture_gate_type
+   │     ├ "gbdt"        → 全 mixture_gate_* が効く
+   │     ├ "none"        → E-step は loss_only モードに強制
+   │     └ "leaf_reuse"  → mixture_gate_retrain_interval が効く
+   │
+   ├─ mixture_hard_m_step=true
+   │     └─ Sparse activation 自動有効 (expert毎にSetBaggingData)。
+   │        per-expert bagging_fraction/freq は自動無効化(#16の二重bagging防止)
+   │
+   ├─ mixture_r_smoothing != "none"
+   │     └─ mixture_smoothing_lambda が効く (行順=時系列前提)
+   │
+   ├─ mixture_dropout_schedule != "constant"
+   │     ├ mixture_dropout_rate_min
+   │     └ mixture_dropout_rate_max
+   │
+   └─ mixture_adaptive_lr=true
+         ├ mixture_adaptive_lr_window
+         └ mixture_adaptive_lr_max
+```
+
+#### 自動適用される設定 (ユーザ指定不要)
+
+| 条件 | 強制内容 | 場所 | 理由 |
+|---|---|---|---|
+| `mixture_hard_m_step=true` | per-expert `bagging_fraction=1.0`, `bagging_freq=0` | `mixture_gbdt.cpp:113-116` | Sparse activation で既に割当サンプルに制限済み。二重 bagging で degenerate histogram → CHECK_GT crash (#16) |
+| `use_quantized_grad=true` (MoE使用時) | 全 expert + gate に `quant_train_renew_leaf=true` | `mixture_gbdt.cpp:125-127, 137-139` | renewal なしだと sparse activation の `hess≈1e-12` 行で量子化葉値計算が偏り、RMSE が 3-20倍 悪化する |
+| `mixture_gate_type="none"` | `mixture_e_step_mode` の値に関わらず E-step は `loss_only` 動作 | `mixture_gbdt.cpp` | 重み付け用の gate確率が無いため |
+
+### int8 / `use_quantized_grad` 互換性マトリクス
+
+`examples/compat_matrix.py` で 5,000 × 100 int8, K=3, 30 rounds、8軸 × {float, quant} = **31機能 × 2モード = 62試行** を実機実行:
+
+| ステータス | 件数 | 意味 |
+|---|---|---|
+| `CRASH` | **0 / 31** | 例外、または非有限 RMSE |
+| `REGRESS` | **0 / 31** | quant の RMSE が float より 30%以上劣化 |
+| `minor` | 6 / 31 | 5-30% 差。すべて確率的な init / smoothing 経路で乱数シードで分岐したもの |
+| `ok` | 25 / 31 | RMSE 5%以内 |
+
+#### 主要機能の結果(代表)
+
+| 機能 | float RMSE | quant RMSE | ステータス |
+|---|---|---|---|
+| `gbdt/standard` | 1.246 | 1.246 | ok (4.4倍速) |
+| `moe/default` | 1.292 | 1.315 | ok |
+| `moe/hard=True` (sparse activation) | 1.292 | 1.315 | ok ← 修正前は REGRESS |
+| `moe/hard=False` (soft) | 1.256 | 1.251 | ok |
+| `moe/gate=gbdt` | 1.292 | 1.315 | ok |
+| `moe/gate=none` | 2.574 | 2.925 | minor |
+| `moe/gate=leaf_reuse` | 2.850 | 3.027 | minor |
+| `moe/route=token_choice` | 1.292 | 1.315 | ok |
+| `moe/route=expert_choice` | 1.256 | 1.293 | ok |
+| `moe/evomoe` (progressive) | 1.299 | 1.294 | ok |
+| `moe-pe/per_expert_hp` | 1.396 | 1.407 | ok |
+| `moe/expert_dropout` | 1.517 | 1.484 | ok |
+| `moe/adaptive_lr` | 1.594 | 1.584 | ok |
+| `moe/dropout_curriculum` | 1.357 | 1.365 | ok |
+| `moe/gate_temperature` (annealing) | 1.646 | 1.419 | ok |
+| `moe/diversity_lambda=0.3` | 483.7 | 205.9 | ok ※ |
+| `moe/init={uniform/quantile/gmm}` | 1.27-1.29 | 1.32-1.33 | ok |
+| `moe/init={random/balanced_kmeans/tree_hierarchical}` | 1.24-1.28 | 1.32-1.49 | minor (乱数シード由来) |
+| `moe/smooth={ema/markov}` | 1.32-2.75 | 1.32-2.83 | ok |
+| `moe/smooth=momentum` | 2.69 | 2.86 | minor |
+
+※ `diversity_lambda=0.3` は超小データだと両モードで等しく RMSE が崩れる構成感度問題。量子化由来ではない。
+
+**結論: 全機能が `use_quantized_grad=true` と安全に併用可能** (Phase 2 fix `c596fb93` 適用後)。
+
+### Numeraiスタイル推奨設定
+
+```python
+params = {
+    'boosting': 'mixture',
+    'use_quantized_grad': True,        # MoEで 1.32-1.35倍速、RMSE悪化なし
+    'num_grad_quant_bins': 32,         # 16でも可、無難なのは 32
+    'mixture_num_experts': 3,
+    'mixture_warmup_iters': 5,
+    'mixture_hard_m_step': True,       # sparse activation
+    'mixture_gate_type': 'gbdt',
+    'mixture_routing_mode': 'token_choice',  # 厳密な負荷均衡なら 'expert_choice'
+    'objective': 'regression',
+}
+```
+
+セルフホスト用ビルドなら CMake に `-DUSE_NATIVE_ARCH=ON` を追加。(現状ヒストグラム hot path への効果は ~0% — メモリbound のため。手動 AVX-512 VNNI 化を [issue #18](https://github.com/kyo219/LightGBM-MoE/issues/18) で追跡中で、フラグはその下準備。)
+
+### 既知の制限事項 (本セクション範囲外)
+
+1. **入力 binning は int8でも再bin化される**。`[0, max_bin)` の離散入力でも C++ 側で BinMapper 構築コストがかかる。追跡 issue: [#17](https://github.com/kyo219/LightGBM-MoE/issues/17)
+2. **ヒストグラム構築はメモリbound**: scatter-accumulate のため `-march=native` 単独では時間が ~0% しか変わらない。手動 AVX-512 VNNI が [#18](https://github.com/kyo219/LightGBM-MoE/issues/18) で追跡中
+3. **分散モード** (`tree_learner=data` / `voting`) は本セッションの量子化修正と未検証。シングルノードのみ
+
+---
+
 ## ベンチマーク
 
-**設定**: 500 Optunaトライアル、5分割時系列CV、early stopping (50 rounds)。
+> **メインのスタディ** ([`examples/comparative_study.py`](examples/comparative_study.py)): 1000 Optuna trials × 2 variants (Standard / MoE) × 3 datasets (Synthetic, Hamilton, VIX)、5分割時系列CV、early stopping。trial 単位の生データは [`bench_results/study_1k.json`](bench_results/study_1k.json)、自動生成された分析レポートは [`bench_results/study_1k_report.md`](bench_results/study_1k_report.md) にあります。
 
-### RMSE比較
+### 精度: どのバリアントが勝つか
 
-| データセット | Standard | MoE | MoE-PE | 改善率 |
-|-------------|----------|-----|--------|--------|
-| Synthetic | 4.9991 | **4.6837** | 4.8449 | +6.3% |
-| Hamilton | 0.7053 | **0.6996** | 0.7040 | +0.8% |
+| データセット | shape | Standard best RMSE | MoE best RMSE | 改善 |
+|---|---|---|---|---|
+| **Synthetic** (特徴量ベースのregime) | 2000 × 5 | 4.96 | **3.41** | **+31% MoE勝利** |
+| Hamilton (潜在regime + 時系列特徴量) | 500 × 12 | 0.6990 | 0.6985 | 同等 |
+| VIX | 1000 × 5 | 0.0115 | 0.0115 | 同等 |
 
-### Expert分化（レジーム分離）
+**MoE が効くのは regime が特徴量から見える時だけ**。Hamilton (潜在 regime、時系列特徴量を入れても) や VIX では MoE は Standard と互角で勝てない。MoE の追加機構は計算コストがかかるだけ。
 
-| データセット | MoE K | MoE-PE K | MoE相関 (min/max) | MoE-PE相関 (min/max) | MoE Regime精度 | MoE-PE Regime精度 |
-|-------------|-------|----------|-------------------|----------------------|----------------|-------------------|
-| Synthetic | 3 | 3 | -0.62/0.09 | -0.26/0.07 | 64.9% | 58.6% |
-| Hamilton | 2 | 2 | 0.40/0.40 | -0.35/-0.35 | 64.8% | 60.2% |
+### 速度: CV fold あたりの中央値訓練時間
 
-- **K**: Optunaで選択されたExpert数
-- **Expert相関 (min/max)**: Expert間の予測相関（低い=分化している、負=逆の予測）
-- **Regime精度**: 予測regimeと真のregimeの分類精度
+| データセット | Standard | MoE | MoE penalty |
+|---|---|---|---|
+| Synthetic | 0.231 s | 0.251 s | 1.09 × |
+| Hamilton | 0.077 s | 0.138 s | 1.79 × |
+| VIX | 0.072 s | 0.110 s | 1.53 × |
 
-**重要な発見**:
-- MoEがSyntheticデータで **+6.3%の改善**、Expert相関 **-0.62**（Expertが逆のレジームに特化）
-- **Hamilton: MoEがStandard GBDTに勝利**（+0.8%）。時系列特徴量（移動平均、ボラティリティ）を追加することで潜在レジームを間接的に観測可能に
-- MoE-PEのExpert相関 **-0.35** がレジームスイッチングの成功を確認
-- 時系列特徴量（移動平均、ボラティリティ、符号）が潜在レジームの検出に有効
+つまり **MoE が精度貢献しない 2 dataset では、1.5-1.8 倍遅くなるだけ**。精度評価が「MoE で勝てる」と言う場合だけ MoE を採用する判断が良い。
 
-### 選択されたハイパーパラメータ（Syntheticデータセット）
+### スタディから得られた推奨ハイパラ
 
-**MoE（共有木構造）:**
-- num_experts: 3, max_depth: 10, num_leaves: 126, learning_rate: 0.099, alpha: 1.35, gate_depth: 10, gate_leaves: 58
+> 注: 下表のカテゴリカル分析は **値ごとの best (min) RMSE** で判定しています。Optuna の長尾配下で破綻 trial が混じるため、mean RMSE は誤解を招くため使いません。
 
-**MoE-PerExpert（Expertごとの木構造）:**
-- num_experts: 3, learning_rate: 0.147, alpha: 2.51, gate_depth: 10, gate_leaves: 55
+#### 普遍ルール — 全 3 dataset で MoE の勝者値が一致する設定
 
-| Expert | max_depth | num_leaves | min_data_in_leaf |
-|--------|-----------|------------|------------------|
-| E0 | 9 | 52 | 9 |
-| E1 | 4 | 45 | 35 |
-| E2 | 9 | 105 | 28 |
+| パラメータ | 推奨 | 根拠 |
+|---|---|---|
+| `mixture_num_experts` | **3-4** | Q4 quartile mean が 3 dataset 全てで勝つ |
+| `mixture_gate_type` | **`gbdt`** | 3 dataset 全てで minimum RMSE 1位。`leaf_reuse` / `none` が絶対 best を取った dataset はゼロ |
+| `mixture_routing_mode` | **`token_choice`** | 3 dataset 全てで minimum RMSE 1位 |
+| `extra_trees` | **`true`** | 3 dataset 全てで minimum RMSE 1位 (Standard 側でも Hamilton/VIX で勝者) |
+| `mixture_diversity_lambda` | **0.0–0.5 を search** | MoE で fANOVA importance が常に top-3。最適値は dataset 依存だが、**search する価値が常にある** |
 
-### ベンチマーク実行
+#### dataset 依存 — 問題ごとに探索すべき
 
-ベンチマークスクリプト (`examples/benchmark.py`) は、合成データセットでStandard GBDT vs MoE GBDTをOptunaハイパーパラメータ最適化で比較します。RMSE、Expert分化（相関）、レジーム精度、Expert利用率を評価します。
+| パラメータ | Synthetic | Hamilton | VIX |
+|---|---|---|---|
+| `mixture_e_step_mode` | `em` | `gate_only` | `gate_only` |
+| `mixture_init` | `gmm` | `random` | `gmm` |
+| `mixture_r_smoothing` | `markov` | `markov` | `ema` |
+| `mixture_hard_m_step` | `true` | `true` | `false` |
+| `learning_rate` (best Q) | 0.20-0.24 | 0.10-0.13 | 0.26+ |
 
-**データセット:**
+#### fANOVA importance (上位寄与パラメータ)
 
-| データセット | サンプル数 | 特徴量数 | 特性 |
-|-------------|-----------|----------|------|
-| Synthetic | 2000 | 5 | 特徴量ベースのレジーム（MoEに最適） |
-| Hamilton | 500 | 12 | 潜在レジーム + 時系列特徴量（移動平均、ボラティリティ、レジーム指標） |
+**Standard GBDT** では `min_data_in_leaf` が支配的 (3 dataset で重要度 0.48-0.80)、`learning_rate` が距離を空けて 2 位。**`min_data_in_leaf` を CV でちゃんと探索すれば 95% 終わり**。
 
-**依存パッケージ:**
+**MoE** では分散している:
+
+| データセット | 1位 | 2位 | 3位 |
+|---|---|---|---|
+| Synthetic | `min_data_in_leaf` (0.87) | `mixture_gate_type` (0.034) | `mixture_diversity_lambda` (0.017) |
+| Hamilton | `learning_rate` (0.53) | `mixture_diversity_lambda` (0.16) | `bagging_fraction` (0.077) |
+| VIX | `lambda_l1` (0.44) | `mixture_diversity_lambda` (0.20) | `mixture_gate_type` (0.088) |
+
+3 dataset 全てで **`mixture_diversity_lambda` が top-3 入り**。**値より「探索すること自体」が重要**。
+
+### スタディの再現方法
 
 ```bash
-pip install optuna matplotlib shap scikit-learn
+# 本番 (24-thread / 12-core で約17分)
+python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+
+# 動作確認 (~30秒)
+python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+
+# データセット絞る
+python examples/comparative_study.py --trials 1000 \
+    --datasets synthetic,hamilton --out bench_results/two_ds.json
 ```
 
-**使用方法:**
+`bench_results/study_1k.json` に全 trial を、自動生成される `*_report.md` (上記の分析テーブル) と `slice_<dataset>_<variant>.png` (Optuna slice plot、各パラメータ値 vs RMSE 散布図) を出力。
+
+### 旧版: 500-trial ベンチマーク (MoE-PE 含む)
+
+[`examples/benchmark.py`](examples/benchmark.py) は元々の Standard / MoE / MoE-PE × Synthetic + Hamilton (500 trials) ベンチで、**MoE-PE (Per-Expert tree HP) の Expert 分化分析の参考として** 残してあります。本セクションのメインベンチではありません。
 
 ```bash
-# フルベンチマーク (Standard vs MoE vs MoE-PE、デフォルト100 trials)
-python examples/benchmark.py
-
-# より多くのtrials
 python examples/benchmark.py --trials 200
-
-# 軽めのテスト
-python examples/benchmark.py --trials 10
-
-# Markdown出力
 python examples/benchmark.py --trials 200 --output-md BENCHMARK.md
 ```
-
-**全CLIオプション:**
 
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|

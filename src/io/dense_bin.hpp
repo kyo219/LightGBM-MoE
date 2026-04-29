@@ -171,6 +171,22 @@ class DenseBin : public Bin {
   }
 
 
+  // PERF TODO (Phase 3 - manual AVX-512 VNNI):
+  //   The hot loop below is `out_ptr[ti] += gradient_packed` with `ti` derived
+  //   from `data(idx)` — a classic gather/scatter accumulate that the compiler
+  //   cannot autovec. With AVX-512 VNNI (vpdpbusd) we can express int8(grad) ×
+  //   uint8(bin_one_hot) → int32(hist) as a true SIMD dot product when bins
+  //   fit in 64 lanes. Sketch:
+  //     1. Load 64 sample bins into a __m512i (uint8 indices).
+  //     2. Construct one-hot column (or use vpconflictd to detect bin
+  //        collisions and serialize colliding lanes).
+  //     3. vpdpbusd(packed_grad, one_hot, accumulator) for non-conflicting.
+  //   Expected speedup 2-4x on int8-quantized path; pre-condition is
+  //   USE_NATIVE_ARCH=ON + AVX-512VNNI-capable CPU (Zen4+, Ice Lake+).
+  //   Not implemented yet — measured impact of build-flag-only -march=native
+  //   was ~0% because this scatter pattern is memory-bound rather than
+  //   compute-bound, so VNNI must be paired with explicit per-thread
+  //   histogram tiling to actually move the needle.
   template <bool USE_INDICES, bool USE_PREFETCH, bool USE_HESSIAN, typename PACKED_HIST_T, int HIST_BITS>
   void ConstructHistogramIntInner(const data_size_t* data_indices,
                                data_size_t start, data_size_t end,

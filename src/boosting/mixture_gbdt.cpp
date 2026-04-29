@@ -115,6 +115,19 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   expert_config_->pos_bagging_fraction = 1.0;
   expert_config_->neg_bagging_fraction = 1.0;
 
+  // Force leaf-output renewal whenever experts run with quantized gradients.
+  // Sparse activation (hard M-step) gives unassigned samples hess≈1e-12 — the
+  // quantized leaf-value path then derives leaf outputs from int histogram
+  // sums × grad/hess scales computed over the full vector, which produces
+  // systematically biased outputs (RMSE blows up by ~3-20x in the bench).
+  // Renewing leaf outputs from the original float gradients restores accuracy
+  // while keeping the quantized split-finding speedup.
+  if (expert_config_->use_quantized_grad) {
+    expert_config_->quant_train_renew_leaf = true;
+    Log::Info("MixtureGBDT: use_quantized_grad=true, forcing quant_train_renew_leaf=true "
+              "on experts (mitigates RMSE regression with hard M-step sparse activation)");
+  }
+
   // Create gate config (multiclass classification)
   gate_config_ = std::unique_ptr<Config>(new Config(*config));
   gate_config_->objective = "multiclass";
@@ -123,6 +136,9 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   gate_config_->num_leaves = config_->mixture_gate_num_leaves;
   gate_config_->learning_rate = config_->mixture_gate_learning_rate;
   gate_config_->lambda_l2 = config_->mixture_gate_lambda_l2;
+  if (gate_config_->use_quantized_grad) {
+    gate_config_->quant_train_renew_leaf = true;
+  }
 
   // Progressive training mode (EvoMoE)
   use_progressive_ = (config_->mixture_progressive_mode == "evomoe");
