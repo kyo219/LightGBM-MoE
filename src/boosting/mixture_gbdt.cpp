@@ -1723,6 +1723,9 @@ void MixtureGBDT::MStepExperts() {
   const double diversity_lambda = config_->mixture_diversity_lambda;
   std::vector<int> best_expert(num_data_, 0);
 
+  // Per-expert sample index lists (only used for hard M-step sparse activation)
+  std::vector<std::vector<data_size_t>> expert_sample_indices(num_experts_);
+
   if (hard_m_step) {
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
@@ -1734,6 +1737,14 @@ void MixtureGBDT::MStepExperts() {
           best_expert[i] = k;
         }
       }
+    }
+
+    // Build per-expert sample index lists for sparse histogram construction
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_sample_indices[k].reserve(num_data_ / num_experts_);
+    }
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      expert_sample_indices[best_expert[i]].push_back(i);
     }
   }
 
@@ -1830,7 +1841,13 @@ void MixtureGBDT::MStepExperts() {
   std::vector<std::thread> expert_threads;
   expert_threads.reserve(num_experts_);
   for (int k = 0; k < num_experts_; ++k) {
-    expert_threads.emplace_back([this, k, &all_grads, &all_hess]() {
+    expert_threads.emplace_back([this, k, &all_grads, &all_hess,
+                                  hard_m_step, &expert_sample_indices]() {
+      // Sparse activation: restrict histogram construction to assigned samples only
+      if (hard_m_step && !expert_sample_indices[k].empty()) {
+        experts_[k]->SetBaggingData(expert_sample_indices[k].data(),
+                                     static_cast<data_size_t>(expert_sample_indices[k].size()));
+      }
       experts_[k]->TrainOneIter(all_grads[k].data(), all_hess[k].data());
     });
   }

@@ -183,6 +183,20 @@ class GBDT : public GBDTBase {
   bool TrainOneIter(const score_t* gradients, const score_t* hessians) override;
 
   /*!
+   * \brief Restrict the next tree building to a subset of samples.
+   *
+   * When bagging is disabled (bagging_fraction=1.0, the default), calling this
+   * before TrainOneIter makes the tree learner build histograms only for the
+   * specified sample indices. Score updates still cover all samples.
+   *
+   * \param used_indices Array of sample indices to train on
+   * \param num_used Number of indices
+   */
+  void SetBaggingData(const data_size_t* used_indices, data_size_t num_used) {
+    tree_learner_->SetBaggingData(nullptr, used_indices, num_used);
+  }
+
+  /*!
   * \brief Rollback one iteration
   */
   void RollbackOneIter() override;
