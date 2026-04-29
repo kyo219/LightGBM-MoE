@@ -25,6 +25,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace LightGBM {
@@ -61,6 +62,8 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   objective_function_ = objective_function;
   training_metrics_ = training_metrics;
   num_data_ = train_data_->num_data();
+
+  // leaf_reuse gate uses bin data directly (no raw features needed)
   iter_ = 0;
 
   // Store original config
@@ -2075,48 +2078,70 @@ void MixtureGBDT::MStepGate() {
 }
 
 void MixtureGBDT::MStepGateLeafReuse() {
-  // Derive gate probabilities from expert tree leaf statistics
-  // instead of training a full GBDT gate every iteration.
+  // Derive gate probabilities from expert tree leaf statistics.
+  // Uses bin data directly — no raw features or extra memory needed.
   //
   // Algorithm:
-  // 1. For each sample, get leaf index from each expert's latest tree
-  // 2. For each expert's leaf, compute which expert is "best" (from responsibilities)
-  // 3. Set gate_proba_ from these leaf-level routing statistics
+  // 1. Traverse expert 0's latest tree using bin values from Dataset
+  //    to get each sample's leaf index
+  // 2. For each leaf, aggregate responsibility distribution across experts
+  // 3. Set gate_proba_ from per-leaf routing statistics
   // 4. Periodically retrain gate GBDT for inference on new data
 
-  const int num_features = train_data_->num_features();
-  if (!train_data_->has_raw() || num_features == 0) {
-    // Fallback to standard gate if raw features unavailable
-    MStepGate();
-    return;
-  }
-
-  // Use expert 0's latest tree as the primary routing tree
-  // (could also use the expert with most assigned samples)
   const Tree* routing_tree = experts_[0]->GetLatestTree();
   if (routing_tree == nullptr || routing_tree->num_leaves() <= 1) {
-    // No tree built yet (first iteration), use standard gate
     MStepGate();
     return;
   }
 
   const int num_leaves = routing_tree->num_leaves();
+  const int num_internal = num_leaves - 1;  // number of split nodes
 
-  // Step 1: Get leaf index for each sample using the routing tree
-  std::vector<int> sample_leaf(num_data_);
-  std::vector<double> features_buf(num_features);
-
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) \
-      firstprivate(features_buf)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    for (int f = 0; f < num_features; ++f) {
-      features_buf[f] = static_cast<double>(train_data_->raw_index(f)[i]);
-    }
-    sample_leaf[i] = routing_tree->PredictLeafIndex(features_buf.data());
+  // Collect the set of inner feature indices used in this tree's splits
+  std::unordered_set<int> used_inner_features;
+  for (int node = 0; node < num_internal; ++node) {
+    used_inner_features.insert(routing_tree->split_feature_inner(node));
   }
 
-  // Step 2: For each leaf, compute expert distribution from responsibilities
-  // leaf_expert_sum[leaf][k] = sum of responsibilities for expert k in that leaf
+  // Create per-thread BinIterators for features used in splits
+  const int num_threads = OMP_NUM_THREADS();
+  std::vector<int> used_features_vec(used_inner_features.begin(), used_inner_features.end());
+  std::vector<std::unordered_map<int, BinIterator*>> thread_iterators(num_threads);
+  for (int t = 0; t < num_threads; ++t) {
+    for (int inner_feat : used_features_vec) {
+      thread_iterators[t][inner_feat] = train_data_->FeatureIterator(inner_feat);
+    }
+  }
+
+  // Step 1: Get leaf index for each sample via bin-based tree traversal
+  std::vector<int> sample_leaf(num_data_);
+
+  #pragma omp parallel for num_threads(num_threads) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    const int tid = omp_get_thread_num();
+    auto& iters = thread_iterators[tid];
+    int node = 0;
+    while (node >= 0) {
+      int inner_feat = routing_tree->split_feature_inner(node);
+      uint32_t bin_val = iters[inner_feat]->RawGet(i);
+      uint32_t bin_threshold = routing_tree->threshold_in_bin(node);
+      if (bin_val <= bin_threshold) {
+        node = routing_tree->left_child(node);
+      } else {
+        node = routing_tree->right_child(node);
+      }
+    }
+    sample_leaf[i] = ~node;  // leaf index
+  }
+
+  // Cleanup iterators
+  for (int t = 0; t < num_threads; ++t) {
+    for (auto& pair : thread_iterators[t]) {
+      delete pair.second;
+    }
+  }
+
+  // Step 2: Aggregate responsibility distribution per leaf
   std::vector<std::vector<double>> leaf_expert_sum(
       num_leaves, std::vector<double>(num_experts_, 0.0));
   std::vector<int> leaf_count(num_leaves, 0);
@@ -2131,7 +2156,7 @@ void MixtureGBDT::MStepGateLeafReuse() {
     }
   }
 
-  // Normalize to get per-leaf routing probabilities
+  // Normalize to per-leaf routing probabilities
   std::vector<std::vector<double>> leaf_routing(
       num_leaves, std::vector<double>(num_experts_, 1.0 / num_experts_));
   for (int l = 0; l < num_leaves; ++l) {
@@ -2164,7 +2189,7 @@ void MixtureGBDT::MStepGateLeafReuse() {
   if (iter_ % retrain_interval == 0) {
     MStepGate();
   } else {
-    // Still need to advance gate iteration count with trivial update
+    // Advance gate iteration count with trivial update
     std::vector<score_t> zero_grad(static_cast<size_t>(num_data_) * num_experts_, 0.0);
     std::vector<score_t> tiny_hess(static_cast<size_t>(num_data_) * num_experts_,
                                     static_cast<score_t>(kMixtureEpsilon));

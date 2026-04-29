@@ -364,6 +364,14 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_spawn_perturbation",
   "mixture_gate_temperature_init",
   "mixture_gate_temperature_final",
+  "mixture_gate_type",
+  "mixture_gate_retrain_interval",
+  "mixture_dropout_schedule",
+  "mixture_dropout_rate_min",
+  "mixture_dropout_rate_max",
+  "mixture_adaptive_lr",
+  "mixture_adaptive_lr_window",
+  "mixture_adaptive_lr_max",
   });
   return params;
 }
@@ -820,6 +828,31 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
 
   GetDouble(params, "mixture_gate_temperature_final", &mixture_gate_temperature_final);
   CHECK_GT(mixture_gate_temperature_final, 0.0);
+
+  GetString(params, "mixture_gate_type", &mixture_gate_type);
+
+  GetInt(params, "mixture_gate_retrain_interval", &mixture_gate_retrain_interval);
+  CHECK_GE(mixture_gate_retrain_interval, 1);
+
+  GetString(params, "mixture_dropout_schedule", &mixture_dropout_schedule);
+
+  GetDouble(params, "mixture_dropout_rate_min", &mixture_dropout_rate_min);
+  CHECK_GE(mixture_dropout_rate_min, 0.0);
+  CHECK_LT(mixture_dropout_rate_min, 1.0);
+
+  GetDouble(params, "mixture_dropout_rate_max", &mixture_dropout_rate_max);
+  CHECK_GE(mixture_dropout_rate_max, 0.0);
+  CHECK_LT(mixture_dropout_rate_max, 1.0);
+
+  GetBool(params, "mixture_adaptive_lr", &mixture_adaptive_lr);
+
+  GetInt(params, "mixture_adaptive_lr_window", &mixture_adaptive_lr_window);
+  CHECK_GE(mixture_adaptive_lr_window, 1);
+  CHECK_LE(mixture_adaptive_lr_window, 100);
+
+  GetDouble(params, "mixture_adaptive_lr_max", &mixture_adaptive_lr_max);
+  CHECK_GT(mixture_adaptive_lr_max, 1.0);
+  CHECK_LE(mixture_adaptive_lr_max, 5.0);
 }
 
 std::string Config::SaveMembersToString() const {
@@ -975,6 +1008,14 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_spawn_perturbation: " << mixture_spawn_perturbation << "]\n";
   str_buf << "[mixture_gate_temperature_init: " << mixture_gate_temperature_init << "]\n";
   str_buf << "[mixture_gate_temperature_final: " << mixture_gate_temperature_final << "]\n";
+  str_buf << "[mixture_gate_type: " << mixture_gate_type << "]\n";
+  str_buf << "[mixture_gate_retrain_interval: " << mixture_gate_retrain_interval << "]\n";
+  str_buf << "[mixture_dropout_schedule: " << mixture_dropout_schedule << "]\n";
+  str_buf << "[mixture_dropout_rate_min: " << mixture_dropout_rate_min << "]\n";
+  str_buf << "[mixture_dropout_rate_max: " << mixture_dropout_rate_max << "]\n";
+  str_buf << "[mixture_adaptive_lr: " << mixture_adaptive_lr << "]\n";
+  str_buf << "[mixture_adaptive_lr_window: " << mixture_adaptive_lr_window << "]\n";
+  str_buf << "[mixture_adaptive_lr_max: " << mixture_adaptive_lr_max << "]\n";
   return str_buf.str();
 }
 
@@ -1156,6 +1197,14 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_spawn_perturbation", {}},
     {"mixture_gate_temperature_init", {}},
     {"mixture_gate_temperature_final", {}},
+    {"mixture_gate_type", {}},
+    {"mixture_gate_retrain_interval", {}},
+    {"mixture_dropout_schedule", {}},
+    {"mixture_dropout_rate_min", {}},
+    {"mixture_dropout_rate_max", {}},
+    {"mixture_adaptive_lr", {}},
+    {"mixture_adaptive_lr_window", {}},
+    {"mixture_adaptive_lr_max", {}},
   });
   return map;
 }
@@ -1337,6 +1386,14 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_spawn_perturbation", "double"},
     {"mixture_gate_temperature_init", "double"},
     {"mixture_gate_temperature_final", "double"},
+    {"mixture_gate_type", "string"},
+    {"mixture_gate_retrain_interval", "int"},
+    {"mixture_dropout_schedule", "string"},
+    {"mixture_dropout_rate_min", "double"},
+    {"mixture_dropout_rate_max", "double"},
+    {"mixture_adaptive_lr", "bool"},
+    {"mixture_adaptive_lr_window", "int"},
+    {"mixture_adaptive_lr_max", "double"},
   });
   return map;
 }
