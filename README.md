@@ -474,14 +474,17 @@ Available initialization modes (`mixture_init` parameter):
 
 #### Recommended Settings & Optuna Search Ranges
 
-The following configuration is based on extensive benchmarking (500+ trials). These settings ensure experts properly differentiate (switching model) while maximizing prediction accuracy.
+The following configuration is based on extensive benchmarking (300+ trials, see [Benchmark Results](#benchmark-results-gate-type-comparison) below). These settings ensure experts properly differentiate (switching model) while maximizing prediction accuracy.
 
 **Recommended fixed settings:**
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | `mixture_hard_m_step` | `true` (default) | Prevents Expert Collapse by ensuring each sample's gradient goes to only one expert |
+| `mixture_gate_type` | `"gbdt"` | Highest accuracy in 300-trial benchmarks. `"none"` skips gate training (fastest but no out-of-sample routing); `"leaf_reuse"` is competitive on small data but plateaus earlier |
 | `mixture_r_smoothing` | Search `none`/`ema`/`markov` | `none` for i.i.d. data; `ema`/`markov` can help time-series |
+
+> **Note on `bagging_fraction` / `bagging_freq`**: When `mixture_hard_m_step=true`, the library **automatically disables per-expert bagging** (sparse activation already restricts each expert to its assigned samples — double-bagging combined with sparse gradients produces degenerate histograms; see #16). The values you set on the main params are still respected by the *gate* but ignored inside experts.
 
 **Recommended Optuna search example:**
 
@@ -577,6 +580,53 @@ study.optimize(objective, n_trials=500)  # 500+ trials recommended
 - Add time-series features (moving averages, rolling volatility, MA crossover) to make latent regimes observable
 - Search `mixture_r_smoothing` including `ema`/`markov` for temporal regime persistence
 - Use `mixture_e_step_mode='loss_only'` when Gate cannot determine regime from features alone
+
+#### Benchmark Results: Gate Type Comparison
+
+Reproduce with [`examples/benchmark_gate.py`](examples/benchmark_gate.py):
+
+```bash
+# 24-core machine, ~3-5 min
+python examples/benchmark_gate.py --trials 300 --threads 4 --n-jobs 6
+```
+
+| Dataset | Method | RMSE | Time | vs Standard |
+|---------|--------|------|------|-------------|
+| Synthetic (2k×5, observable regime) | Standard GBDT | 5.13 | 58s | — |
+| Synthetic | **MoE_gbdt** | **3.87** | 47s | **+24.5%** |
+| Synthetic | MoE_none | 7.65 | 51s | -49.2% |
+| Synthetic | MoE_leaf_reuse | 5.40 | 54s | -5.4% |
+| Hamilton (500×4, latent regime) | Standard GBDT | 0.72 | 18s | — |
+| Hamilton | MoE_gbdt | 0.72 | 37s | -0.6% |
+| Hamilton | MoE_none | 0.72 | 28s | -0.9% |
+| Hamilton | MoE_leaf_reuse | 0.72 | 28s | -0.7% |
+
+300 Optuna trials each, 5-fold TimeSeriesSplit, 100 boost rounds, early stopping=50.
+
+**Takeaways:**
+
+- **`mixture_gate_type="gbdt"` is the default choice.** It wins decisively when the regime is observable from features (Synthetic) and matches Standard on latent-regime small data (Hamilton).
+- **MoE shines when the regime is observable.** On Hamilton (latent regime, only 500 samples), MoE provides no clear win — the gate cannot route correctly without informative features. Add temporal/derived features before expecting an MoE lift on small or latent-regime data.
+- **`mixture_gate_type="none"` underperforms** on observable regimes because it can't route held-out samples; only useful as a quick sanity check or for distributions where routing doesn't matter.
+- **`mixture_gate_type="leaf_reuse"` is competitive when retrain is frequent.** It saves the cost of a full multiclass GBDT for the gate; pair with `mixture_gate_retrain_interval` (default 10).
+
+#### Recommended Optuna Setup (for benchmarks above)
+
+```python
+study = optuna.create_study(direction="minimize",
+                             sampler=optuna.samplers.TPESampler(seed=42))
+study.optimize(objective, n_trials=300, n_jobs=6)  # n_jobs * threads ≤ cores
+```
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `n_trials` | 100-300 | TPE needs ~50+ trials to localize good regions; 300 gives stable RMSE |
+| `n_jobs` (Optuna) | `cores / num_threads` | Each parallel trial holds an OMP team — overall ≤ physical cores |
+| `num_threads` (LightGBM) | 4-8 | Sweet spot for ≤10k samples; 24-thread per trial wastes time on overhead |
+| `num_boost_round` | 100-500 | Pair with `early_stopping(50)` so weak trials exit early |
+| TPE seed | fixed | Reproducible study comparison across gate types |
+
+> **Why not `n_jobs=1, num_threads=24`?** On small data (≤10k samples), one trial cannot saturate 24 cores — most threads sit idle. Running 6 trials × 4 threads in parallel keeps all cores warm and finishes 3-4× faster.
 
 #### Optuna Search Parameters Reference
 
