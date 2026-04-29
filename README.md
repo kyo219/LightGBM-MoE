@@ -1272,6 +1272,45 @@ The overall verdict combines the above metrics into one of three categories:
 
 > A consolidated reference for *what knobs exist*, *which knob requires which*, and *which knobs are safe to use with `use_quantized_grad`*. See [`examples/compat_matrix.py`](examples/compat_matrix.py) for the regression test that produced the matrix below.
 
+### "int8" — three independent layers
+
+People say "int8" to mean three different things in this project. They live at different layers and are **set independently**: passing an int8 input array does **not** auto-enable `use_quantized_grad`, and vice versa.
+
+```
+Layer 1: Python input dtype                        — controlled by:  X.astype(np.int8)
+   ↓ (C API boundary)
+Layer 2: C++ bin storage dtype (uint8 / uint16)    — controlled by:  max_bin (auto)
+   ↓ (training loop)
+Layer 3: gradient/hessian quantization             — controlled by:  use_quantized_grad=True
+```
+
+| Layer | What it does | How to enable | Effect | Code |
+|---|---|---|---|---|
+| **1. Python input int8** | numpy.int8 array reaches the C API without a Python-side float32 conversion | `X.astype(np.int8)` | 4× Python-process memory reduction (e.g. 954 MB vs 3.73 GB for 500K × 2000) | `830181bd`; `python-package/lightgbm_moe/basic.py`, `src/c_api.cpp` |
+| **2. Bin storage** | After binning, bin indices are held as `uint8_t` when `num_bin ≤ 256`, `uint16_t` up to 65535 | Always automatic (just keep `max_bin ≤ 255` for the smallest type) | C++-side memory minimized; this layer has *always* been int8 for moderate `max_bin` | `src/io/dense_bin.hpp` `template<VAL_T>` |
+| **3. Quantized gradients** | Training-time `grad`/`hess` are scaled and packed to int8 (16/32-bit accumulators); histogram construction reads the smaller types | `params['use_quantized_grad'] = True` (+ `num_grad_quant_bins`, `stochastic_rounding`) | 1.05–1.30× speedup with negligible RMSE change (Standard); same on MoE *after the Phase 2 fix on this branch* | upstream `GradientDiscretizer` + `c596fb93` |
+
+#### Common misconceptions
+
+- **"I passed `np.int8` so the gradients are int8 too"** — no. Layer 1 only saves Python memory; the C++ side still computes float gradients unless Layer 3 is on.
+- **"Layer 2 needs me to set anything"** — no. The bin-storage type is chosen automatically from `max_bin`. For `[0, 4]`-style Numerai features, num_bin = 5 → uint8 storage with no flags.
+- **"Layers depend on each other"** — they don't. Any combination is valid. The full speedup template for Numerai-style data turns on layer 1 and layer 3 explicitly:
+
+  ```python
+  X_int8 = X.astype(np.int8)             # Layer 1: Python memory ↓ 4×
+  ds = lgb.Dataset(X_int8, label=y)      # Layer 2: uint8 bins automatic
+  params = {
+      "use_quantized_grad": True,         # Layer 3: int8 grad/hess
+      "num_grad_quant_bins": 32,
+      "max_bin": 255,                     # ensure layer 2 stays in uint8
+      ...
+  }
+  ```
+
+#### Why aren't they coupled?
+
+Input dtype is a property of the *data* (Numerai features happen to be `[0, 4]` integers; image features are `[0, 255]`). Quantized gradients depend on the *loss landscape* (gradient magnitudes are objective-dependent). Auto-coupling would silently quantize gradients for users who only wanted the Python-side memory win, with surprising RMSE consequences on some objectives. The library keeps the two layers as separate explicit knobs.
+
 ### 8 Configuration Axes
 
 | Axis | Parameter(s) | Choices | Default |
@@ -2715,6 +2754,45 @@ Expert予測間のペアワイズPearson相関を計算します。2つのExpert
 ## 機能カタログと int8 互換性
 
 > **どんな設定軸があり、どれが何を要求し、どれが `use_quantized_grad` と安全に併用できるか** をまとめた早見表。実機検証は [`examples/compat_matrix.py`](examples/compat_matrix.py) を参照。
+
+### 「int8」は **3つの独立したレイヤー** がある
+
+このプロジェクトで「int8」と一口に言うとき、実は **3つの別の概念** を指していることがあります。それぞれ別レイヤーにあり、**互いに独立**して有効化されます。**int8 配列を入力したからといって `use_quantized_grad` が自動 ON にはならない** し、逆もまた然り。
+
+```
+レイヤー1: Python 入力 dtype                       — 制御方法:  X.astype(np.int8)
+   ↓ (C API 境界)
+レイヤー2: C++ bin storage dtype (uint8 / uint16)   — 制御方法:  max_bin (自動)
+   ↓ (訓練ループ)
+レイヤー3: gradient/hessian 量子化                   — 制御方法:  use_quantized_grad=True
+```
+
+| レイヤー | 何をするか | 有効化方法 | 効果 | コード |
+|---|---|---|---|---|
+| **1. Python 入力 int8** | numpy.int8 配列を float32 への昇格コピーなしで C API に渡す | `X.astype(np.int8)` を渡す | Python プロセスメモリ 4倍削減 (例: 500K × 2000 で 954 MB vs 3.73 GB) | `830181bd`; `python-package/lightgbm_moe/basic.py`, `src/c_api.cpp` |
+| **2. bin storage** | binning 後、bin index を `num_bin ≤ 256` なら `uint8_t`、≤65535 なら `uint16_t` で保持 | 常時自動 (最小型を狙うなら `max_bin ≤ 255` に維持) | C++ 側メモリ最小化。このレイヤーは元から常に int8 (中規模 max_bin の場合) | `src/io/dense_bin.hpp` の `template<VAL_T>` |
+| **3. 量子化勾配** | 訓練中の `grad`/`hess` をスケール量子化して int8 にパック (16/32bit accumulator)。ヒストグラム構築が小さい型で動く | `params['use_quantized_grad'] = True` (+ `num_grad_quant_bins`, `stochastic_rounding`) | 1.05–1.30倍高速化、RMSE 劣化ほぼなし (Standard)。MoE は **本ブランチの Phase 2 fix 後に同等に動作** | upstream `GradientDiscretizer` + `c596fb93` |
+
+#### よくある誤解
+
+- **「`np.int8` で渡したから勾配も int8 だろう」** — 違います。レイヤー1 は Python メモリだけの話。C++ 側はレイヤー3 を ON にしない限り float 勾配で動きます
+- **「レイヤー2 は何か設定がいる」** — 不要。`max_bin` から自動選択されます。Numerai の `[0, 4]` 型なら num_bin = 5 → uint8 storage が自動
+- **「レイヤー間に依存がある」** — ありません。8通りの組合せが全て有効。Numerai 風データで全部入りにするテンプレ:
+
+  ```python
+  X_int8 = X.astype(np.int8)             # レイヤー1: Python メモリ 4倍削減
+  ds = lgb.Dataset(X_int8, label=y)      # レイヤー2: uint8 bins 自動
+  params = {
+      "use_quantized_grad": True,         # レイヤー3: int8 grad/hess
+      "num_grad_quant_bins": 32,
+      "max_bin": 255,                     # レイヤー2 を uint8 に保証
+      ...
+  }
+  ```
+
+#### なぜ自動連動しないのか
+
+入力 dtype は **データの性質** に依存 (Numerai は `[0, 4]` の整数、画像は `[0, 255]` の整数)。量子化勾配は **損失関数のスケール** に依存 (勾配の絶対値分布は目的関数次第)。自動連動させると「Python メモリだけ削減したかった人」の勾配まで黙って量子化され、損失関数によっては意図せぬ RMSE 変動が起きる可能性があるため、ライブラリは両者を別々の明示フラグとして残しています。
 
 ### 8つの設定軸
 
