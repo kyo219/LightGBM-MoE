@@ -1326,6 +1326,13 @@ struct Config {
   // desc = 0.0 means no dropout (default)
   // desc = recommended range: 0.1-0.3
   // desc = note: at least one expert is always kept (never drops all experts)
+  // type = enum
+  // options = gbdt, none
+  // desc = gate model type for Mixture-of-Experts routing
+  // desc = ``gbdt``: full multiclass GBDT gate, trained every iteration (default)
+  // desc = ``none``: no gate model. E-step uses loss_only mode, inference uses uniform 1/K
+  std::string mixture_gate_type = "gbdt";
+
   double mixture_expert_dropout_rate = 0.0;
 
   // type = enum

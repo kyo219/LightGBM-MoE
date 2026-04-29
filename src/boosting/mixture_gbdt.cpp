@@ -1198,27 +1198,28 @@ void MixtureGBDT::Forward() {
     experts_[k]->GetPredictAt(0, expert_pred_.data() + k * num_data_, &out_len);
   }
 
-  // Get gate probabilities (softmax of gate raw predictions)
-  // Note: GetPredictAt returns class-major order (all class 0, then class 1, etc.)
-  std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
-  int64_t out_len;
-  gate_->GetPredictAt(0, gate_raw.data(), &out_len);
+  // Get gate probabilities
+  if (config_->mixture_gate_type == "none") {
+    // No gate model: use previous responsibilities as routing probabilities
+    std::copy(responsibilities_.begin(), responsibilities_.end(), gate_proba_.begin());
+  } else {
+    // GBDT gate: softmax of gate raw predictions
+    std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
+    int64_t out_len;
+    gate_->GetPredictAt(0, gate_raw.data(), &out_len);
 
-  // Apply softmax per sample with expert bias for load balancing
-  // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
-  // gate_proba_ is in sample-major order: gate_proba_[i * num_experts_ + k]
-  // expert_bias_ is added to encourage balanced expert usage (Loss-Free Balancing)
-  // Gate temperature annealing: divide logits by temperature before softmax
-  // High temperature → uniform routing (exploration), low → sharp routing (exploitation)
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    // Copy to sample-major order for this sample, adding expert bias and applying temperature
-    std::vector<double> scores(num_experts_);
-    for (int k = 0; k < num_experts_; ++k) {
-      scores[k] = (gate_raw[k * num_data_ + i] + expert_bias_[k]) / gate_temperature_;
+    // Apply softmax per sample with expert bias for load balancing
+    // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
+    // gate_proba_ is in sample-major order: gate_proba_[i * num_experts_ + k]
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      std::vector<double> scores(num_experts_);
+      for (int k = 0; k < num_experts_; ++k) {
+        scores[k] = (gate_raw[k * num_data_ + i] + expert_bias_[k]) / gate_temperature_;
+      }
+      Softmax(scores.data(), num_experts_,
+              gate_proba_.data() + i * num_experts_);
     }
-    Softmax(scores.data(), num_experts_,
-            gate_proba_.data() + i * num_experts_);
   }
 
   // Markov mode: blend gate_proba with prev_gate_proba
@@ -1355,7 +1356,9 @@ void MixtureGBDT::EStep() {
   const label_t* labels = train_data_->metadata().label();
   const double alpha = config_->mixture_e_step_alpha;
   const double lb_alpha = config_->mixture_load_balance_alpha;
-  const std::string& mode = config_->mixture_e_step_mode;
+  // When gate_type="none", force loss_only mode (no gate probabilities available)
+  const std::string mode = (config_->mixture_gate_type == "none")
+      ? "loss_only" : config_->mixture_e_step_mode;
 
   // Precompute load balance penalty for each expert
   // penalty_k = lb_alpha * log(load_k * K)
@@ -2170,11 +2173,13 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   MStepExperts();
 
   // M-step: update gate
-  // Gate should always be trained, even during warmup.
-  // During warmup, responsibilities are fixed from initialization (quantile-based),
-  // so gate learns to predict these fixed responsibilities.
-  // This is crucial for hard alpha (1.0) to work properly.
-  MStepGate();
+  if (config_->mixture_gate_type == "gbdt") {
+    // Gate should always be trained, even during warmup.
+    // During warmup, responsibilities are fixed from initialization (quantile-based),
+    // so gate learns to predict these fixed responsibilities.
+    MStepGate();
+  }
+  // "none": skip gate training entirely — E-step uses loss_only, inference uses uniform 1/K
 
   ++iter_;
 
