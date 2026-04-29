@@ -324,6 +324,16 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Uniform distribution for dropout probability */
   mutable std::uniform_real_distribution<double> dropout_dist_;
 
+  // Adaptive per-expert learning rate members
+  /*! \brief Per-expert loss history (ring buffer per expert) */
+  std::vector<std::vector<double>> expert_loss_history_;
+
+  /*! \brief Current write position in loss history ring buffer */
+  int loss_history_pos_ = 0;
+
+  /*! \brief Per-expert LR multiplier (computed from loss trend) */
+  std::vector<double> expert_lr_scale_;
+
   // Expert Choice Routing members
   /*! \brief Expert capacity (samples per expert) */
   int expert_capacity_;

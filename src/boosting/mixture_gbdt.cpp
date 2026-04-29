@@ -285,6 +285,14 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   dropout_rng_.seed(config_->seed + 12345);  // Different seed from other RNGs
   dropout_dist_ = std::uniform_real_distribution<double>(0.0, 1.0);
 
+  // Initialize adaptive per-expert learning rate tracking
+  if (config_->mixture_adaptive_lr) {
+    const int window = config_->mixture_adaptive_lr_window;
+    expert_loss_history_.resize(num_experts_, std::vector<double>(window, 0.0));
+    expert_lr_scale_.resize(num_experts_, 1.0);
+    loss_history_pos_ = 0;
+  }
+
   // Expert Choice Routing initialization
   use_expert_choice_ = (config_->mixture_routing_mode == "expert_choice");
 
@@ -1691,9 +1699,24 @@ void MixtureGBDT::MStepExperts() {
   // This ensures experts specialize on different parts of the data
 
   // Expert Dropout: randomly skip some experts to prevent collapse
-  // This forces all experts to be useful by ensuring no single expert
-  // can dominate. Dropped experts receive zero gradients for this iteration.
-  const double dropout_rate = config_->mixture_expert_dropout_rate;
+  // Supports curriculum scheduling: low dropout early, higher late
+  double dropout_rate = config_->mixture_expert_dropout_rate;
+  if (config_->mixture_dropout_schedule != "constant" && config_->num_iterations > 0) {
+    const int moe_iter = use_progressive_ ? (iter_ - seed_iterations_) : iter_;
+    const int total_moe = use_progressive_
+        ? (config_->num_iterations - seed_iterations_)
+        : config_->num_iterations;
+    const double progress = std::min(1.0, std::max(0.0,
+        static_cast<double>(moe_iter) / std::max(1, total_moe)));
+    const double lo = config_->mixture_dropout_rate_min;
+    const double hi = config_->mixture_dropout_rate_max;
+    if (config_->mixture_dropout_schedule == "linear") {
+      dropout_rate = lo + (hi - lo) * progress;
+    } else if (config_->mixture_dropout_schedule == "cosine") {
+      dropout_rate = lo + (hi - lo) * 0.5 * (1.0 - std::cos(progress * M_PI));
+    }
+  }
+
   std::vector<bool> expert_active(num_experts_, true);
   int num_active = num_experts_;
 
@@ -1840,6 +1863,84 @@ void MixtureGBDT::MStepExperts() {
           all_grads[k][i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
         }
       }
+    }
+  }
+
+  // Adaptive per-expert learning rate: scale gradients based on loss trend
+  if (config_->mixture_adaptive_lr) {
+    const label_t* lr_labels = train_data_->metadata().label();
+    const int window = config_->mixture_adaptive_lr_window;
+    const double max_scale = config_->mixture_adaptive_lr_max;
+    const double min_scale = 1.0 / max_scale;
+
+    // Compute current mean loss per expert (over assigned samples)
+    for (int k = 0; k < num_experts_; ++k) {
+      if (!expert_active[k]) continue;
+      const double* expert_k_pred = expert_pred_.data() + k * num_data_;
+      double total_loss = 0.0;
+      int count = 0;
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        double r_ik = hard_m_step
+            ? (best_expert[i] == k ? 1.0 : 0.0)
+            : responsibilities_[i * num_experts_ + k];
+        if (r_ik > 0.1) {  // Only count significantly assigned samples
+          total_loss += ComputePointwiseLoss(lr_labels[i], expert_k_pred[i]);
+          ++count;
+        }
+      }
+      expert_loss_history_[k][loss_history_pos_ % window] =
+          count > 0 ? total_loss / count : 0.0;
+    }
+    ++loss_history_pos_;
+
+    // Compute LR scale from loss trend (after filling at least half the window)
+    if (loss_history_pos_ >= window / 2) {
+      for (int k = 0; k < num_experts_; ++k) {
+        int filled = std::min(loss_history_pos_, window);
+        // Compare first half mean vs second half mean
+        double first_half = 0.0, second_half = 0.0;
+        int half = filled / 2;
+        for (int t = 0; t < half; ++t) {
+          int idx = (loss_history_pos_ - filled + t) % window;
+          first_half += expert_loss_history_[k][idx];
+        }
+        for (int t = half; t < filled; ++t) {
+          int idx = (loss_history_pos_ - filled + t) % window;
+          second_half += expert_loss_history_[k][idx];
+        }
+        first_half /= std::max(1, half);
+        second_half /= std::max(1, filled - half);
+
+        // If loss is decreasing (improving) → lower LR (fine-tune)
+        // If loss is increasing or stagnating → higher LR (escape)
+        double ratio = (first_half > 1e-10) ? second_half / first_half : 1.0;
+        // ratio < 1 → improving, ratio > 1 → worsening
+        // Map ratio to LR scale: improving → min_scale, worsening → max_scale
+        double scale = std::max(min_scale, std::min(max_scale, ratio));
+        expert_lr_scale_[k] = scale;
+      }
+    }
+
+    // Apply LR scale to gradients
+    for (int k = 0; k < num_experts_; ++k) {
+      if (!expert_active[k]) continue;
+      double scale = expert_lr_scale_[k];
+      if (std::abs(scale - 1.0) > 1e-6) {
+        score_t s = static_cast<score_t>(scale);
+        #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          all_grads[k][i] *= s;
+        }
+      }
+    }
+
+    // Log occasionally
+    if (iter_ % 20 == 0) {
+      std::string lr_str;
+      for (int k = 0; k < num_experts_; ++k) {
+        lr_str += std::to_string(expert_lr_scale_[k]).substr(0, 5) + " ";
+      }
+      Log::Debug("MixtureGBDT: Adaptive LR scales = [%s]", lr_str.c_str());
     }
   }
 

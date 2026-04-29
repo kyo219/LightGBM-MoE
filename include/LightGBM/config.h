@@ -1329,6 +1329,39 @@ struct Config {
   double mixture_expert_dropout_rate = 0.0;
 
   // type = enum
+  // options = constant, linear, cosine
+  // desc = dropout rate schedule over training
+  // desc = ``constant``: fixed dropout_rate throughout (default, backward compatible)
+  // desc = ``linear``: linearly ramp from dropout_rate_min to dropout_rate_max
+  // desc = ``cosine``: cosine ramp from dropout_rate_min to dropout_rate_max
+  std::string mixture_dropout_schedule = "constant";
+
+  // check = >=0.0
+  // check = <1.0
+  // desc = minimum dropout rate (start of schedule, used when mixture_dropout_schedule != constant)
+  double mixture_dropout_rate_min = 0.0;
+
+  // check = >=0.0
+  // check = <1.0
+  // desc = maximum dropout rate (end of schedule, used when mixture_dropout_schedule != constant)
+  double mixture_dropout_rate_max = 0.3;
+
+  // desc = enable adaptive per-expert learning rate scaling
+  // desc = tracks each expert's loss trend and adjusts gradient scale:
+  // desc = experts with improving loss get lower scale, stagnating experts get higher scale
+  bool mixture_adaptive_lr = false;
+
+  // check = >=1
+  // check = <=100
+  // desc = window size (iterations) for tracking per-expert loss trend
+  int mixture_adaptive_lr_window = 20;
+
+  // check = >1.0
+  // check = <=5.0
+  // desc = maximum learning rate multiplier (min is 1/max)
+  double mixture_adaptive_lr_max = 2.0;
+
+  // type = enum
   // options = token_choice, expert_choice
   // desc = routing strategy for Mixture-of-Experts
   // desc = ``token_choice``: each sample selects experts (default, standard EM-based)
