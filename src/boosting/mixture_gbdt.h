@@ -246,8 +246,11 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Responsibilities r_ik (N x K) */
   std::vector<double> responsibilities_;
 
-  /*! \brief Expert predictions (N x K) */
+  /*! \brief Expert predictions in expert-major layout (K x N): expert_pred_[k*N + i] */
   std::vector<double> expert_pred_;
+
+  /*! \brief Expert predictions in sample-major layout (N x K): expert_pred_sm_[i*K + k] */
+  std::vector<double> expert_pred_sm_;
 
   /*! \brief Gate probabilities (N x K) */
   std::vector<double> gate_proba_;

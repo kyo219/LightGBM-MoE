@@ -247,6 +247,7 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   size_t nk = static_cast<size_t>(num_data_) * num_experts_;
   responsibilities_.resize(nk);
   expert_pred_.resize(nk);
+  expert_pred_sm_.resize(nk);
   gate_proba_.resize(nk);
   yhat_.resize(num_data_);
   gradients_.resize(num_data_);
@@ -1246,12 +1247,21 @@ void MixtureGBDT::Forward() {
     // This maintains consistency for the first sample
   }
 
-  // Compute combined prediction: yhat[i] = sum_k gate_proba[i,k] * expert_pred[i,k]
+  // Transpose expert_pred_ (expert-major) → expert_pred_sm_ (sample-major)
+  // so that E-step and yhat can read [i*K + k] with sequential cache access
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    for (int k = 0; k < num_experts_; ++k) {
+      expert_pred_sm_[i * num_experts_ + k] = expert_pred_[k * num_data_ + i];
+    }
+  }
+
+  // Compute combined prediction: yhat[i] = sum_k gate_proba[i,k] * expert_pred_sm[i,k]
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     double sum = 0.0;
     for (int k = 0; k < num_experts_; ++k) {
-      sum += gate_proba_[i * num_experts_ + k] * expert_pred_[k * num_data_ + i];
+      sum += gate_proba_[i * num_experts_ + k] * expert_pred_sm_[i * num_experts_ + k];
     }
     yhat_[i] = sum;
   }
@@ -1367,13 +1377,13 @@ void MixtureGBDT::EStep() {
         score = std::log(gate_prob + kMixtureEpsilon);
       } else if (mode == "loss_only") {
         // loss_only mode: use only expert loss, ignore gate probability
-        double expert_p = expert_pred_[k * num_data_ + i];
+        double expert_p = expert_pred_sm_[i * num_experts_ + k];
         double loss = ComputePointwiseLoss(labels[i], expert_p);
         score = -alpha * loss;
       } else {
         // em mode (default): use both gate probability and expert loss
         double gate_prob = gate_proba_[i * num_experts_ + k];
-        double expert_p = expert_pred_[k * num_data_ + i];
+        double expert_p = expert_pred_sm_[i * num_experts_ + k];
         double loss = ComputePointwiseLoss(labels[i], expert_p);
         score = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
       }
@@ -1439,7 +1449,7 @@ void MixtureGBDT::ComputeAffinityScores() {
       }
 
       if (score_type == "loss" || score_type == "combined") {
-        double expert_p = expert_pred_[k * num_data_ + i];
+        double expert_p = expert_pred_sm_[i * num_experts_ + k];
         double loss = ComputePointwiseLoss(labels[i], expert_p);
         score -= alpha * loss;
       }
@@ -1793,7 +1803,7 @@ void MixtureGBDT::MStepExperts() {
             if (j == k) continue;
             double r_ij = responsibilities_[i * num_experts_ + j];
             double f_k = expert_k_pred[i];
-            double f_j = expert_pred_[j * num_data_ + i];
+            double f_j = expert_pred_sm_[i * num_experts_ + j];
             div_grad += r_ij * (f_k - f_j);
           }
           all_grads[k][i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
@@ -1824,7 +1834,7 @@ void MixtureGBDT::MStepExperts() {
             if (j == k) continue;
             double r_ij = responsibilities_[i * num_experts_ + j];
             double f_k = expert_k_pred[i];
-            double f_j = expert_pred_[j * num_data_ + i];
+            double f_j = expert_pred_sm_[i * num_experts_ + j];
             div_grad += r_ij * (f_k - f_j);
           }
           all_grads[k][i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
@@ -2504,6 +2514,7 @@ void MixtureGBDT::ResetTrainingData(const Dataset* train_data,
   size_t nk = static_cast<size_t>(num_data_) * num_experts_;
   responsibilities_.resize(nk);
   expert_pred_.resize(nk);
+  expert_pred_sm_.resize(nk);
   gate_proba_.resize(nk);
   yhat_.resize(num_data_);
   gradients_.resize(num_data_);
