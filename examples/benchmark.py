@@ -349,31 +349,6 @@ def generate_hamilton_gnp_data(n_samples: int = 500, seed: int = 42):
     return X, y, regime_true
 
 
-def generate_vix_data(n_samples: int = 1000, seed: int = 42):
-    """
-    VIX-like volatility regime data.
-    """
-    np.random.seed(seed)
-    n_features = 5
-    X = np.random.randn(n_samples, n_features)
-
-    t = np.arange(n_samples)
-    regime_prob = 0.3 + 0.4 * (np.sin(2 * np.pi * t / 200) > 0)
-    regime_true = (np.random.rand(n_samples) < regime_prob).astype(int)
-
-    y = np.zeros(n_samples)
-
-    mask0 = regime_true == 0
-    y[mask0] = 0.01 + 0.002 * np.abs(X[mask0, 0])
-
-    mask1 = regime_true == 1
-    y[mask1] = 0.025 + 0.005 * np.abs(X[mask1, 0]) + 0.003 * X[mask1, 1] ** 2
-
-    y += np.random.randn(n_samples) * 0.005
-
-    return X, y, regime_true
-
-
 DATASETS = {
     "Synthetic": {
         "generator": generate_synthetic_data,
@@ -428,12 +403,15 @@ def _add_ts_features(y_arr: np.ndarray, windows_ma=(5, 10, 20), windows_vol=(5, 
     return np.column_stack(feats)
 
 
-def generate_real_hamilton_gnp_data(seed: int = 42, fred_series: str = "GDPC1"):
-    """Real US Real GDP from FRED (Hamilton 1989's MS-AR(4) setup, modern data).
+def generate_fred_gdp_data(seed: int = 42, fred_series: str = "GDPC1"):
+    """US Real GDP (`GDPC1`) from FRED, transformed for Hamilton-style regression.
 
-    - Quarterly Real GDP, fetched from FRED CSV endpoint (no auth)
+    - Source: https://fred.stlouisfed.org/series/GDPC1 (no auth, CSV endpoint)
+    - Methodology cite: Hamilton, J. D. (1989). A New Approach to the Economic Analysis
+      of Nonstationary Time Series and the Business Cycle. *Econometrica* 57(2), 357-384.
+      https://www.jstor.org/stable/1912559
     - Target: 100 * log-difference (quarterly growth rate, Hamilton's transform)
-    - Features: 4 lags of growth rate (Hamilton MS-AR(4)), plus engineered MA/vol features
+    - Features: 4 lags of growth rate (Hamilton MS-AR(4)) + engineered MA / volatility features
     """
     cache = _CACHE_DIR / f"fred_{fred_series}.csv"
     if not cache.exists():
@@ -486,9 +464,11 @@ def _yf_download_close(symbol: str, start: str, end: str, cache_name: str) -> "p
 def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
     """S&P 500 daily log returns from Yahoo Finance.
 
-    - Symbol: ^GSPC
+    - Source: Yahoo Finance, symbol `^GSPC` — https://finance.yahoo.com/quote/%5EGSPC/history
+    - Index methodology: S&P Dow Jones Indices —
+      https://www.spglobal.com/spdji/en/indices/equity/sp-500/
     - Target: next-day log return (causal predictive setup)
-    - Features: lagged returns (1, 2, 3, 5, 10) + MA/vol/regime-proxy features
+    - Features: lagged returns at lags {1, 2, 3, 5, 10} + MA / rolling-vol / regime-proxy features
     """
     close = _yf_download_close("^GSPC", start=start, end=end, cache_name="sp500_GSPC")
     px = close.to_numpy(dtype=np.float64)
@@ -506,12 +486,13 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     return X, y, None
 
 
-def generate_real_vix_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
-    """Real CBOE VIX daily close from Yahoo Finance.
+def generate_vix_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
+    """CBOE Volatility Index daily close from Yahoo Finance.
 
-    - Symbol: ^VIX
+    - Source: Yahoo Finance, symbol `^VIX` — https://finance.yahoo.com/quote/%5EVIX/history
+    - Index methodology: CBOE — https://www.cboe.com/tradable_products/vix/
     - Target: next-day VIX level
-    - Features: lagged VIX (1, 2, 3, 5, 10) + MA/vol features
+    - Features: lagged VIX at lags {1, 2, 3, 5, 10} + MA / rolling-vol features
     """
     close = _yf_download_close("^VIX", start=start, end=end, cache_name="vix_VIX")
     vix = close.to_numpy(dtype=np.float64)
@@ -531,6 +512,10 @@ def generate_real_vix_data(seed: int = 42, start: str = "2010-01-01", end: str =
 def generate_hmm_data(n_samples: int = 2000, n_states: int = 3, n_features: int = 5, seed: int = 42):
     """K-state Gaussian-emission HMM with partially observable regime.
 
+    - Source: internal generator (no external dataset).
+    - Methodology cite: Rabiner, L. R. (1989). A Tutorial on Hidden Markov Models and Selected
+      Applications in Speech Recognition. *Proceedings of the IEEE* 77(2), 257-286.
+      https://www.cs.ubc.ca/~murphyk/Bayes/rabiner.pdf
     - Hidden state evolves as a Markov chain with persistent diagonal-heavy transition matrix.
     - Each state emits y from N(mu_k, sigma_k^2). Mus are well separated, sigmas vary.
     - X has n_features Gaussian columns; the FIRST 2 columns are weakly correlated with the

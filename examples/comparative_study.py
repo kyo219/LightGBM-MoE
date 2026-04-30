@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 """
-comparative_study.py — Standard GBDT vs MoE 大規模比較 + ハイパラ重要度分析
+comparative_study.py — naive-lightgbm vs MoE 大規模比較 + ハイパラ重要度分析
 
 `benchmark.py` の data generators (Synthetic / Hamilton / VIX) と独自の CV を再利用しつつ、
 Standard GBDT と MoE (token + expert choice 横断) で Optuna を回し、
@@ -45,11 +45,11 @@ import lightgbm_moe as lgb
 sys.path.insert(0, os.path.dirname(__file__))
 from benchmark import (  # noqa: E402
     BenchmarkConfig,
+    generate_fred_gdp_data,
     generate_hmm_data,
-    generate_real_hamilton_gnp_data,
-    generate_real_vix_data,
     generate_sp500_data,
     generate_synthetic_data,
+    generate_vix_data,
 )
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -349,7 +349,7 @@ def aggregate_variant(name: str, trials: list[dict], study) -> dict:
 # =============================================================================
 def render_markdown(results: dict, out_path: str, slice_paths: dict):
     lines = []
-    lines.append("# Comparative Study Report — Standard GBDT vs MoE\n")
+    lines.append("# Comparative Study Report — naive-lightgbm vs MoE\n")
     cfg = results.get("config", {})
     lines.append(f"- **Trials per (variant × dataset)**: {cfg.get('trials')}\n")
     lines.append(f"- **Datasets**: {cfg.get('datasets')}\n")
@@ -516,9 +516,9 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
 
 DATASET_GENERATORS = {
     "synthetic": lambda seed: generate_synthetic_data(seed=seed),
-    "real_hamilton": lambda seed: generate_real_hamilton_gnp_data(seed=seed),
+    "fred_gdp": lambda seed: generate_fred_gdp_data(seed=seed),
     "sp500": lambda seed: generate_sp500_data(seed=seed),
-    "real_vix": lambda seed: generate_real_vix_data(seed=seed),
+    "vix": lambda seed: generate_vix_data(seed=seed),
     "hmm": lambda seed: generate_hmm_data(seed=seed),
 }
 
@@ -533,7 +533,7 @@ def main():
     p.add_argument(
         "--datasets",
         type=str,
-        default="synthetic,real_hamilton,sp500,real_vix,hmm",
+        default="synthetic,fred_gdp,sp500,vix,hmm",
         help=f"Comma-separated subset of: {','.join(DATASET_GENERATORS.keys())}",
     )
     p.add_argument("--out", type=str, required=True)

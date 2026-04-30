@@ -86,7 +86,7 @@ study.optimize(objective, n_trials=300, n_jobs=6)
 
 ## Expert-Choice-specific extra parameters
 
-The template above already lets TPE pick between `token_choice` and `expert_choice` (the 5-dataset study showed `expert_choice` actually wins on real_hamilton, real_vix, and hmm). When `expert_choice` is selected, you may also want to search its routing-specific knobs:
+The template above already lets TPE pick between `token_choice` and `expert_choice` (the 5-dataset study showed `expert_choice` actually wins on fred_gdp, vix, and hmm). When `expert_choice` is selected, you may also want to search its routing-specific knobs:
 
 ```python
 if params['mixture_routing_mode'] == 'expert_choice':

@@ -7,9 +7,9 @@ Headline study: 500 Optuna trials × 2 variants (`naive-lightgbm`, `moe`) × **5
 | Dataset | Source / Generator | Approx. shape | Regime story | Ground truth? |
 |---|---|---|---|---|
 | **synthetic** | `generate_synthetic_data` (synthetic, K=2, oracle features) | 2000 × 5 | Regime is a deterministic function of `X` — MoE-ideal | yes |
-| **real_hamilton** | FRED `GDPC1` via `generate_real_hamilton_gnp_data` | ~310 × 12 | Quarterly Real GDP, Hamilton 1989's MS-AR(4) on 100·Δlog(GDP) | no (latent) |
+| **fred_gdp** | FRED `GDPC1` via `generate_fred_gdp_data` (Hamilton 1989's MS-AR(4) on 100·Δlog(GDP)) | ~310 × 12 | Quarterly US Real GDP — regime (expansion/recession) is latent | no (latent) |
 | **sp500** | yfinance `^GSPC` (2010-2024) via `generate_sp500_data` | ~3760 × 13 | Daily log returns, low-vol / high-vol regimes | no (latent) |
-| **real_vix** | yfinance `^VIX` (2010-2024) via `generate_real_vix_data` | ~3760 × 13 | Daily VIX level, same vol regimes from the implied-vol angle | no (latent) |
+| **vix** | yfinance `^VIX` (2010-2024) via `generate_vix_data` | ~3760 × 13 | Daily VIX level, same vol regimes from the implied-vol angle | no (latent) |
 | **hmm** | `generate_hmm_data` (3-state Gaussian HMM, 95 % diagonal transition) | 2000 × 5 | Hidden Markov state with weak observable signal in 2 of 5 features | **yes** |
 
 Real-world fetches are cached under `examples/data_cache/` (gitignored). First run pulls from network; subsequent runs are offline.
@@ -21,9 +21,9 @@ The `hmm` dataset is the only one where `diagnose_moe`'s regime-recovery metrics
 | Dataset | naive-lightgbm best RMSE | MoE best RMSE | Δ | naive median train s/fold | MoE median train s/fold | Speed × |
 |---|---|---|---|---|---|---|
 | synthetic | 4.9765 | **4.6651** | −6.3 % | 0.240 | 0.663 | 2.76 × |
-| real_hamilton | 0.9286 | **0.9128** | −1.7 % | 0.055 | 0.122 | 2.22 × |
+| fred_gdp | 0.9286 | **0.9128** | −1.7 % | 0.055 | 0.122 | 2.22 × |
 | sp500 | 0.0100 | 0.0100 | tie | 0.091 | 0.136 | 1.49 × |
-| real_vix | 2.8942 | **2.4574** | **−15.1 %** | 0.081 | 0.386 | 4.77 × |
+| vix | 2.8942 | **2.4574** | **−15.1 %** | 0.081 | 0.386 | 4.77 × |
 | hmm | 2.1096 | **2.1096** | −3.6 % | 0.074 | 0.126 | 1.70 × |
 
 See [`bench_results/study_500_report.md`](../../bench_results/study_500_report.md) for the full auto-generated report (median / p10 RMSE, fANOVA importance per dataset, all categorical breakdowns, slice plots).
@@ -42,7 +42,7 @@ Below uses **best (min) RMSE per value** rather than mean — Optuna runs always
 
 ### Dataset-dependent — winning value varies, search per problem
 
-| Parameter | synthetic | real_hamilton | sp500 | real_vix | hmm |
+| Parameter | synthetic | fred_gdp | sp500 | vix | hmm |
 |---|---|---|---|---|---|
 | `mixture_routing_mode` | `token_choice` | `expert_choice` | `token_choice` | `expert_choice` | `expert_choice` |
 | `mixture_e_step_mode` | `gate_only`* | `loss_only` | `gate_only` | `gate_only` | `gate_only` |
@@ -59,12 +59,12 @@ Below uses **best (min) RMSE per value** rather than mean — Optuna runs always
 |---|---|---|---|---|
 | synthetic | naive | `min_data_in_leaf` | `learning_rate` | `extra_trees` |
 | synthetic | moe | `feature_fraction` (0.66) | `mixture_hard_m_step` (0.16) | `mixture_diversity_lambda` (0.04) |
-| real_hamilton | naive | `min_data_in_leaf` (0.80) | `learning_rate` | `feature_fraction` |
-| real_hamilton | moe | (see report) | | |
+| fred_gdp | naive | `min_data_in_leaf` (0.80) | `learning_rate` | `feature_fraction` |
+| fred_gdp | moe | (see report) | | |
 | sp500 | naive | (see report) | | |
 | sp500 | moe | (see report) | | |
-| real_vix | naive | `learning_rate` (0.58) | `min_data_in_leaf` (0.37) | `bagging_fraction` |
-| real_vix | moe | `bagging_fraction` (0.25) | `mixture_init` (0.19) | `min_data_in_leaf` (0.16) |
+| vix | naive | `learning_rate` (0.58) | `min_data_in_leaf` (0.37) | `bagging_fraction` |
+| vix | moe | `bagging_fraction` (0.25) | `mixture_init` (0.19) | `min_data_in_leaf` (0.16) |
 | hmm | naive | `learning_rate` (0.42) | `extra_trees` (0.41) | `min_data_in_leaf` (0.16) |
 | hmm | moe | `lambda_l1` (0.55) | `mixture_warmup_iters` (0.07) | `mixture_hard_m_step` (0.07) |
 

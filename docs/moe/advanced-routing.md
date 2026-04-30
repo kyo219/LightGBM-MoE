@@ -44,4 +44,4 @@ params = {
 
 ## Note on the headline study
 
-In the [500-trial / 5-dataset study](benchmark.md), `expert_choice` produced the absolute best (min) RMSE on **3 of 5 datasets** — `real_hamilton`, `real_vix`, and `hmm`. `token_choice` only won on `synthetic` and `sp500`. The pattern is roughly: when the regime is latent (Hamilton/VIX/HMM) the per-expert capacity guarantee of `expert_choice` helps; when the regime is fully feature-driven (synthetic) `token_choice`'s sample-perspective routing wins. Search both with TPE rather than picking one a priori.
+In the [500-trial / 5-dataset study](benchmark.md), `expert_choice` produced the absolute best (min) RMSE on **3 of 5 datasets** — `fred_gdp`, `vix`, and `hmm`. `token_choice` only won on `synthetic` and `sp500`. The pattern is roughly: when the regime is latent (Hamilton/VIX/HMM) the per-expert capacity guarantee of `expert_choice` helps; when the regime is fully feature-driven (synthetic) `token_choice`'s sample-perspective routing wins. Search both with TPE rather than picking one a priori.

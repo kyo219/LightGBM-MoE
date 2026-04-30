@@ -1,8 +1,8 @@
-# Comparative Study Report — Standard GBDT vs MoE
+# Comparative Study Report — naive-lightgbm vs MoE
 
 - **Trials per (variant × dataset)**: 500
 
-- **Datasets**: ['synthetic', 'real_hamilton', 'sp500', 'real_vix', 'hmm']
+- **Datasets**: ['synthetic', 'fred_gdp', 'sp500', 'vix', 'hmm']
 
 - **n_splits**: 5, **rounds**: 100
 
@@ -15,12 +15,12 @@
 |---|---|---|---|---|---|
 | synthetic | naive-lightgbm | 4.9765 | 5.2912 | 0.240 | 104 |
 | synthetic | moe | 4.6651 | 5.3076 | 0.663 | 352 |
-| real_hamilton | naive-lightgbm | 0.9286 | 0.9447 | 0.055 | 27 |
-| real_hamilton | moe | 0.9128 | 0.9577 | 0.122 | 67 |
+| fred_gdp | naive-lightgbm | 0.9286 | 0.9447 | 0.055 | 27 |
+| fred_gdp | moe | 0.9128 | 0.9577 | 0.122 | 67 |
 | sp500 | naive-lightgbm | 0.0100 | 0.0101 | 0.091 | 47 |
 | sp500 | moe | 0.0100 | 0.0101 | 0.136 | 78 |
-| real_vix | naive-lightgbm | 2.8942 | 2.9881 | 0.081 | 43 |
-| real_vix | moe | 2.4574 | 2.7548 | 0.386 | 204 |
+| vix | naive-lightgbm | 2.8942 | 2.9881 | 0.081 | 43 |
+| vix | moe | 2.4574 | 2.7548 | 0.386 | 204 |
 | hmm | naive-lightgbm | 2.1893 | 2.2050 | 0.074 | 35 |
 | hmm | moe | 2.1096 | 2.1423 | 0.126 | 75 |
 
@@ -184,7 +184,7 @@
 
 ---
 
-## real_hamilton  (X=[311, 12])
+## fred_gdp  (X=[311, 12])
 
 
 ### naive-lightgbm
@@ -235,7 +235,7 @@
 
 #### E. Slice plot
 
-![real_hamilton/naive-lightgbm](slice_real_hamilton_naive-lightgbm.png)
+![fred_gdp/naive-lightgbm](slice_fred_gdp_naive-lightgbm.png)
 
 
 ### moe
@@ -333,7 +333,7 @@
 
 #### E. Slice plot
 
-![real_hamilton/moe](slice_real_hamilton_moe.png)
+![fred_gdp/moe](slice_fred_gdp_moe.png)
 
 
 ---
@@ -493,7 +493,7 @@
 
 ---
 
-## real_vix  (X=[3762, 13])
+## vix  (X=[3762, 13])
 
 
 ### naive-lightgbm
@@ -544,7 +544,7 @@
 
 #### E. Slice plot
 
-![real_vix/naive-lightgbm](slice_real_vix_naive-lightgbm.png)
+![vix/naive-lightgbm](slice_vix_naive-lightgbm.png)
 
 
 ### moe
@@ -636,7 +636,7 @@
 
 #### E. Slice plot
 
-![real_vix/moe](slice_real_vix_moe.png)
+![vix/moe](slice_vix_moe.png)
 
 
 ---
@@ -798,6 +798,6 @@
 | synthetic | `mixture_e_step_mode` | **loss_only** | +0.7822 | 6.02e-03 |
 | synthetic | `mixture_init` | **random** | +1.2843 | 1.72e-03 |
 | synthetic | `mixture_r_smoothing` | **ema** | +0.7946 | 8.13e-03 |
-| real_hamilton | `mixture_init` | **gmm** | +0.0276 | 1.48e-04 |
+| fred_gdp | `mixture_init` | **gmm** | +0.0276 | 1.48e-04 |
 | sp500 | `mixture_gate_type` | **leaf_reuse** | +0.0000 | 2.71e-03 |
 | sp500 | `mixture_init` | **random** | +0.0000 | 0.00e+00 |

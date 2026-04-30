@@ -73,7 +73,7 @@ expert_preds = model.predict_expert_pred(X_test)    # 各 expert の予測 (N, K
 
 ## MoE が効く条件
 
-下記の 5 dataset / 500-trial スタディでは、MoE は **5 dataset 中 4 つで精度を改善** (sp500 のみ tie)。最大の改善は **real VIX (−15.1 % RMSE)** — ここは regime 構造 (低 vol / 高 vol 期間) が一番くっきりしている dataset。ただし MoE は **CV fold あたり 1.5-4.8 倍の計算コスト** を払う。なので「精度向上が要る *かつ* wall time の余裕がある場面で使う」が今のルール — 「regime が特徴量から観測可能でないとダメ」という以前の主張ほど狭くはない。
+下記の 5 dataset / 500-trial スタディでは、MoE は **5 dataset 中 4 つで精度を改善** (`sp500` のみ tie)。最大の改善は **`vix` (−15.1 % RMSE)** — ここは regime 構造 (低 vol / 高 vol 期間) が一番くっきりしている dataset。ただし MoE は **CV fold あたり 1.5-4.8 倍の計算コスト** を払う。なので「精度向上が要る *かつ* wall time の余裕がある場面で使う」が今のルール — 「regime が特徴量から観測可能でないとダメ」という以前の主張ほど狭くはない。
 
 ## ベンチマーク — 500-trial スタディ (naive-lightgbm vs MoE、5 dataset)
 
@@ -81,43 +81,52 @@ expert_preds = model.predict_expert_pred(X_test)    # 各 expert の予測 (N, K
 
 | Dataset | Shape | naive-lightgbm 最良 | MoE 最良 | Δ RMSE | 速度 (MoE / naive、fold あたり中央値秒) |
 |---|---|---|---|---|---|
-| synthetic | 2000 × 5 | 4.9765 | **4.6651** | −6.3 % | 0.663 / 0.240 = **2.76 ×** |
-| real_hamilton | 311 × 12 | 0.9286 | **0.9128** | −1.7 % | 0.122 / 0.055 = **2.22 ×** |
-| sp500 | 3761 × 13 | 0.0100 | 0.0100 | tie | 0.136 / 0.091 = **1.49 ×** |
-| real_vix | 3762 × 13 | 2.8942 | **2.4574** | **−15.1 %** | 0.386 / 0.081 = **4.77 ×** |
-| hmm | 2000 × 5 | 2.1893 | **2.1096** | −3.6 % | 0.126 / 0.074 = **1.70 ×** |
+| `synthetic` | 2000 × 5 | 4.9765 | **4.6651** | −6.3 % | 0.663 / 0.240 = **2.76 ×** |
+| `fred_gdp` | 311 × 12 | 0.9286 | **0.9128** | −1.7 % | 0.122 / 0.055 = **2.22 ×** |
+| `sp500` | 3761 × 13 | 0.0100 | 0.0100 | tie | 0.136 / 0.091 = **1.49 ×** |
+| `vix` | 3762 × 13 | 2.8942 | **2.4574** | **−15.1 %** | 0.386 / 0.081 = **4.77 ×** |
+| `hmm` | 2000 × 5 | 2.1893 | **2.1096** | −3.6 % | 0.126 / 0.074 = **1.70 ×** |
 
 ### Dataset の概要
 
 regime-switching の適用可能性スペクトラムをカバーする 5 dataset: MoE 理想合成 1 本、実時系列 3 本 (regime-switching 文献の canonical reference)、真の regime label が既知の HMM 1 本 (gate の regime recovery 評価用)。
 
-**Synthetic** — *feature 由来 regime、MoE 理想ケース (2000 × 5)*
+#### `synthetic` — feature 由来 regime、MoE 理想ケース (2000 × 5)
 
-i.i.d. Gauss 特徴量 5 本; regime は `X` の決定論的関数なので gate が完璧にルーティングできる:
+- **Source**: 本リポジトリ内の generator (`examples/benchmark.py` の `generate_synthetic_data`)。
+- **構成**: i.i.d. Gauss 特徴量 5 本; regime は `X` の決定論的関数なので gate が完璧にルーティングできる:
 
-```
-regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
-y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
-y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
-```
+  ```
+  regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
+  y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
+  y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
+  ```
 
-2 つの regime は同じ特徴量に **符号が逆** の係数を使うので、単一 GBDT は両者を平均せざるを得ない — これが MoE が解消できる構造の典型例。Generator: `examples/benchmark.py` の `generate_synthetic_data`。
+  2 つの regime は同じ特徴量に **符号が逆** の係数を使うので、単一 GBDT は両者を平均せざるを得ない — MoE が解消できる構造の典型例。
 
-**Real Hamilton GDP** — *Hamilton 1989 の MS-AR(4) 設定を実マクロデータで (~310 × 12)*
+#### `fred_gdp` — US Real GDP、Hamilton 流 MS-AR(4) (~310 × 12)
 
-四半期 US Real GDP (`GDPC1`) を FRED の CSV エンドポイントから取得。[Hamilton (1989, *Econometrica*)](https://www.jstor.org/stable/1912559) に従い target は四半期成長率 `100·Δlog(GDP)`、特徴量は成長率の lag 4 (Hamilton の MS-AR(4)) と派生 MA / volatility / regime-proxy。Regime (好況 / 不況) は完全に latent — 真の oracle 列はない。Generator: `generate_real_hamilton_gnp_data`。
+- **Source**: FRED 系列 [`GDPC1`](https://fred.stlouisfed.org/series/GDPC1) — Real Gross Domestic Product, Chained 2017 Dollars, Quarterly, Seasonally Adjusted Annual Rate (BEA via FRED, 認証不要 CSV エンドポイント)。
+- **メソドロジー出典**: Hamilton, J. D. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* **Econometrica** 57(2), 357-384. <https://www.jstor.org/stable/1912559>。
+- **構成**: target は四半期成長率 `100·Δlog(GDP)`、特徴量は成長率の lag 4 (Hamilton の MS-AR(4)) と派生 MA / volatility / regime-proxy。Regime (好況 / 不況) は完全に latent。Generator: `generate_fred_gdp_data`。
 
-**S&P 500 daily returns** — *volatility regime 検証の代表例 (~3760 × 13)*
+#### `sp500` — S&P 500 日次 log return (~3760 × 13)
 
-`^GSPC` の日次 Close を Yahoo Finance から (デフォルト `2010-01-01` から `2024-12-31`)、log return に変換。Target: 翌日の log return (意図的に難しい予測設定)。特徴量: lag {1, 2, 3, 5, 10} の return + MA / ローリング vol / MA クロスオーバー。Regime は latent (低 vol / 高 vol 期間)。Generator: `generate_sp500_data`。
+- **Source**: Yahoo Finance、symbol [`^GSPC`](https://finance.yahoo.com/quote/%5EGSPC/history) (デフォルト `2010-01-01` から `2024-12-31`)。
+- **指数定義**: [S&P Dow Jones Indices, S&P 500](https://www.spglobal.com/spdji/en/indices/equity/sp-500/)。
+- **構成**: 日次 Close を log return に変換。Target は翌日 log return (意図的に難しい予測設定)。特徴量: lag {1, 2, 3, 5, 10} + MA / ローリング vol / MA クロスオーバー。Regime は latent (低 vol / 高 vol)。Generator: `generate_sp500_data`。
 
-**Real VIX** — *implied volatility level 予測 (~3760 × 13)*
+#### `vix` — CBOE Volatility Index 日次レベル (~3760 × 13)
 
-CBOE `^VIX` の日次 Close を Yahoo Finance から (S&P と同じ期間)。Target: 翌日の VIX レベル。特徴量: VIX の lag + MA / ローリング統計。S&P と同じ低 vol / 高 vol 構造を implied-vol レンズで見たもの。Generator: `generate_real_vix_data`。
+- **Source**: Yahoo Finance、symbol [`^VIX`](https://finance.yahoo.com/quote/%5EVIX/history) (`sp500` と同じ期間)。
+- **指数定義**: [CBOE VIX](https://www.cboe.com/tradable_products/vix/)。
+- **構成**: target は翌日 VIX レベル。特徴量: VIX の lag {1, 2, 3, 5, 10} + MA / ローリング vol。`sp500` と同じ低 vol / 高 vol 構造を implied-vol レンズで見たもの。Generator: `generate_vix_data`。
 
-**HMM synthetic** — *真の regime label 既知の 3 状態 Gaussian HMM (2000 × 5)*
+#### `hmm` — 真の regime label 既知の 3 状態 Gaussian HMM (2000 × 5)
 
-隠れ状態が 3 状態 Markov 連鎖 (95% 対角の persistent transition) で遷移; emission は Gauss で平均がよく分離 (`{−3, 0, +3}`)、scale は `{0.4, 0.7, 1.0}`。5 本の特徴量のうち 2 本は隠れ状態の弱い線形シグナルを持ち (gate に多少の手がかりはあるが「タダ飯」ではない)、残り 3 本は純ノイズ。**真の regime label を返す** — `diagnose_moe` で RMSE だけでなく regime recovery 精度を測れる。Generator: `generate_hmm_data`。
+- **Source**: 本リポジトリ内の generator (`generate_hmm_data`)。
+- **メソドロジー出典**: Rabiner, L. R. (1989). *A Tutorial on Hidden Markov Models and Selected Applications in Speech Recognition.* **Proceedings of the IEEE** 77(2), 257-286. <https://www.cs.ubc.ca/~murphyk/Bayes/rabiner.pdf>。
+- **構成**: 隠れ状態は 3 状態 Markov 連鎖 (95% 対角の persistent transition); emission は Gauss で平均がよく分離 `{−3, 0, +3}`、scale `{0.4, 0.7, 1.0}`。5 本の特徴量のうち 2 本は隠れ状態の弱い線形シグナルを持ち (gate に多少の手がかりはあるが「タダ飯」ではない)、残り 3 本は純ノイズ。**真の regime label を返す** — RMSE だけでなく regime recovery 精度を測れる。
 
 ### キャッシュ
 
@@ -130,7 +139,7 @@ CBOE `^VIX` の日次 Close を Yahoo Finance から (S&P と同じ期間)。Tar
 | パラメータ | 普遍? | 補足 |
 |---|---|---|
 | `mixture_gate_type` | **`gbdt`** | 全 dataset で最良 min RMSE。`leaf_reuse` と `none` は絶対最良を取れず |
-| `mixture_routing_mode` | **No** | synthetic は `token_choice`、real_hamilton / real_vix / hmm は `expert_choice` が勝った。両方探索すべき |
+| `mixture_routing_mode` | **No** | synthetic は `token_choice`、fred_gdp / vix / hmm は `expert_choice` が勝った。両方探索すべき |
 | `mixture_num_experts` | やや 3-4 | Q4 quartile mean がほぼの dataset で最良だが差は小さい |
 | `mixture_diversity_lambda` | 0.0–0.5 を探索 | MoE の fANOVA importance で常に top-5、単一最適値はないが探索は必須 |
 
