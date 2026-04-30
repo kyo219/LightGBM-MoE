@@ -461,14 +461,17 @@ def _yf_download_close(symbol: str, start: str, end: str, cache_name: str) -> "p
     return close
 
 
-def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
-    """S&P 500 daily log returns from Yahoo Finance.
+def generate_sp500_basic_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
+    """S&P 500 daily log returns from Yahoo Finance, with the *minimal* feature set (~13 cols).
 
-    - Source: Yahoo Finance, symbol `^GSPC` — https://finance.yahoo.com/quote/%5EGSPC/history
-    - Index methodology: S&P Dow Jones Indices —
-      https://www.spglobal.com/spdji/en/indices/equity/sp-500/
-    - Target: next-day log return (causal predictive setup)
-    - Features: lagged returns at lags {1, 2, 3, 5, 10} + MA / rolling-vol / regime-proxy features
+    Kept side-by-side with the enhanced `generate_sp500_data` so the comparative
+    study can show how MoE's advantage tracks with how observable the regime is
+    (more / better features → more MoE lift).
+
+    - Source: Yahoo Finance, symbol `^GSPC`
+    - Target: next-day log return
+    - Features: lagged returns at lags {1, 2, 3, 5, 10} + standard MA / vol / regime-proxy
+      features from `_add_ts_features` (8 columns).
     """
     close = _yf_download_close("^GSPC", start=start, end=end, cache_name="sp500_GSPC")
     px = close.to_numpy(dtype=np.float64)
@@ -476,13 +479,137 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
 
     lag_set = (1, 2, 3, 5, 10)
     lag_max = max(lag_set)
-    n = len(log_ret) - lag_max - 1  # -1 to leave room for next-day target
+    n = len(log_ret) - lag_max - 1
     if n <= 0:
         raise RuntimeError("S&P series too short after lag construction")
     lags = np.column_stack([log_ret[lag_max - k: lag_max - k + n] for k in lag_set])
     ts_feats = _add_ts_features(log_ret)[lag_max: lag_max + n]
     X = np.column_stack([lags, ts_feats])
-    y = log_ret[lag_max + 1: lag_max + 1 + n]  # next-day return
+    y = log_ret[lag_max + 1: lag_max + 1 + n]
+    return X, y, None
+
+
+def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
+    """S&P 500 daily log returns from Yahoo Finance, with practitioner feature set.
+
+    - Source: Yahoo Finance, symbol `^GSPC` — https://finance.yahoo.com/quote/%5EGSPC/history
+    - Index methodology: S&P Dow Jones Indices —
+      https://www.spglobal.com/spdji/en/indices/equity/sp-500/
+    - Target: next-day log return (causal predictive setup)
+    - Features (~28, all causal): multi-horizon lags, momentum (cum return),
+      realized volatility & vol ratio, multi-window MAs and MA crossovers,
+      RSI(14)/RSI(30), rolling skew/kurtosis, Bollinger band position,
+      drawdown from rolling high, fraction of positive returns.
+    """
+    close = _yf_download_close("^GSPC", start=start, end=end, cache_name="sp500_GSPC")
+    px = close.to_numpy(dtype=np.float64)
+    log_px = np.log(px)
+    log_ret = np.diff(log_px)
+    log_px_ret = log_px[1:]  # aligned with log_ret
+    n_ret = len(log_ret)
+
+    feats: list[np.ndarray] = []
+
+    # 1) Lagged returns
+    for lag in (1, 2, 3, 5, 10, 20, 60):
+        f = np.zeros(n_ret)
+        f[lag:] = log_ret[:-lag]
+        feats.append(f)
+
+    # 2) Cumulative log return over window (momentum)
+    def _rolling_sum(arr, w):
+        out = np.zeros_like(arr)
+        for i in range(w, len(arr)):
+            out[i] = arr[i - w:i].sum()
+        return out
+
+    cum5 = _rolling_sum(log_ret, 5)
+    cum20 = _rolling_sum(log_ret, 20)
+    cum60 = _rolling_sum(log_ret, 60)
+    feats.extend([cum5, cum20, cum60])
+
+    # 3) Realized volatility (sqrt of sum of squared returns)
+    sq = log_ret ** 2
+    rv5 = np.sqrt(_rolling_sum(sq, 5))
+    rv20 = np.sqrt(_rolling_sum(sq, 20))
+    rv60 = np.sqrt(_rolling_sum(sq, 60))
+    rv_ratio = np.where(rv20 > 0, rv5 / rv20, 0.0)
+    feats.extend([rv5, rv20, rv60, rv_ratio])
+
+    # 4) Multi-window MAs and MA crossovers
+    ma5 = cum5 / 5
+    ma20 = cum20 / 20
+    ma60 = cum60 / 60
+    feats.extend([ma5, ma20, ma60, ma5 - ma20, ma20 - ma60])
+
+    # 5) RSI(14) and RSI(30) — Wilder's, computed on returns
+    def _rsi(arr, w):
+        out = np.full(len(arr), 50.0)
+        for i in range(w, len(arr)):
+            window = arr[i - w:i]
+            gains = np.maximum(window, 0).sum()
+            losses = -np.minimum(window, 0).sum()
+            if losses == 0:
+                out[i] = 100.0
+            else:
+                rs = gains / losses
+                out[i] = 100.0 - 100.0 / (1.0 + rs)
+        return out
+
+    feats.append(_rsi(log_ret, 14))
+    feats.append(_rsi(log_ret, 30))
+
+    # 6) Rolling skewness / kurtosis (excess) over 20 days
+    skew = np.zeros(n_ret)
+    kurt = np.zeros(n_ret)
+    for i in range(20, n_ret):
+        w = log_ret[i - 20:i]
+        m = w.mean()
+        s = w.std()
+        if s > 0:
+            skew[i] = ((w - m) ** 3).mean() / s ** 3
+            kurt[i] = ((w - m) ** 4).mean() / s ** 4 - 3.0
+    feats.extend([skew, kurt])
+
+    # 7) Bollinger band position (z-score of log price vs MA(20))
+    bb = np.zeros(n_ret)
+    for i in range(20, n_ret):
+        w = log_px_ret[i - 20:i]
+        sd = w.std()
+        if sd > 0:
+            bb[i] = (log_px_ret[i] - w.mean()) / (2.0 * sd)
+    feats.append(bb)
+
+    # 8) Drawdown from rolling high (log price)
+    def _drawdown(arr, w):
+        out = np.zeros_like(arr)
+        for i in range(w, len(arr)):
+            peak = arr[i - w:i].max()
+            out[i] = arr[i] - peak  # <= 0
+        return out
+
+    feats.append(_drawdown(log_px_ret, 20))
+    feats.append(_drawdown(log_px_ret, 60))
+
+    # 9) Fraction of positive returns over last w days
+    def _frac_pos(arr, w):
+        out = np.zeros_like(arr)
+        for i in range(w, len(arr)):
+            out[i] = float((arr[i - w:i] > 0).mean())
+        return out
+
+    feats.append(_frac_pos(log_ret, 5))
+    feats.append(_frac_pos(log_ret, 20))
+
+    X_full = np.column_stack(feats)
+
+    # Burn the longest window (60) so all features are well-formed; -1 reserves the next-day target
+    burn = 60
+    n = n_ret - burn - 1
+    if n <= 0:
+        raise RuntimeError("S&P series too short after feature construction")
+    X = X_full[burn:burn + n]
+    y = log_ret[burn + 1:burn + 1 + n]
     return X, y, None
 
 

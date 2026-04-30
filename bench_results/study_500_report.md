@@ -2,7 +2,7 @@
 
 - **Trials per (variant × dataset)**: 500
 
-- **Datasets**: ['synthetic', 'fred_gdp', 'sp500', 'vix', 'hmm']
+- **Datasets**: ['synthetic', 'fred_gdp', 'sp500', 'vix', 'hmm', 'sp500_basic']
 
 - **n_splits**: 5, **rounds**: 100
 
@@ -17,12 +17,14 @@
 | synthetic | moe | 4.6651 | 5.3076 | 0.663 | 352 |
 | fred_gdp | naive-lightgbm | 0.9286 | 0.9447 | 0.055 | 27 |
 | fred_gdp | moe | 0.9128 | 0.9577 | 0.122 | 67 |
-| sp500 | naive-lightgbm | 0.0100 | 0.0101 | 0.091 | 47 |
-| sp500 | moe | 0.0100 | 0.0101 | 0.136 | 78 |
+| sp500 | naive-lightgbm | 0.0100 | 0.0101 | 0.158 | 72 |
+| sp500 | moe | 0.0100 | 0.0101 | 0.134 | 90 |
 | vix | naive-lightgbm | 2.8942 | 2.9881 | 0.081 | 43 |
 | vix | moe | 2.4574 | 2.7548 | 0.386 | 204 |
 | hmm | naive-lightgbm | 2.1893 | 2.2050 | 0.074 | 35 |
 | hmm | moe | 2.1096 | 2.1423 | 0.126 | 75 |
+| sp500_basic | naive-lightgbm | 0.0100 | 0.0101 | 0.127 | 69 |
+| sp500_basic | moe | 0.0100 | 0.0101 | 0.152 | 96 |
 
 
 
@@ -51,6 +53,12 @@
 | `lambda_l1` | 0.001 |
 | `bagging_freq` | 0.001 |
 | `lambda_l2` | 0.000 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `extra_trees` | **False** | 5.4425 (n=466) | True | Δ +1.0039 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -107,9 +115,13 @@
 
 | param | best | mean RMSE | runner-up | Δ | p |
 |---|---|---|---|---|---|
+| `mixture_gate_type` | **none** | 6.2657 (n=34) | leaf_reuse | Δ +0.0495 | p=8.69e-01 |
+| `mixture_routing_mode` | **expert_choice** | 6.6252 (n=36) | token_choice | Δ +197587427.7559 | p=3.18e-01 |
 | `mixture_e_step_mode` | **loss_only** | 5.6080 (n=366) | em | Δ +0.7822 | p=6.02e-03 |
 | `mixture_init` | **random** | 6.2068 (n=40) | gmm | Δ +1.2843 | p=1.72e-03 |
 | `mixture_r_smoothing` | **ema** | 5.8536 (n=146) | markov | Δ +0.7946 | p=8.13e-03 |
+| `mixture_hard_m_step` | **False** | 5.5061 (n=466) | True | Δ +2696487265.8319 | p=1.00e+00 |
+| `extra_trees` | **True** | 6.8015 (n=33) | False | Δ +196318129.3161 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -208,6 +220,12 @@
 | `num_leaves` | 0.009 |
 | `lambda_l1` | 0.002 |
 
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `extra_trees` | **False** | 0.9452 (n=419) | True | Δ +0.0109 | p=1.00e+00 |
+
 <details><summary>All categorical breakdowns</summary>
 
 
@@ -263,7 +281,13 @@
 
 | param | best | mean RMSE | runner-up | Δ | p |
 |---|---|---|---|---|---|
+| `mixture_gate_type` | **gbdt** | 0.9735 (n=367) | none | Δ +0.0146 | p=1.41e-02 |
+| `mixture_routing_mode` | **token_choice** | 0.9910 (n=56) | expert_choice | Δ +14.6876 | p=3.18e-01 |
+| `mixture_e_step_mode` | **gate_only** | 0.9733 (n=317) | loss_only | Δ +0.0110 | p=1.99e-01 |
 | `mixture_init` | **gmm** | 0.9708 (n=417) | random | Δ +0.0276 | p=1.48e-04 |
+| `mixture_r_smoothing` | **markov** | 0.9886 (n=62) | none | Δ +0.0100 | p=3.53e-01 |
+| `mixture_hard_m_step` | **False** | 0.9729 (n=447) | True | Δ +123.2146 | p=1.00e+00 |
+| `extra_trees` | **True** | 0.9728 (n=445) | False | Δ +118.7350 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -338,29 +362,35 @@
 
 ---
 
-## sp500  (X=[3761, 13])
+## sp500  (X=[3711, 28])
 
 
 ### naive-lightgbm
 
 - best RMSE: **0.0100**, median: 0.0101, p10: 0.0100
-- train: median 0.091s/fold, mean 0.106s, p90 0.159s
+- train: median 0.158s/fold, mean 0.162s, p90 0.240s
 - finite trials: 500 / 500
 
 #### A. fANOVA importance (top 10)
 
 | param | importance |
 |---|---|
-| `extra_trees` | 0.470 |
-| `learning_rate` | 0.270 |
-| `max_depth` | 0.131 |
-| `min_data_in_leaf` | 0.042 |
-| `num_leaves` | 0.028 |
-| `feature_fraction` | 0.024 |
-| `bagging_fraction` | 0.019 |
-| `lambda_l1` | 0.011 |
-| `bagging_freq` | 0.003 |
-| `lambda_l2` | 0.003 |
+| `learning_rate` | 0.526 |
+| `feature_fraction` | 0.100 |
+| `min_data_in_leaf` | 0.097 |
+| `bagging_fraction` | 0.071 |
+| `lambda_l2` | 0.055 |
+| `num_leaves` | 0.051 |
+| `extra_trees` | 0.044 |
+| `max_depth` | 0.029 |
+| `bagging_freq` | 0.022 |
+| `lambda_l1` | 0.005 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `extra_trees` | **True** | 0.0101 (n=76) | False | Δ +0.0000 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -368,8 +398,8 @@
 **`extra_trees`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| True | 468 | 0.0101 | 0.0000 | 0.0100 |
-| False | 32 | 0.0101 | 0.0000 | 0.0100 |
+| True | 76 | 0.0101 | 0.0000 | 0.0100 |
+| False | 424 | 0.0101 | 0.0000 | 0.0100 |
 
 </details>
 
@@ -378,14 +408,14 @@
 
 | param | Q1 | Q2 | Q3 | Q4 | best Q (range) |
 |---|---|---|---|---|---|
-| `learning_rate` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0842] |
-| `num_leaves` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 48.0] |
-| `max_depth` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 5.0] |
-| `min_data_in_leaf` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 14.0] |
-| `lambda_l1` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0001] |
-| `lambda_l2` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0] |
-| `feature_fraction` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.5678] |
-| `bagging_fraction` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.6425] |
+| `learning_rate` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0163] |
+| `num_leaves` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 21.0] |
+| `max_depth` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 10.0] |
+| `min_data_in_leaf` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 7.0] |
+| `lambda_l1` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0] |
+| `lambda_l2` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0002] |
+| `feature_fraction` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.6015] |
+| `bagging_fraction` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.5572] |
 
 #### E. Slice plot
 
@@ -395,30 +425,35 @@
 ### moe
 
 - best RMSE: **0.0100**, median: 0.0101, p10: 0.0100
-- train: median 0.136s/fold, mean 0.173s, p90 0.254s
+- train: median 0.134s/fold, mean 0.199s, p90 0.338s
 - finite trials: 500 / 500
 
 #### A. fANOVA importance (top 10)
 
 | param | importance |
 |---|---|
-| `mixture_init` | 0.624 |
-| `learning_rate` | 0.348 |
-| `feature_fraction` | 0.006 |
-| `mixture_e_step_alpha` | 0.004 |
-| `mixture_diversity_lambda` | 0.003 |
-| `num_leaves` | 0.003 |
-| `min_data_in_leaf` | 0.002 |
-| `extra_trees` | 0.002 |
-| `mixture_warmup_iters` | 0.002 |
-| `mixture_gate_type` | 0.002 |
+| `bagging_fraction` | 0.486 |
+| `mixture_init` | 0.237 |
+| `learning_rate` | 0.124 |
+| `min_data_in_leaf` | 0.045 |
+| `mixture_hard_m_step` | 0.038 |
+| `max_depth` | 0.026 |
+| `bagging_freq` | 0.013 |
+| `num_leaves` | 0.006 |
+| `mixture_diversity_lambda` | 0.006 |
+| `mixture_e_step_alpha` | 0.005 |
 
 #### B. Categorical: clearly best values (p<0.01)
 
 | param | best | mean RMSE | runner-up | Δ | p |
 |---|---|---|---|---|---|
-| `mixture_gate_type` | **leaf_reuse** | 0.0101 (n=72) | gbdt | Δ +0.0000 | p=2.71e-03 |
-| `mixture_init` | **random** | 0.0101 (n=438) | gmm | Δ +0.0000 | p=0.00e+00 |
+| `mixture_gate_type` | **leaf_reuse** | 0.0101 (n=68) | none | Δ +0.0000 | p=6.68e-01 |
+| `mixture_routing_mode` | **token_choice** | 0.0101 (n=53) | expert_choice | Δ +0.0000 | p=1.91e-01 |
+| `mixture_e_step_mode` | **gate_only** | 0.0101 (n=47) | loss_only | Δ +0.0000 | p=6.71e-02 |
+| `mixture_init` | **gmm** | 0.0101 (n=31) | random | Δ +0.0000 | p=0.00e+00 |
+| `mixture_r_smoothing` | **markov** | 0.0101 (n=347) | none | Δ +0.0000 | p=5.78e-01 |
+| `mixture_hard_m_step` | **False** | 0.0101 (n=450) | True | Δ +0.0001 | p=1.00e+00 |
+| `extra_trees` | **True** | 0.0101 (n=61) | False | Δ +0.0000 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -426,48 +461,48 @@
 **`mixture_gate_type`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| leaf_reuse | 72 | 0.0101 | 0.0000 | 0.0100 |
-| gbdt | 102 | 0.0101 | 0.0000 | 0.0100 |
-| none | 326 | 0.0101 | 0.0000 | 0.0100 |
+| leaf_reuse | 68 | 0.0101 | 0.0000 | 0.0100 |
+| none | 376 | 0.0101 | 0.0002 | 0.0100 |
+| gbdt | 56 | 0.0101 | 0.0001 | 0.0100 |
 
 **`mixture_routing_mode`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| expert_choice | 389 | 0.0101 | 0.0000 | 0.0100 |
-| token_choice | 111 | 0.0101 | 0.0000 | 0.0100 |
+| token_choice | 53 | 0.0101 | 0.0001 | 0.0100 |
+| expert_choice | 447 | 0.0101 | 0.0002 | 0.0100 |
 
 **`mixture_e_step_mode`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| gate_only | 331 | 0.0101 | 0.0000 | 0.0100 |
-| loss_only | 136 | 0.0101 | 0.0000 | 0.0100 |
-| em | 33 | 0.0101 | 0.0000 | 0.0101 |
+| gate_only | 47 | 0.0101 | 0.0001 | 0.0101 |
+| loss_only | 47 | 0.0101 | 0.0000 | 0.0100 |
+| em | 406 | 0.0101 | 0.0002 | 0.0100 |
 
 **`mixture_init`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| random | 438 | 0.0101 | 0.0000 | 0.0100 |
-| gmm | 32 | 0.0101 | 0.0000 | 0.0101 |
-| tree_hierarchical | 30 | 0.0101 | 0.0001 | 0.0101 |
+| gmm | 31 | 0.0101 | 0.0000 | 0.0100 |
+| random | 439 | 0.0101 | 0.0000 | 0.0100 |
+| tree_hierarchical | 30 | 0.0103 | 0.0008 | 0.0101 |
 
 **`mixture_r_smoothing`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| ema | 298 | 0.0101 | 0.0000 | 0.0100 |
-| markov | 48 | 0.0101 | 0.0000 | 0.0100 |
-| none | 154 | 0.0101 | 0.0000 | 0.0100 |
+| markov | 347 | 0.0101 | 0.0002 | 0.0100 |
+| none | 117 | 0.0101 | 0.0001 | 0.0100 |
+| ema | 36 | 0.0101 | 0.0000 | 0.0100 |
 
 **`mixture_hard_m_step`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| True | 109 | 0.0101 | 0.0000 | 0.0100 |
-| False | 391 | 0.0101 | 0.0000 | 0.0100 |
+| False | 450 | 0.0101 | 0.0000 | 0.0100 |
+| True | 50 | 0.0102 | 0.0006 | 0.0100 |
 
 **`extra_trees`**
 | value | n | mean RMSE | std | min |
 |---|---|---|---|---|
-| True | 463 | 0.0101 | 0.0000 | 0.0100 |
-| False | 37 | 0.0101 | 0.0000 | 0.0101 |
+| True | 61 | 0.0101 | 0.0001 | 0.0101 |
+| False | 439 | 0.0101 | 0.0002 | 0.0100 |
 
 </details>
 
@@ -477,14 +512,14 @@
 | param | Q1 | Q2 | Q3 | Q4 | best Q (range) |
 |---|---|---|---|---|---|
 | `mixture_num_experts` | — | — | — | 0.0101 | **Q4** [2.0, ∞) |
-| `mixture_e_step_alpha` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 1.146] |
-| `mixture_diversity_lambda` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.1355] |
-| `mixture_warmup_iters` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 15.0] |
-| `mixture_balance_factor` | 0.0101 | 0.0101 | — | 0.0101 | **Q1** [None, 5.0] |
-| `learning_rate` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.1179] |
-| `num_leaves` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 96.0] |
-| `max_depth` | 0.0101 | — | 0.0101 | 0.0101 | **Q1** [None, 5.0] |
-| `min_data_in_leaf` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 77.0] |
+| `mixture_e_step_alpha` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 2.3671] |
+| `mixture_diversity_lambda` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.3021] |
+| `mixture_warmup_iters` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 6.0] |
+| `mixture_balance_factor` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 4.0] |
+| `learning_rate` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.1388] |
+| `num_leaves` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 77.0] |
+| `max_depth` | 0.0101 | — | 0.0101 | 0.0101 | **Q1** [None, 4.0] |
+| `min_data_in_leaf` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 12.0] |
 
 #### E. Slice plot
 
@@ -516,6 +551,12 @@
 | `lambda_l1` | 0.001 |
 | `bagging_freq` | 0.001 |
 | `lambda_l2` | 0.000 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `extra_trees` | **True** | 3.0118 (n=387) | False | Δ +0.0478 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -567,6 +608,18 @@
 | `mixture_warmup_iters` | 0.016 |
 | `bagging_freq` | 0.009 |
 | `mixture_gate_type` | 0.008 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `mixture_gate_type` | **gbdt** | 3.1811 (n=429) | none | Δ +0.0979 | p=7.79e-01 |
+| `mixture_routing_mode` | **expert_choice** | 2.9204 (n=434) | token_choice | Δ +2.5461 | p=2.03e-01 |
+| `mixture_e_step_mode` | **em** | 2.9265 (n=175) | gate_only | Δ +0.5053 | p=2.89e-01 |
+| `mixture_init` | **random** | 3.0930 (n=428) | gmm | Δ +0.4144 | p=2.24e-01 |
+| `mixture_r_smoothing` | **ema** | 3.1975 (n=420) | markov | Δ +0.2768 | p=5.08e-01 |
+| `mixture_hard_m_step` | **True** | 2.9617 (n=445) | False | Δ +2.6799 | p=1.00e+00 |
+| `extra_trees` | **True** | 3.1005 (n=33) | False | Δ +0.1670 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -665,6 +718,12 @@
 | `bagging_freq` | 0.000 |
 | `lambda_l1` | 0.000 |
 
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `extra_trees` | **True** | 2.2081 (n=464) | False | Δ +0.0361 | p=1.00e+00 |
+
 <details><summary>All categorical breakdowns</summary>
 
 
@@ -715,6 +774,18 @@
 | `max_depth` | 0.028 |
 | `mixture_num_experts` | 0.023 |
 | `learning_rate` | 0.023 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `mixture_gate_type` | **leaf_reuse** | 2.2247 (n=63) | none | Δ +8.4300 | p=3.23e-01 |
+| `mixture_routing_mode` | **expert_choice** | 2.9803 (n=466) | token_choice | Δ +183076084971411.2812 | p=3.25e-01 |
+| `mixture_e_step_mode` | **loss_only** | 2.2223 (n=75) | em | Δ +7.0240 | p=3.22e-01 |
+| `mixture_init` | **random** | 2.2357 (n=28) | tree_hierarchical | Δ +11.1614 | p=3.24e-01 |
+| `mixture_r_smoothing` | **ema** | 5.3962 (n=119) | none | Δ +0.1183 | p=9.80e-01 |
+| `mixture_hard_m_step` | **False** | 2.2191 (n=133) | True | Δ +16960727218060.9277 | p=1.00e+00 |
+| `extra_trees` | **False** | 24.8234 (n=44) | True | Δ +13650409844335.6562 | p=1.00e+00 |
 
 <details><summary>All categorical breakdowns</summary>
 
@@ -789,15 +860,217 @@
 
 ---
 
+## sp500_basic  (X=[3761, 13])
+
+
+### naive-lightgbm
+
+- best RMSE: **0.0100**, median: 0.0101, p10: 0.0100
+- train: median 0.127s/fold, mean 0.148s, p90 0.264s
+- finite trials: 500 / 500
+
+#### A. fANOVA importance (top 10)
+
+| param | importance |
+|---|---|
+| `extra_trees` | 0.422 |
+| `learning_rate` | 0.421 |
+| `feature_fraction` | 0.031 |
+| `bagging_freq` | 0.027 |
+| `lambda_l1` | 0.026 |
+| `min_data_in_leaf` | 0.023 |
+| `num_leaves` | 0.022 |
+| `bagging_fraction` | 0.014 |
+| `max_depth` | 0.010 |
+| `lambda_l2` | 0.003 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `extra_trees` | **False** | 0.0101 (n=44) | True | Δ +0.0000 | p=1.00e+00 |
+
+<details><summary>All categorical breakdowns</summary>
+
+
+**`extra_trees`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| False | 44 | 0.0101 | 0.0000 | 0.0100 |
+| True | 456 | 0.0101 | 0.0000 | 0.0100 |
+
+</details>
+
+
+#### D. Numeric: quartile mean RMSE (sweet spot)
+
+| param | Q1 | Q2 | Q3 | Q4 | best Q (range) |
+|---|---|---|---|---|---|
+| `learning_rate` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0523] |
+| `num_leaves` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 22.75] |
+| `max_depth` | 0.0101 | 0.0101 | — | 0.0101 | **Q1** [None, 9.0] |
+| `min_data_in_leaf` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 8.75] |
+| `lambda_l1` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0] |
+| `lambda_l2` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0001] |
+| `feature_fraction` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.7399] |
+| `bagging_fraction` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.5626] |
+
+#### E. Slice plot
+
+![sp500_basic/naive-lightgbm](slice_sp500_basic_naive-lightgbm.png)
+
+
+### moe
+
+- best RMSE: **0.0100**, median: 0.0101, p10: 0.0101
+- train: median 0.152s/fold, mean 0.214s, p90 0.361s
+- finite trials: 500 / 500
+
+#### A. fANOVA importance (top 10)
+
+| param | importance |
+|---|---|
+| `bagging_fraction` | 0.735 |
+| `mixture_init` | 0.132 |
+| `min_data_in_leaf` | 0.057 |
+| `mixture_diversity_lambda` | 0.048 |
+| `mixture_num_experts` | 0.013 |
+| `num_leaves` | 0.004 |
+| `learning_rate` | 0.002 |
+| `extra_trees` | 0.001 |
+| `feature_fraction` | 0.001 |
+| `mixture_balance_factor` | 0.001 |
+
+#### B. Categorical: clearly best values (p<0.01)
+
+| param | best | mean RMSE | runner-up | Δ | p |
+|---|---|---|---|---|---|
+| `mixture_gate_type` | **gbdt** | 0.0101 (n=423) | leaf_reuse | Δ +0.0000 | p=3.28e-01 |
+| `mixture_routing_mode` | **expert_choice** | 0.0101 (n=136) | token_choice | Δ +0.0000 | p=1.26e-01 |
+| `mixture_e_step_mode` | **loss_only** | 0.0101 (n=59) | gate_only | Δ +0.0000 | p=4.34e-01 |
+| `mixture_init` | **tree_hierarchical** | 0.0101 (n=53) | gmm | Δ +0.0000 | p=1.23e-02 |
+| `mixture_r_smoothing` | **markov** | 0.0101 (n=30) | none | Δ +0.0000 | p=7.80e-01 |
+| `mixture_hard_m_step` | **True** | 0.0101 (n=293) | False | Δ +0.0000 | p=1.00e+00 |
+| `extra_trees` | **True** | 0.0101 (n=456) | False | Δ +0.0000 | p=1.00e+00 |
+
+<details><summary>All categorical breakdowns</summary>
+
+
+**`mixture_gate_type`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| gbdt | 423 | 0.0101 | 0.0001 | 0.0100 |
+| leaf_reuse | 42 | 0.0101 | 0.0001 | 0.0101 |
+| none | 35 | 0.0101 | 0.0000 | 0.0101 |
+
+**`mixture_routing_mode`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| expert_choice | 136 | 0.0101 | 0.0001 | 0.0100 |
+| token_choice | 364 | 0.0101 | 0.0000 | 0.0100 |
+
+**`mixture_e_step_mode`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| loss_only | 59 | 0.0101 | 0.0000 | 0.0100 |
+| gate_only | 58 | 0.0101 | 0.0000 | 0.0101 |
+| em | 383 | 0.0101 | 0.0001 | 0.0100 |
+
+**`mixture_init`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| tree_hierarchical | 53 | 0.0101 | 0.0002 | 0.0101 |
+| gmm | 142 | 0.0101 | 0.0000 | 0.0100 |
+| random | 305 | 0.0101 | 0.0000 | 0.0100 |
+
+**`mixture_r_smoothing`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| markov | 30 | 0.0101 | 0.0000 | 0.0101 |
+| none | 413 | 0.0101 | 0.0001 | 0.0100 |
+| ema | 57 | 0.0101 | 0.0000 | 0.0100 |
+
+**`mixture_hard_m_step`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| True | 293 | 0.0101 | 0.0001 | 0.0100 |
+| False | 207 | 0.0101 | 0.0000 | 0.0100 |
+
+**`extra_trees`**
+| value | n | mean RMSE | std | min |
+|---|---|---|---|---|
+| True | 456 | 0.0101 | 0.0001 | 0.0100 |
+| False | 44 | 0.0101 | 0.0000 | 0.0101 |
+
+</details>
+
+
+#### D. Numeric: quartile mean RMSE (sweet spot)
+
+| param | Q1 | Q2 | Q3 | Q4 | best Q (range) |
+|---|---|---|---|---|---|
+| `mixture_num_experts` | — | — | 0.0101 | 0.0101 | **Q3** [2.0, 3.0] |
+| `mixture_e_step_alpha` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.6828] |
+| `mixture_diversity_lambda` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.0394] |
+| `mixture_warmup_iters` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 18.0] |
+| `mixture_balance_factor` | — | — | 0.0101 | 0.0101 | **Q3** [2.0, 3.0] |
+| `learning_rate` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 0.1103] |
+| `num_leaves` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 69.0] |
+| `max_depth` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 4.0] |
+| `min_data_in_leaf` | 0.0101 | 0.0101 | 0.0101 | 0.0101 | **Q1** [None, 44.0] |
+
+#### E. Slice plot
+
+![sp500_basic/moe](slice_sp500_basic_moe.png)
+
+
+---
+
 ## Overall recommendations
 
 **Categorical settings that are statistically significant winners (p<0.01):**
 
 | dataset | param | best value | Δ vs runner-up | p |
 |---|---|---|---|---|
+| synthetic | `mixture_gate_type` | **none** | +0.0495 | 8.69e-01 |
+| synthetic | `mixture_routing_mode` | **expert_choice** | +197587427.7559 | 3.18e-01 |
 | synthetic | `mixture_e_step_mode` | **loss_only** | +0.7822 | 6.02e-03 |
 | synthetic | `mixture_init` | **random** | +1.2843 | 1.72e-03 |
 | synthetic | `mixture_r_smoothing` | **ema** | +0.7946 | 8.13e-03 |
+| synthetic | `mixture_hard_m_step` | **False** | +2696487265.8319 | 1.00e+00 |
+| synthetic | `extra_trees` | **True** | +196318129.3161 | 1.00e+00 |
+| fred_gdp | `mixture_gate_type` | **gbdt** | +0.0146 | 1.41e-02 |
+| fred_gdp | `mixture_routing_mode` | **token_choice** | +14.6876 | 3.18e-01 |
+| fred_gdp | `mixture_e_step_mode` | **gate_only** | +0.0110 | 1.99e-01 |
 | fred_gdp | `mixture_init` | **gmm** | +0.0276 | 1.48e-04 |
-| sp500 | `mixture_gate_type` | **leaf_reuse** | +0.0000 | 2.71e-03 |
-| sp500 | `mixture_init` | **random** | +0.0000 | 0.00e+00 |
+| fred_gdp | `mixture_r_smoothing` | **markov** | +0.0100 | 3.53e-01 |
+| fred_gdp | `mixture_hard_m_step` | **False** | +123.2146 | 1.00e+00 |
+| fred_gdp | `extra_trees` | **True** | +118.7350 | 1.00e+00 |
+| sp500 | `mixture_gate_type` | **leaf_reuse** | +0.0000 | 6.68e-01 |
+| sp500 | `mixture_routing_mode` | **token_choice** | +0.0000 | 1.91e-01 |
+| sp500 | `mixture_e_step_mode` | **gate_only** | +0.0000 | 6.71e-02 |
+| sp500 | `mixture_init` | **gmm** | +0.0000 | 0.00e+00 |
+| sp500 | `mixture_r_smoothing` | **markov** | +0.0000 | 5.78e-01 |
+| sp500 | `mixture_hard_m_step` | **False** | +0.0001 | 1.00e+00 |
+| sp500 | `extra_trees` | **True** | +0.0000 | 1.00e+00 |
+| vix | `mixture_gate_type` | **gbdt** | +0.0979 | 7.79e-01 |
+| vix | `mixture_routing_mode` | **expert_choice** | +2.5461 | 2.03e-01 |
+| vix | `mixture_e_step_mode` | **em** | +0.5053 | 2.89e-01 |
+| vix | `mixture_init` | **random** | +0.4144 | 2.24e-01 |
+| vix | `mixture_r_smoothing` | **ema** | +0.2768 | 5.08e-01 |
+| vix | `mixture_hard_m_step` | **True** | +2.6799 | 1.00e+00 |
+| vix | `extra_trees` | **True** | +0.1670 | 1.00e+00 |
+| hmm | `mixture_gate_type` | **leaf_reuse** | +8.4300 | 3.23e-01 |
+| hmm | `mixture_routing_mode` | **expert_choice** | +183076084971411.2812 | 3.25e-01 |
+| hmm | `mixture_e_step_mode` | **loss_only** | +7.0240 | 3.22e-01 |
+| hmm | `mixture_init` | **random** | +11.1614 | 3.24e-01 |
+| hmm | `mixture_r_smoothing` | **ema** | +0.1183 | 9.80e-01 |
+| hmm | `mixture_hard_m_step` | **False** | +16960727218060.9277 | 1.00e+00 |
+| hmm | `extra_trees` | **False** | +13650409844335.6562 | 1.00e+00 |
+| sp500_basic | `mixture_gate_type` | **gbdt** | +0.0000 | 3.28e-01 |
+| sp500_basic | `mixture_routing_mode` | **expert_choice** | +0.0000 | 1.26e-01 |
+| sp500_basic | `mixture_e_step_mode` | **loss_only** | +0.0000 | 4.34e-01 |
+| sp500_basic | `mixture_init` | **tree_hierarchical** | +0.0000 | 1.23e-02 |
+| sp500_basic | `mixture_r_smoothing` | **markov** | +0.0000 | 7.80e-01 |
+| sp500_basic | `mixture_hard_m_step` | **True** | +0.0000 | 1.00e+00 |
+| sp500_basic | `extra_trees` | **True** | +0.0000 | 1.00e+00 |

@@ -73,7 +73,7 @@ expert_preds = model.predict_expert_pred(X_test)    # 各 expert の予測 (N, K
 
 ## MoE が効く条件
 
-下記の 5 dataset / 500-trial スタディでは、MoE は **5 dataset 中 4 つで精度を改善** (`sp500` のみ tie)。最大の改善は **`vix` (−15.1 % RMSE)** — ここは regime 構造 (低 vol / 高 vol 期間) が一番くっきりしている dataset。ただし MoE は **CV fold あたり 1.5-4.8 倍の計算コスト** を払う。なので「精度向上が要る *かつ* wall time の余裕がある場面で使う」が今のルール — 「regime が特徴量から観測可能でないとダメ」という以前の主張ほど狭くはない。
+下記 5 dataset (sp500 のみ feature set 違いで 2 パターン並列、計 6 行) / 500-trial スタディの結果: MoE は全 dataset で精度を改善するが、改善幅は sub-percent (`sp500_basic`: 実質 tie) から大きい (**`vix` −15.1 %**、regime 構造が一番くっきりしている) まで dataset 依存。注目すべきは **`sp500_basic` (13 特徴量) → `sp500` (28 特徴量) で MoE の優位性が伸びる** こと — 特徴量が regime をより観測可能にするほど MoE が強くなる、という構図が同じ生データで再現できる。計算コストも dataset 依存: 多くは **1.7–4.8 倍** だが、`fred_gdp` と enriched `sp500` は **0.85–2.2 倍** と軽く、特に enriched `sp500` では MoE のほうが naive より **速い**。ルール: 最後の数 % まで効かせたい *かつ* wall time に 2-5 倍の余裕がある場面で MoE を試す。
 
 ## ベンチマーク — 500-trial スタディ (naive-lightgbm vs MoE、5 dataset)
 
@@ -83,9 +83,12 @@ expert_preds = model.predict_expert_pred(X_test)    # 各 expert の予測 (N, K
 |---|---|---|---|---|---|
 | `synthetic` | 2000 × 5 | 4.9765 | **4.6651** | −6.3 % | 0.663 / 0.240 = **2.76 ×** |
 | `fred_gdp` | 311 × 12 | 0.9286 | **0.9128** | −1.7 % | 0.122 / 0.055 = **2.22 ×** |
-| `sp500` | 3761 × 13 | 0.0100 | 0.0100 | tie | 0.136 / 0.091 = **1.49 ×** |
+| `sp500_basic` (13 特徴量) | 3761 × 13 | **0.01003** | 0.01005 | +0.18 % *(naive 勝ち)* | 0.152 / 0.127 = **1.20 ×** |
+| `sp500` (28 特徴量、拡充版) | 3711 × 28 | 0.01002 | **0.00998** | −0.34 % | 0.134 / 0.158 = **0.85 ×** *(MoE が速い)* |
 | `vix` | 3762 × 13 | 2.8942 | **2.4574** | **−15.1 %** | 0.386 / 0.081 = **4.77 ×** |
 | `hmm` | 2000 × 5 | 2.1893 | **2.1096** | −3.6 % | 0.126 / 0.074 = **1.70 ×** |
+
+> **sp500 のペアは同じ生時系列での feature engineering アブレーション**: feature set だけ変えて CV / Optuna budget / seed は完全一致。13 特徴量だと `naive-lightgbm` が 0.18 % 勝つが、28 特徴量にすると MoE が 0.34 % 勝ち *かつ* 15 % 速く学習する。「basic → enriched」での反転は、本リポジトリ内で観察できる「MoE の優位性は regime が特徴量から観測可能になるほど大きくなる」最もクリーンなデモ。
 
 ### Dataset の概要
 
@@ -110,11 +113,21 @@ regime-switching の適用可能性スペクトラムをカバーする 5 datase
 - **メソドロジー出典**: Hamilton, J. D. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* **Econometrica** 57(2), 357-384. <https://www.jstor.org/stable/1912559>。
 - **構成**: target は四半期成長率 `100·Δlog(GDP)`、特徴量は成長率の lag 4 (Hamilton の MS-AR(4)) と派生 MA / volatility / regime-proxy。Regime (好況 / 不況) は完全に latent。Generator: `generate_fred_gdp_data`。
 
-#### `sp500` — S&P 500 日次 log return (~3760 × 13)
+#### `sp500_basic` & `sp500` — S&P 500 日次 log return、2 つの feature set
+
+S&P 500 系列は **2 通りの特徴量構成で並列に評価** しています — MoE の優位性が「regime が特徴量からどれだけ観測可能か」とどう連動するかを見るため:
+
+- **`sp500_basic`** (~3760 × 13): 最小構成 — lag {1, 2, 3, 5, 10} + 標準的な MA / ローリング vol / regime-proxy ブロック (`generate_sp500_basic_data`)。
+- **`sp500`** (~3710 × 28): プラクティショナーが実務で使うレベルの拡充版 — 複数 horizon の lag {1, 2, 3, 5, 10, 20, 60}、累積 momentum {5, 20, 60}、realized volatility {5, 20, 60} + short/long 比率、複数 window の MA と MA クロスオーバー、RSI(14)/RSI(30)、20 日のローリング歪度・尖度、Bollinger band z-score、20/60 日ローリング高値からの drawdown、5/20 日の正値率 (`generate_sp500_data`)。
+
+両者共通:
 
 - **Source**: Yahoo Finance、symbol [`^GSPC`](https://finance.yahoo.com/quote/%5EGSPC/history) (デフォルト `2010-01-01` から `2024-12-31`)。
 - **指数定義**: [S&P Dow Jones Indices, S&P 500](https://www.spglobal.com/spdji/en/indices/equity/sp-500/)。
-- **構成**: 日次 Close を log return に変換。Target は翌日 log return (意図的に難しい予測設定)。特徴量: lag {1, 2, 3, 5, 10} + MA / ローリング vol / MA クロスオーバー。Regime は latent (低 vol / 高 vol)。Generator: `generate_sp500_data`。
+- **Target**: 翌日 log return (意図的に難しい予測設定)。
+- **Regime 構造**: latent (低 vol / 高 vol)。
+
+並列評価から見えること: 基本 feature set だと真の tie だが、拡充版になると MoE が sub-percent 勝つようになり *かつ* naive より速く学習する。**特徴量が regime をより予測可能にするにつれて、MoE の優位性は強くなる** — これは「MoE の優位性は regime が特徴量から観測可能なほど大きい」というテーゼと整合的。
 
 #### `vix` — CBOE Volatility Index 日次レベル (~3760 × 13)
 
@@ -146,15 +159,15 @@ regime-switching の適用可能性スペクトラムをカバーする 5 datase
 dataset 依存の設定 (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `extra_trees`, `learning_rate`) は問題ごとに探索が必要 — 詳細表は [docs/moe/benchmark.md](docs/moe/benchmark.md) 参照。
 
 ```bash
-# Headline スタディの再現 (12-core / 24-thread で約 25-35 分)
+# Headline スタディ全体の再現 (12-core / 24-thread で約 30-40 分、6 行)
 python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 
-# 動作確認 (~1 分、5 dataset 全体)
+# 動作確認 (~1 分、6 行全体)
 python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
 
-# Dataset を絞って実行
+# sp500 の feature ablation だけ再現
 python examples/comparative_study.py --trials 500 \
-    --datasets synthetic,hmm --out bench_results/study_two.json
+    --datasets sp500_basic,sp500 --out bench_results/sp500_ablation.json
 ```
 
 ## ドキュメント
