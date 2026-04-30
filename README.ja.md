@@ -91,6 +91,44 @@ expert_preds = model.predict_expert_pred(X_test)    # 各 expert の予測 (N, K
 | Hamilton (latent regime) | 500 × 12 | 0.6990 | 0.6985 | 1.79 × |
 | VIX | 1000 × 5 | 0.0115 | 0.0115 | 1.53 × |
 
+### Dataset の概要 (生成器は `examples/benchmark.py`)
+
+3 つとも regime 構造が既知の合成データで、「MoE 理想」から「latent」までスペクトラムをカバーするように選んでいます。固定 seed (`42`)、5-fold time-series CV。
+
+**Synthetic** — *feature 由来 regime、MoE 理想ケース (2000 × 5)*
+
+i.i.d. Gauss 特徴量 5 本。regime は `X` の決定論的関数なので、gate が完璧にルーティングできます:
+
+```
+regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
+y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
+y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
+```
+
+2 つの regime は同じ特徴量に **符号が逆** の係数を使うので、単一 GBDT は両者を平均せざるを得ない — これが MoE が解消できる構造の典型例。
+
+**Hamilton** — *latent regime + 時系列特徴量 (500 × 12)*
+
+Hamilton GNP 風: regime は **latent** (特徴量に含まれない)。時間方向に sin で変調された Bernoulli `P(regime=1) = 0.5 + 0.3·sin(2π·t/100)` で遷移。target:
+
+```
+y | regime=0 :   0.8 + 0.3·X0 + 0.2·X1  +  ε
+y | regime=1 :  −0.5 + 0.1·X0 − 0.3·X2  +  ε                 ε ~ N(0, 0.3²)
+```
+
+ベースの Gauss 特徴量 4 本に、過去の `y` から計算した **8 本の時系列派生特徴** を追加: window {5, 10, 20} の移動平均、{5, 10} のローリング標準偏差、MA(5)−MA(20) クロスオーバー、sign(MA(5))、過去 10 期間の正値率。これで latent regime が **部分的に** 履歴から観測可能になる。それでも gate は regime を完全分離できず、Standard と互角になる。
+
+**VIX** — *latent volatility regime、小さなスケール (1000 × 5)*
+
+VIX 風: 低 vol / 高 vol regime が `P(high) = 0.3 + 0.4·𝟙[sin(2π·t/200) > 0]` で交代。target は小さい正の値:
+
+```
+y | regime=0 :   0.01 + 0.002·|X0|                          +  ε
+y | regime=1 :   0.025 + 0.005·|X0| + 0.003·X1²             +  ε     ε ~ N(0, 0.005²)
+```
+
+Hamilton と同じく regime は latent だが、こちらは **TS 特徴量を追加していない** — gate に与えられる唯一の信号はノイズ支配の `X` のみ。MoE はルーティングできる根拠がなく、Standard と互角になる。
+
 ### 全 dataset で勝った設定 (普遍ルール)
 
 | パラメータ | 推奨 |

@@ -91,6 +91,44 @@ When MoE doesn't lift accuracy, it is also 1.5-1.8× slower per fold. Use MoE wh
 | Hamilton (latent regime) | 500 × 12 | 0.6990 | 0.6985 | 1.79 × |
 | VIX | 1000 × 5 | 0.0115 | 0.0115 | 1.53 × |
 
+### Datasets (synthetic generators in `examples/benchmark.py`)
+
+All three are synthetic with a known regime structure, chosen to span the spectrum from "MoE-ideal" to "latent". Fixed seed (`42`), 5-fold time-series CV.
+
+**Synthetic** — *feature-driven regime, MoE-ideal case (2000 × 5)*
+
+Five i.i.d. Gaussian features. The regime is a deterministic function of `X`, so the gate can route perfectly:
+
+```
+regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
+y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
+y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
+```
+
+The two regimes use *opposite-sign* coefficients on the same features, so a single GBDT must average them — this is exactly what MoE is built to avoid.
+
+**Hamilton** — *latent regime + engineered TS features (500 × 12)*
+
+Hamilton GNP–style: the regime is **latent** (not in the features). It evolves over time as a Bernoulli with sinusoidally-modulated probability `P(regime=1) = 0.5 + 0.3·sin(2π·t/100)`. Targets:
+
+```
+y | regime=0 :   0.8 + 0.3·X0 + 0.2·X1  +  ε
+y | regime=1 :  −0.5 + 0.1·X0 − 0.3·X2  +  ε                 ε ~ N(0, 0.3²)
+```
+
+Four base Gaussian features are augmented with **8 derived time-series features** computed from past `y`: moving averages over windows {5, 10, 20}, rolling stdev over {5, 10}, MA(5)−MA(20) crossover, sign(MA(5)), and rolling fraction of positive `y`. These make the latent regime *partially* observable from history. Even with this engineering, the gate cannot fully separate the regimes — hence the tie with Standard.
+
+**VIX** — *latent volatility regime, small magnitude (1000 × 5)*
+
+VIX-like: a low-volatility / high-volatility regime alternates with `P(high) = 0.3 + 0.4·𝟙[sin(2π·t/200) > 0]`. Targets are positive and small:
+
+```
+y | regime=0 :   0.01 + 0.002·|X0|                          +  ε
+y | regime=1 :   0.025 + 0.005·|X0| + 0.003·X1²             +  ε     ε ~ N(0, 0.005²)
+```
+
+Like Hamilton, the regime is latent but **no TS features are added** here — the only signal the gate has is the noise-dominated `X`. MoE has nothing to route on, so it ties with Standard.
+
 ### Settings that won on every dataset (universal)
 
 | Parameter | Recommended |
