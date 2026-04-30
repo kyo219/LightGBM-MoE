@@ -42,6 +42,6 @@ params = {
 3. **Soft Assignment**: Selected samples get high responsibility, non-selected get minimum responsibility.
 4. **GBDT Compatible**: All samples contribute gradients (soft selection), maintaining tree-building requirements.
 
-## Note on the 1000-trial study
+## Note on the headline study
 
-In the headline benchmark, `expert_choice` did not produce the absolute best RMSE on any of the 3 datasets — `token_choice` won everywhere by minimum. The benefit of `expert_choice` is mostly **stability** (tighter mean RMSE across trials, no catastrophic load-imbalance failures), not the peak score. Use it when stability matters more than the last 1-2% accuracy. See [benchmark.md](benchmark.md).
+In the [500-trial / 5-dataset study](benchmark.md), `expert_choice` produced the absolute best (min) RMSE on **3 of 5 datasets** — `real_hamilton`, `real_vix`, and `hmm`. `token_choice` only won on `synthetic` and `sp500`. The pattern is roughly: when the regime is latent (Hamilton/VIX/HMM) the per-expert capacity guarantee of `expert_choice` helps; when the regime is fully feature-driven (synthetic) `token_choice`'s sample-perspective routing wins. Search both with TPE rather than picking one a priori.

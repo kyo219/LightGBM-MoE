@@ -1,6 +1,6 @@
 # Optuna Search Templates
 
-The canonical Optuna setup for tuning LightGBM-MoE, derived from the [1000-trial study](benchmark.md). One template, no contradictions.
+The canonical Optuna setup for tuning LightGBM-MoE, derived from the [500-trial / 5-dataset study](benchmark.md). One template, no contradictions.
 
 ## Quick template (universal, works on any dataset)
 
@@ -15,10 +15,12 @@ def objective(trial):
         'objective': 'regression',
         'verbose': -1,
 
-        # Universal winners from the 1000-trial study (see benchmark.md)
+        # The only universal winner in the 500-trial / 5-dataset study (see benchmark.md)
         'mixture_gate_type': 'gbdt',
-        'mixture_routing_mode': 'token_choice',
-        'extra_trees': True,
+
+        # routing_mode and extra_trees are *not* universal; let TPE choose per dataset
+        'mixture_routing_mode': trial.suggest_categorical('mixture_routing_mode', ['token_choice', 'expert_choice']),
+        'extra_trees': trial.suggest_categorical('extra_trees', [True, False]),
 
         # Tree structure
         'num_leaves': trial.suggest_int('num_leaves', 8, 128),
@@ -82,22 +84,19 @@ study.optimize(objective, n_trials=300, n_jobs=6)
 
 > **Why not `n_jobs=1, num_threads=24`?** On small data (≤10k samples), one trial cannot saturate 24 cores — most threads sit idle. Running 6 trials × 4 threads in parallel keeps all cores warm and finishes 3-4× faster.
 
-## Adding Expert Choice routing to the search
+## Expert-Choice-specific extra parameters
 
-If you want TPE to choose between `token_choice` and `expert_choice`:
+The template above already lets TPE pick between `token_choice` and `expert_choice` (the 5-dataset study showed `expert_choice` actually wins on real_hamilton, real_vix, and hmm). When `expert_choice` is selected, you may also want to search its routing-specific knobs:
 
 ```python
-routing_mode = trial.suggest_categorical('mixture_routing_mode', ['token_choice', 'expert_choice'])
-params['mixture_routing_mode'] = routing_mode
-
-if routing_mode == 'expert_choice':
+if params['mixture_routing_mode'] == 'expert_choice':
     params['mixture_expert_capacity_factor'] = trial.suggest_float('mixture_expert_capacity_factor', 0.8, 1.5)
     params['mixture_expert_choice_score'] = 'gate'  # Fixed: only 'gate' prevents collapse
     params['mixture_expert_choice_boost'] = trial.suggest_float('mixture_expert_choice_boost', 5.0, 30.0)
     params['mixture_expert_choice_hard'] = trial.suggest_categorical('mixture_expert_choice_hard', [True, False])
 ```
 
-Note: in the headline 1000-trial study, `token_choice` produced the absolute best on every dataset. `expert_choice` is mainly useful for stability under load imbalance — see [advanced-routing.md](advanced-routing.md).
+See [advanced-routing.md](advanced-routing.md) for the full mechanism.
 
 ## Adding EvoMoE & temperature annealing
 

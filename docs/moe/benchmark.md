@@ -1,80 +1,91 @@
-# Benchmark — 1000-trial Standard vs MoE Study
+# Benchmark — 500-trial naive-lightgbm vs MoE Study
 
-Headline study: 1000 Optuna trials × 2 variants (Standard, MoE) × 3 datasets (Synthetic, Hamilton, VIX), 5-fold time-series CV, early stopping. Full per-trial dump in [`bench_results/study_1k.json`](../../bench_results/study_1k.json), generated report in [`bench_results/study_1k_report.md`](../../bench_results/study_1k_report.md).
+Headline study: 500 Optuna trials × 2 variants (`naive-lightgbm`, `moe`) × **5 datasets** spanning the regime-switching applicability spectrum (one MoE-ideal synthetic, three real macro/financial series, one HMM with known regime labels). 5-fold time-series CV, early stopping. Full per-trial dump in [`bench_results/study_500.json`](../../bench_results/study_500.json), generated report in [`bench_results/study_500_report.md`](../../bench_results/study_500_report.md).
 
-## Accuracy
+## Datasets
 
-| Dataset | Shape | Standard best RMSE | MoE best RMSE | Improvement |
+| Dataset | Source / Generator | Approx. shape | Regime story | Ground truth? |
 |---|---|---|---|---|
-| **Synthetic** (feature-driven regime) | 2000 × 5 | 4.96 | **3.41** | **+31 % MoE** |
-| Hamilton (latent regime + TS features) | 500 × 12 | 0.6990 | 0.6985 | tie |
-| VIX | 1000 × 5 | 0.0115 | 0.0115 | tie |
+| **synthetic** | `generate_synthetic_data` (synthetic, K=2, oracle features) | 2000 × 5 | Regime is a deterministic function of `X` — MoE-ideal | yes |
+| **real_hamilton** | FRED `GDPC1` via `generate_real_hamilton_gnp_data` | ~310 × 12 | Quarterly Real GDP, Hamilton 1989's MS-AR(4) on 100·Δlog(GDP) | no (latent) |
+| **sp500** | yfinance `^GSPC` (2010-2024) via `generate_sp500_data` | ~3760 × 13 | Daily log returns, low-vol / high-vol regimes | no (latent) |
+| **real_vix** | yfinance `^VIX` (2010-2024) via `generate_real_vix_data` | ~3760 × 13 | Daily VIX level, same vol regimes from the implied-vol angle | no (latent) |
+| **hmm** | `generate_hmm_data` (3-state Gaussian HMM, 95 % diagonal transition) | 2000 × 5 | Hidden Markov state with weak observable signal in 2 of 5 features | **yes** |
 
-**MoE only helps when the regime is observable from the features.** On Hamilton (latent regime, even after engineered TS features) and VIX, MoE matches Standard but does not beat it; the extra machinery costs compute without buying accuracy.
+Real-world fetches are cached under `examples/data_cache/` (gitignored). First run pulls from network; subsequent runs are offline.
 
-## Speed (median train time per CV fold)
+The `hmm` dataset is the only one where `diagnose_moe`'s regime-recovery metrics can be validated against ground truth — useful for catching gates that learn to *predict y* without actually *separating regimes*.
 
-| Dataset | Standard | MoE | MoE penalty |
-|---|---|---|---|
-| Synthetic | 0.231 s | 0.251 s | 1.09 × |
-| Hamilton | 0.077 s | 0.138 s | 1.79 × |
-| VIX | 0.072 s | 0.110 s | 1.53 × |
+## Headline results
 
-So on the two datasets where MoE doesn't lift accuracy, it is also 1.5-1.8× slower per fold. **Use MoE when accuracy says yes, not by default.**
+| Dataset | naive-lightgbm best RMSE | MoE best RMSE | Δ | naive median train s/fold | MoE median train s/fold | Speed × |
+|---|---|---|---|---|---|---|
+| synthetic | 4.9765 | **4.6651** | −6.3 % | 0.240 | 0.663 | 2.76 × |
+| real_hamilton | 0.9286 | **0.9128** | −1.7 % | 0.055 | 0.122 | 2.22 × |
+| sp500 | 0.0100 | 0.0100 | tie | 0.091 | 0.136 | 1.49 × |
+| real_vix | 2.8942 | **2.4574** | **−15.1 %** | 0.081 | 0.386 | 4.77 × |
+| hmm | 2.1096 | **2.1096** | −3.6 % | 0.074 | 0.126 | 1.70 × |
 
-## Recommended hyperparameters from the study
+See [`bench_results/study_500_report.md`](../../bench_results/study_500_report.md) for the full auto-generated report (median / p10 RMSE, fANOVA importance per dataset, all categorical breakdowns, slice plots).
 
-The breakdown below uses **best (min) RMSE per value** rather than mean — the per-variant Optuna run produced a long tail of catastrophic configurations whose mean would mislead.
+## Recommended hyperparameters
 
-### Universal — same value won across all 3 datasets (in MoE)
+Below uses **best (min) RMSE per value** rather than mean — Optuna runs always produce a long tail of catastrophic configurations whose mean is misleading. fANOVA importance gives the per-parameter contribution to RMSE variance.
+
+### Universal — produced the best (min) RMSE on every dataset
 
 | Parameter | Recommended | Notes |
 |---|---|---|
-| `mixture_num_experts` | **3-4** | Q4 quartile mean wins on all 3 datasets |
-| `mixture_gate_type` | **`gbdt`** | Best minimum RMSE on every dataset; `leaf_reuse` and `none` never produced the absolute best |
-| `mixture_routing_mode` | **`token_choice`** | Best minimum RMSE on every dataset |
-| `extra_trees` | **`true`** | Best minimum RMSE on every dataset (also Standard's choice on Hamilton/VIX) |
-| `mixture_diversity_lambda` | **search 0.0–0.5** | Consistently top-3 in fANOVA importance for MoE (no single best value, but matters) |
+| `mixture_gate_type` | **`gbdt`** | The only categorical setting whose best value is the same on all 5 datasets. `leaf_reuse` and `none` never produced the absolute best. |
+| `mixture_diversity_lambda` | **search 0.0–0.5** | Top-5 fANOVA contributor on every MoE run; no single best value, but searching it consistently matters. |
+| `mixture_num_experts` | **3-4** (weak) | Q4 quartile mean is best on most datasets, but the margin is small — within noise on sp500. |
 
-### Dataset-dependent — search these per problem
+### Dataset-dependent — winning value varies, search per problem
 
-| Parameter | Synthetic | Hamilton | VIX |
-|---|---|---|---|
-| `mixture_e_step_mode` | `em` | `gate_only` | `gate_only` |
-| `mixture_init` | `gmm` | `random` | `gmm` |
-| `mixture_r_smoothing` | `markov` | `markov` | `ema` |
-| `mixture_hard_m_step` | `true` | `true` | `false` |
-| `learning_rate` (best Q) | 0.20-0.24 | 0.10-0.13 | 0.26+ |
+| Parameter | synthetic | real_hamilton | sp500 | real_vix | hmm |
+|---|---|---|---|---|---|
+| `mixture_routing_mode` | `token_choice` | `expert_choice` | `token_choice` | `expert_choice` | `expert_choice` |
+| `mixture_e_step_mode` | `gate_only`* | `loss_only` | `gate_only` | `gate_only` | `gate_only` |
+| `mixture_init` | `tree_hierarchical`* | `gmm` | `random` | `random` | `gmm` |
+| `mixture_r_smoothing` | `none`* | `markov` | `markov` | `ema` | `markov` |
+| `mixture_hard_m_step` | `False` | `True` | `False` | `True` | `True` |
+| `extra_trees` | `False` | `True` | `True` | `False` | `True` |
 
-### fANOVA importance (top contributors)
+\* On synthetic, Optuna's TPE happened to find the absolute best inside parameter combinations whose categorical-mean tail was dominated by failures. The "*statistically* best mean" categorical winners on synthetic are different — `mixture_e_step_mode='loss_only'`, `mixture_init='random'`, `mixture_r_smoothing='ema'` (all p<0.01). Treat the synthetic absolute-min row as "what worked once," not as a recommendation. The non-synthetic winners are robust because every value was sampled enough times for the min to be meaningful.
 
-For **Standard GBDT**, `min_data_in_leaf` dominates (importance 0.48-0.80 across the 3 datasets), with `learning_rate` distantly second. **A well-tuned `min_data_in_leaf` carries most of the win.**
+### fANOVA importance: top contributors per (dataset, variant)
 
-For **MoE**, the picture is more spread:
+| Dataset | Variant | #1 | #2 | #3 |
+|---|---|---|---|---|
+| synthetic | naive | `min_data_in_leaf` | `learning_rate` | `extra_trees` |
+| synthetic | moe | `feature_fraction` (0.66) | `mixture_hard_m_step` (0.16) | `mixture_diversity_lambda` (0.04) |
+| real_hamilton | naive | `min_data_in_leaf` (0.80) | `learning_rate` | `feature_fraction` |
+| real_hamilton | moe | (see report) | | |
+| sp500 | naive | (see report) | | |
+| sp500 | moe | (see report) | | |
+| real_vix | naive | `learning_rate` (0.58) | `min_data_in_leaf` (0.37) | `bagging_fraction` |
+| real_vix | moe | `bagging_fraction` (0.25) | `mixture_init` (0.19) | `min_data_in_leaf` (0.16) |
+| hmm | naive | `learning_rate` (0.42) | `extra_trees` (0.41) | `min_data_in_leaf` (0.16) |
+| hmm | moe | `lambda_l1` (0.55) | `mixture_warmup_iters` (0.07) | `mixture_hard_m_step` (0.07) |
 
-| Dataset | Top contributor | Second | Third |
-|---|---|---|---|
-| Synthetic | `min_data_in_leaf` (0.87) | `mixture_gate_type` (0.034) | `mixture_diversity_lambda` (0.017) |
-| Hamilton | `learning_rate` (0.53) | `mixture_diversity_lambda` (0.16) | `bagging_fraction` (0.077) |
-| VIX | `lambda_l1` (0.44) | `mixture_diversity_lambda` (0.20) | `mixture_gate_type` (0.088) |
-
-Across all three MoE runs, `mixture_diversity_lambda` is in the top 3 — **searching it is critical, the value is not.**
+For the canonical Optuna template that bakes in `mixture_gate_type='gbdt'` and searches the rest, see [optuna-recipes.md](optuna-recipes.md).
 
 ## Reproduction
 
 ```bash
-# Full study (~17 min on 12-core / 24-thread machine, n_jobs=6)
-python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+# Full study (~25-35 min on 12-core / 24-thread machine, n_jobs=6)
+python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 
-# Quick smoke check (~30 seconds)
-python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+# Smoke test (~1 min, all 5 datasets)
+python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
 
 # Subset of datasets
-python examples/comparative_study.py --trials 1000 \
-    --datasets synthetic,hamilton --out bench_results/two_ds.json
+python examples/comparative_study.py --trials 500 \
+    --datasets synthetic,hmm --out bench_results/study_two.json
 ```
 
 The script writes:
-- `bench_results/study_1k.json` — full per-trial dump for re-analysis
-- `bench_results/study_1k_report.md` — analysis above, automatically generated
-- `slice_<dataset>_<variant>.png` — Optuna slice plots (each parameter's value vs RMSE)
+
+- `bench_results/study_500.json` — full per-trial dump (every trial's RMSE + sampled params, for re-analysis or fANOVA reruns)
+- `bench_results/study_500_report.md` — auto-generated analysis (headline table + per-dataset fANOVA + categorical / quartile breakdowns + slice plot links)
+- `bench_results/slice_<dataset>_<variant>.png` — Optuna slice plots showing each parameter's value vs RMSE for every (dataset, variant) pair

@@ -389,6 +389,182 @@ DATASETS = {
 
 
 # =============================================================================
+# Real-world & HMM datasets (added for the 5-dataset benchmark)
+# =============================================================================
+import os as _os
+import urllib.request as _urlreq
+from pathlib import Path as _Path
+
+_CACHE_DIR = _Path(__file__).parent / "data_cache"
+_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _add_ts_features(y_arr: np.ndarray, windows_ma=(5, 10, 20), windows_vol=(5, 10)) -> np.ndarray:
+    """Build standard time-series features from a 1D series y_arr.
+
+    Returns an (N, F) feature matrix. All features are causal (use only past values).
+    """
+    n = len(y_arr)
+    feats = []
+    for w in windows_ma:
+        ma = np.zeros(n)
+        for i in range(1, n):
+            start = max(0, i - w)
+            ma[i] = np.mean(y_arr[start:i])
+        feats.append(ma)
+    for w in windows_vol:
+        vol = np.zeros(n)
+        for i in range(2, n):
+            start = max(0, i - w)
+            vol[i] = np.std(y_arr[start:i])
+        feats.append(vol)
+    feats.append(feats[0] - feats[len(windows_ma) - 1])  # MA(short) - MA(long)
+    feats.append(np.sign(feats[0]))
+    frac_pos = np.zeros(n)
+    for i in range(1, n):
+        start = max(0, i - 10)
+        frac_pos[i] = np.mean(y_arr[start:i] > 0)
+    feats.append(frac_pos)
+    return np.column_stack(feats)
+
+
+def generate_real_hamilton_gnp_data(seed: int = 42, fred_series: str = "GDPC1"):
+    """Real US Real GDP from FRED (Hamilton 1989's MS-AR(4) setup, modern data).
+
+    - Quarterly Real GDP, fetched from FRED CSV endpoint (no auth)
+    - Target: 100 * log-difference (quarterly growth rate, Hamilton's transform)
+    - Features: 4 lags of growth rate (Hamilton MS-AR(4)), plus engineered MA/vol features
+    """
+    cache = _CACHE_DIR / f"fred_{fred_series}.csv"
+    if not cache.exists():
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={fred_series}"
+        _urlreq.urlretrieve(url, cache)
+
+    import pandas as pd
+    df = pd.read_csv(cache)
+    df.columns = [c.strip().lower() for c in df.columns]
+    val_col = [c for c in df.columns if c != "observation_date" and c != "date"][0]
+    df = df.rename(columns={val_col: "value"})
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna().reset_index(drop=True)
+
+    # Hamilton-style growth rate: 100 * Δlog(GDP)
+    log_g = np.log(df["value"].to_numpy())
+    growth = 100.0 * np.diff(log_g)
+
+    # Build lag features (lags 1..4 of growth rate) and TS features
+    lag_max = 4
+    n = len(growth) - lag_max
+    lags = np.column_stack([growth[lag_max - k - 1: lag_max - k - 1 + n] for k in range(lag_max)])
+    ts_feats = _add_ts_features(growth)
+    ts_feats = ts_feats[lag_max:]
+    X = np.column_stack([lags, ts_feats])
+    y = growth[lag_max:]
+
+    return X, y, None  # No ground-truth regime label
+
+
+def _yf_download_close(symbol: str, start: str, end: str, cache_name: str) -> "pd.Series":
+    """Cached yfinance close-price download. Returns a pandas Series of daily close prices."""
+    import pandas as pd
+    cache = _CACHE_DIR / f"{cache_name}.csv"
+    if cache.exists():
+        s = pd.read_csv(cache, index_col=0, parse_dates=True).iloc[:, 0]
+        return s.dropna()
+    import yfinance as yf
+    df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
+    if df.empty:
+        raise RuntimeError(f"yfinance returned empty data for {symbol} ({start}..{end})")
+    close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = close.dropna()
+    close.to_csv(cache, header=[symbol])
+    return close
+
+
+def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
+    """S&P 500 daily log returns from Yahoo Finance.
+
+    - Symbol: ^GSPC
+    - Target: next-day log return (causal predictive setup)
+    - Features: lagged returns (1, 2, 3, 5, 10) + MA/vol/regime-proxy features
+    """
+    close = _yf_download_close("^GSPC", start=start, end=end, cache_name="sp500_GSPC")
+    px = close.to_numpy(dtype=np.float64)
+    log_ret = np.diff(np.log(px))
+
+    lag_set = (1, 2, 3, 5, 10)
+    lag_max = max(lag_set)
+    n = len(log_ret) - lag_max - 1  # -1 to leave room for next-day target
+    if n <= 0:
+        raise RuntimeError("S&P series too short after lag construction")
+    lags = np.column_stack([log_ret[lag_max - k: lag_max - k + n] for k in lag_set])
+    ts_feats = _add_ts_features(log_ret)[lag_max: lag_max + n]
+    X = np.column_stack([lags, ts_feats])
+    y = log_ret[lag_max + 1: lag_max + 1 + n]  # next-day return
+    return X, y, None
+
+
+def generate_real_vix_data(seed: int = 42, start: str = "2010-01-01", end: str = "2024-12-31"):
+    """Real CBOE VIX daily close from Yahoo Finance.
+
+    - Symbol: ^VIX
+    - Target: next-day VIX level
+    - Features: lagged VIX (1, 2, 3, 5, 10) + MA/vol features
+    """
+    close = _yf_download_close("^VIX", start=start, end=end, cache_name="vix_VIX")
+    vix = close.to_numpy(dtype=np.float64)
+
+    lag_set = (1, 2, 3, 5, 10)
+    lag_max = max(lag_set)
+    n = len(vix) - lag_max - 1
+    if n <= 0:
+        raise RuntimeError("VIX series too short after lag construction")
+    lags = np.column_stack([vix[lag_max - k: lag_max - k + n] for k in lag_set])
+    ts_feats = _add_ts_features(vix - vix.mean())[lag_max: lag_max + n]
+    X = np.column_stack([lags, ts_feats])
+    y = vix[lag_max + 1: lag_max + 1 + n]
+    return X, y, None
+
+
+def generate_hmm_data(n_samples: int = 2000, n_states: int = 3, n_features: int = 5, seed: int = 42):
+    """K-state Gaussian-emission HMM with partially observable regime.
+
+    - Hidden state evolves as a Markov chain with persistent diagonal-heavy transition matrix.
+    - Each state emits y from N(mu_k, sigma_k^2). Mus are well separated, sigmas vary.
+    - X has n_features Gaussian columns; the FIRST 2 columns are weakly correlated with the
+      hidden state (so the gate has *some* signal, but not a free lunch).
+    - Returns ground-truth regime labels for evaluation.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Persistent transition: diagonal-heavy
+    T = np.full((n_states, n_states), 0.05 / max(1, n_states - 1))
+    np.fill_diagonal(T, 0.95)
+    T = T / T.sum(axis=1, keepdims=True)
+
+    # Emission means and stdevs (well-separated)
+    mus = np.linspace(-3.0, 3.0, n_states)
+    sigmas = np.linspace(0.4, 1.0, n_states)
+
+    state = rng.integers(0, n_states)
+    states = np.zeros(n_samples, dtype=int)
+    y = np.zeros(n_samples)
+    for t in range(n_samples):
+        states[t] = state
+        y[t] = rng.normal(mus[state], sigmas[state])
+        state = rng.choice(n_states, p=T[state])
+
+    # Features: first 2 columns weakly carry state info, rest are pure noise
+    X = rng.standard_normal((n_samples, n_features))
+    state_signal = (states - states.mean()) / max(1.0, states.std())
+    X[:, 0] += 0.6 * state_signal  # weak observable
+    X[:, 1] += 0.4 * state_signal  # weaker observable
+    return X, y, states
+
+
+# =============================================================================
 # Evaluation
 # =============================================================================
 def evaluate_cv(
