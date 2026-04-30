@@ -1319,8 +1319,9 @@ class FeatureHistogram {
       const uint32_t int_best_sum_right_hessian = static_cast<uint32_t>(best_sum_right_gradient_and_hessian & 0x00000000ffffffff);
       const double best_sum_right_gradient = static_cast<double>(int_best_sum_right_gradient) * grad_scale;
       const double best_sum_right_hessian = static_cast<double>(int_best_sum_right_hessian) * hess_scale;
-      const data_size_t best_left_count = Common::RoundInt(static_cast<double>(int_best_sum_left_hessian) * cnt_factor);
-      const data_size_t best_right_count = Common::RoundInt(static_cast<double>(int_best_sum_right_hessian) * cnt_factor);
+      // Clamp to >=1: see note in feature_histogram.cpp at the equivalent quantized-grad emit site.
+      const data_size_t best_left_count = std::max<data_size_t>(1, Common::RoundInt(static_cast<double>(int_best_sum_left_hessian) * cnt_factor));
+      const data_size_t best_right_count = std::max<data_size_t>(1, Common::RoundInt(static_cast<double>(int_best_sum_right_hessian) * cnt_factor));
       // update split information
       output->threshold = best_threshold;
       output->left_output =
