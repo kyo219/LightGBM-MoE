@@ -47,7 +47,7 @@ import lightgbm_moe as lgb
 params = {
     'boosting': 'mixture',           # Enable MoE mode
     'mixture_num_experts': 3,        # Number of experts
-    'mixture_gate_type': 'gbdt',     # Universal winner in the 1000-trial study
+    'mixture_gate_type': 'gbdt',     # Universal winner in the 500-trial / 5-dataset study
     'mixture_routing_mode': 'token_choice',
     'objective': 'regression',
     'metric': 'rmse',
@@ -73,80 +73,88 @@ expert_preds = model.predict_expert_pred(X_test)    # Expert predictions (N, K)
 
 ## When to use MoE
 
-**MoE wins when the regime is observable from the features** — and only then. The 1000-trial study below makes this concrete:
+The 5-dataset, 500-trial study below shows MoE provides **modest accuracy improvements on 4 of 5 datasets** (only `sp500` ties). The biggest single win is **`vix` (−15.1 % RMSE)**, which is also the place where the regime structure (low-vol / high-vol periods) is most pronounced. The catch: MoE pays a **1.5–4.8 × compute penalty per CV fold** for these gains. So the rule is "use MoE when accuracy says yes *and* the extra wall time is acceptable" — it is no longer a strict subset of "regime must be observable from features."
 
-- **Synthetic** (regime determinable from X): MoE 3.41 vs Standard 4.96 RMSE → **+31% improvement**
-- **Hamilton** (latent regime + engineered TS features): MoE 0.6985 vs Standard 0.6990 → tie
-- **VIX**: MoE 0.0115 vs Standard 0.0115 → tie
+## Benchmark — 500-trial study (naive-lightgbm vs MoE, 5 datasets)
 
-When MoE doesn't lift accuracy, it is also 1.5-1.8× slower per fold. Use MoE when accuracy says yes, not by default.
+5-fold time-series CV, 500 Optuna trials per (variant × dataset), 5 datasets spanning synthetic-ideal → real macro/financial → controlled-latent. Full report: [`bench_results/study_500_report.md`](bench_results/study_500_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
 
-## Benchmark — 1000-trial study (Standard vs MoE)
+| Dataset | Shape | naive-lightgbm best | MoE best | Δ RMSE | Speed (MoE / naive, median train s/fold) |
+|---|---|---|---|---|---|
+| `synthetic` | 2000 × 5 | 4.9765 | **4.6651** | −6.3 % | 0.663 / 0.240 = **2.76 ×** |
+| `fred_gdp` | 311 × 12 | 0.9286 | **0.9128** | −1.7 % | 0.122 / 0.055 = **2.22 ×** |
+| `sp500` | 3761 × 13 | 0.0100 | 0.0100 | tie | 0.136 / 0.091 = **1.49 ×** |
+| `vix` | 3762 × 13 | 2.8942 | **2.4574** | **−15.1 %** | 0.386 / 0.081 = **4.77 ×** |
+| `hmm` | 2000 × 5 | 2.1893 | **2.1096** | −3.6 % | 0.126 / 0.074 = **1.70 ×** |
 
-5-fold time-series CV, 1000 Optuna trials per (variant × dataset). Full report: [`bench_results/study_1k_report.md`](bench_results/study_1k_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
+### Datasets
 
-| Dataset | Shape | Standard best | MoE best | MoE penalty (speed) |
-|---|---|---|---|---|
-| Synthetic (feature-driven regime) | 2000 × 5 | 4.96 | **3.41** | 1.09 × |
-| Hamilton (latent regime) | 500 × 12 | 0.6990 | 0.6985 | 1.79 × |
-| VIX | 1000 × 5 | 0.0115 | 0.0115 | 1.53 × |
+Five datasets spanning the regime-switching applicability spectrum: one MoE-ideal synthetic, three real-world series (the canonical references in the regime-switching literature), and one HMM with known ground-truth labels for measuring regime recovery.
 
-### Datasets (synthetic generators in `examples/benchmark.py`)
+#### `synthetic` — feature-driven regime, MoE-ideal case (2000 × 5)
 
-All three are synthetic with a known regime structure, chosen to span the spectrum from "MoE-ideal" to "latent". Fixed seed (`42`), 5-fold time-series CV.
+- **Source**: internal generator in this repo (`generate_synthetic_data` in `examples/benchmark.py`).
+- **Construction**: five i.i.d. Gaussian features; the regime is a deterministic function of `X`, so the gate can route perfectly:
 
-**Synthetic** — *feature-driven regime, MoE-ideal case (2000 × 5)*
+  ```
+  regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
+  y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
+  y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
+  ```
 
-Five i.i.d. Gaussian features. The regime is a deterministic function of `X`, so the gate can route perfectly:
+  The two regimes use *opposite-sign* coefficients on the same features — a single GBDT is forced to average them, which is exactly the failure mode MoE is built to avoid.
 
-```
-regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
-y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
-y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
-```
+#### `fred_gdp` — US Real GDP, Hamilton-style MS-AR(4) (~310 × 12)
 
-The two regimes use *opposite-sign* coefficients on the same features, so a single GBDT must average them — this is exactly what MoE is built to avoid.
+- **Source**: FRED series [`GDPC1`](https://fred.stlouisfed.org/series/GDPC1) — Real Gross Domestic Product, Chained 2017 Dollars, Quarterly, Seasonally Adjusted Annual Rate (BEA via FRED, no auth, CSV endpoint).
+- **Methodology cite**: Hamilton, J. D. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* **Econometrica** 57(2), 357-384. <https://www.jstor.org/stable/1912559>.
+- **Construction**: target is the quarterly growth rate `100·Δlog(GDP)`; features are 4 lags of growth (Hamilton's MS-AR(4)) plus engineered MA / volatility / regime-proxy features. The regime (expansion / recession) is genuinely latent — there is no oracle column. Generator: `generate_fred_gdp_data`.
 
-**Hamilton** — *latent regime + engineered TS features (500 × 12)*
+#### `sp500` — S&P 500 daily log returns (~3760 × 13)
 
-Hamilton GNP–style: the regime is **latent** (not in the features). It evolves over time as a Bernoulli with sinusoidally-modulated probability `P(regime=1) = 0.5 + 0.3·sin(2π·t/100)`. Targets:
+- **Source**: Yahoo Finance, symbol [`^GSPC`](https://finance.yahoo.com/quote/%5EGSPC/history) (default range `2010-01-01` to `2024-12-31`).
+- **Index methodology**: [S&P Dow Jones Indices, S&P 500](https://www.spglobal.com/spdji/en/indices/equity/sp-500/).
+- **Construction**: daily Close converted to log returns; target is next-day log return (a deliberately hard predictive setup). Features: lagged returns at lags {1, 2, 3, 5, 10} plus MA / rolling-volatility / MA-crossover features. Regime is latent (low-vol vs high-vol periods). Generator: `generate_sp500_data`.
 
-```
-y | regime=0 :   0.8 + 0.3·X0 + 0.2·X1  +  ε
-y | regime=1 :  −0.5 + 0.1·X0 − 0.3·X2  +  ε                 ε ~ N(0, 0.3²)
-```
+#### `vix` — CBOE Volatility Index, daily level (~3760 × 13)
 
-Four base Gaussian features are augmented with **8 derived time-series features** computed from past `y`: moving averages over windows {5, 10, 20}, rolling stdev over {5, 10}, MA(5)−MA(20) crossover, sign(MA(5)), and rolling fraction of positive `y`. These make the latent regime *partially* observable from history. Even with this engineering, the gate cannot fully separate the regimes — hence the tie with Standard.
+- **Source**: Yahoo Finance, symbol [`^VIX`](https://finance.yahoo.com/quote/%5EVIX/history) (same date range as `sp500`).
+- **Index methodology**: [CBOE VIX](https://www.cboe.com/tradable_products/vix/).
+- **Construction**: target is next-day VIX level. Features: lagged VIX at lags {1, 2, 3, 5, 10} plus MA / rolling-volatility features. Same latent low-vol / high-vol regime structure as `sp500`, viewed through the implied-vol lens. Generator: `generate_vix_data`.
 
-**VIX** — *latent volatility regime, small magnitude (1000 × 5)*
+#### `hmm` — 3-state Gaussian HMM with known regime labels (2000 × 5)
 
-VIX-like: a low-volatility / high-volatility regime alternates with `P(high) = 0.3 + 0.4·𝟙[sin(2π·t/200) > 0]`. Targets are positive and small:
+- **Source**: internal generator in this repo (`generate_hmm_data`).
+- **Methodology cite**: Rabiner, L. R. (1989). *A Tutorial on Hidden Markov Models and Selected Applications in Speech Recognition.* **Proceedings of the IEEE** 77(2), 257-286. <https://www.cs.ubc.ca/~murphyk/Bayes/rabiner.pdf>.
+- **Construction**: hidden state evolves as a 3-state Markov chain with persistent (95 % diagonal) transitions; emissions are Gaussian with well-separated means `{−3, 0, +3}` and varying scales `{0.4, 0.7, 1.0}`. Two of the five feature columns carry a weak linear signal of the hidden state (so the gate has *some* observable hint, not a free lunch); the remaining three columns are pure noise. **Returns the ground-truth regime labels** — usable for measuring regime recovery, not just RMSE.
 
-```
-y | regime=0 :   0.01 + 0.002·|X0|                          +  ε
-y | regime=1 :   0.025 + 0.005·|X0| + 0.003·X1²             +  ε     ε ~ N(0, 0.005²)
-```
+### Caching
 
-Like Hamilton, the regime is latent but **no TS features are added** here — the only signal the gate has is the noise-dominated `X`. MoE has nothing to route on, so it ties with Standard.
+Real-world fetches (FRED, yfinance) are cached under `examples/data_cache/` (gitignored). First run pulls from the network; subsequent runs are offline.
 
-### Settings that won on every dataset (universal)
+### Settings that won on every dataset
 
-| Parameter | Recommended |
-|---|---|
-| `mixture_num_experts` | 3-4 |
-| `mixture_gate_type` | `gbdt` |
-| `mixture_routing_mode` | `token_choice` |
-| `extra_trees` | `true` |
-| `mixture_diversity_lambda` | search 0.0–0.5 (top-3 fANOVA importance, no single best value) |
+The only categorical setting that produced the absolute best (min) RMSE on all 5 datasets is **`mixture_gate_type='gbdt'`**. For everything else, the optimal value depends on the dataset — full per-dataset table in [docs/moe/benchmark.md](docs/moe/benchmark.md).
 
-Dataset-dependent knobs (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `learning_rate`) need per-problem search — see the benchmark doc for the table.
+| Parameter | Universal? | Notes |
+|---|---|---|
+| `mixture_gate_type` | **`gbdt`** | Best minimum RMSE on every dataset; `leaf_reuse` and `none` never produced the absolute best |
+| `mixture_routing_mode` | **No** | `token_choice` won on synthetic; `expert_choice` won on fred_gdp, vix, hmm. Search both. |
+| `mixture_num_experts` | weakly 3-4 | Q4 quartile mean is best on most datasets but margin is small |
+| `mixture_diversity_lambda` | search 0.0–0.5 | Consistently top-5 in fANOVA importance for MoE; no single best value, but searching it matters |
+
+Dataset-dependent knobs (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `extra_trees`, `learning_rate`) need per-problem search — see [docs/moe/benchmark.md](docs/moe/benchmark.md) for the full breakdown table.
 
 ```bash
-# Reproduce the headline study (~17 min on 12-core / 24-thread)
-python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+# Reproduce the headline study (~25-35 min on 12-core / 24-thread)
+python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 
-# Smoke test (~30 s)
-python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+# Smoke test (~1 min, all 5 datasets)
+python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
+
+# Subset of datasets
+python examples/comparative_study.py --trials 500 \
+    --datasets synthetic,hmm --out bench_results/study_two.json
 ```
 
 ## Documentation
@@ -155,7 +163,7 @@ python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
 |---|---|
 | Full parameter reference (MoE core, Gate, Smoothing, Prediction APIs) | [docs/moe/parameters.md](docs/moe/parameters.md) |
 | Optuna search templates | [docs/moe/optuna-recipes.md](docs/moe/optuna-recipes.md) |
-| 1000-trial benchmark methodology & per-dataset recommendations | [docs/moe/benchmark.md](docs/moe/benchmark.md) |
+| 500-trial / 5-dataset benchmark methodology & per-dataset recommendations | [docs/moe/benchmark.md](docs/moe/benchmark.md) |
 | Per-expert hyperparameters & role-based recipe | [docs/moe/per-expert-hp.md](docs/moe/per-expert-hp.md) |
 | Expert Choice routing | [docs/moe/advanced-routing.md](docs/moe/advanced-routing.md) |
 | Progressive training (EvoMoE) & gate temperature annealing | [docs/moe/advanced-progressive.md](docs/moe/advanced-progressive.md) |

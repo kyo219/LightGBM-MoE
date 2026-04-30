@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 """
-comparative_study.py — Standard GBDT vs MoE 大規模比較 + ハイパラ重要度分析
+comparative_study.py — naive-lightgbm vs MoE 大規模比較 + ハイパラ重要度分析
 
 `benchmark.py` の data generators (Synthetic / Hamilton / VIX) と独自の CV を再利用しつつ、
 Standard GBDT と MoE (token + expert choice 横断) で Optuna を回し、
@@ -45,7 +45,9 @@ import lightgbm_moe as lgb
 sys.path.insert(0, os.path.dirname(__file__))
 from benchmark import (  # noqa: E402
     BenchmarkConfig,
-    generate_hamilton_gnp_data,
+    generate_fred_gdp_data,
+    generate_hmm_data,
+    generate_sp500_data,
     generate_synthetic_data,
     generate_vix_data,
 )
@@ -104,7 +106,7 @@ def evaluate_cv_timed(X, y, params, n_splits: int, num_boost_round: int):
 # =============================================================================
 # Optuna objectives
 # =============================================================================
-def make_standard_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
+def make_naive_lightgbm_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
     def objective(trial):
         params = {
             "objective": "regression",
@@ -124,7 +126,7 @@ def make_standard_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
         }
         rmse, train_s = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "standard", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
+        trial_log.append({"variant": "naive-lightgbm", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
         return rmse
 
     return objective
@@ -347,7 +349,7 @@ def aggregate_variant(name: str, trials: list[dict], study) -> dict:
 # =============================================================================
 def render_markdown(results: dict, out_path: str, slice_paths: dict):
     lines = []
-    lines.append("# Comparative Study Report — Standard GBDT vs MoE\n")
+    lines.append("# Comparative Study Report — naive-lightgbm vs MoE\n")
     cfg = results.get("config", {})
     lines.append(f"- **Trials per (variant × dataset)**: {cfg.get('trials')}\n")
     lines.append(f"- **Datasets**: {cfg.get('datasets')}\n")
@@ -359,9 +361,9 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
     lines.append("| Dataset | Variant | best RMSE | median RMSE | median train s/fold | wall s |")
     lines.append("|---|---|---|---|---|---|")
     for ds_name, ds in results.items():
-        if not isinstance(ds, dict) or "standard" not in ds:
+        if not isinstance(ds, dict) or "naive-lightgbm" not in ds:
             continue
-        for v in ("standard", "moe"):
+        for v in ("naive-lightgbm", "moe"):
             r = ds.get(v, {})
             lines.append(
                 f"| {ds_name} | {v} | {r.get('rmse_best', float('nan')):.4f} "
@@ -372,11 +374,11 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
 
     # Per-dataset detail
     for ds_name, ds in results.items():
-        if not isinstance(ds, dict) or "standard" not in ds:
+        if not isinstance(ds, dict) or "naive-lightgbm" not in ds:
             continue
         lines.append(f"\n---\n\n## {ds_name}  (X={ds.get('X_shape')})\n")
 
-        for v in ("standard", "moe"):
+        for v in ("naive-lightgbm", "moe"):
             r = ds.get(v, {})
             if not r:
                 continue
@@ -484,7 +486,7 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
     slice_paths: dict = {}
 
     for variant, make_obj in [
-        ("standard", lambda log: make_standard_objective(X, y, cfg, log)),
+        ("naive-lightgbm", lambda log: make_naive_lightgbm_objective(X, y, cfg, log)),
         ("moe", lambda log: make_moe_objective(X, y, cfg, log)),
     ]:
         print(f"\n  → {variant} ({n_trials} trials)...")
@@ -512,19 +514,36 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
     return out, slice_paths
 
 
+DATASET_GENERATORS = {
+    "synthetic": lambda seed: generate_synthetic_data(seed=seed),
+    "fred_gdp": lambda seed: generate_fred_gdp_data(seed=seed),
+    "sp500": lambda seed: generate_sp500_data(seed=seed),
+    "vix": lambda seed: generate_vix_data(seed=seed),
+    "hmm": lambda seed: generate_hmm_data(seed=seed),
+}
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--trials", type=int, default=50)
+    p.add_argument("--trials", type=int, default=500)
     p.add_argument("--n-jobs", type=int, default=6)
     p.add_argument("--rounds", type=int, default=100)
     p.add_argument("--splits", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--datasets", type=str, default="synthetic,hamilton,vix")
+    p.add_argument(
+        "--datasets",
+        type=str,
+        default="synthetic,fred_gdp,sp500,vix,hmm",
+        help=f"Comma-separated subset of: {','.join(DATASET_GENERATORS.keys())}",
+    )
     p.add_argument("--out", type=str, required=True)
     args = p.parse_args()
 
     cfg = BenchmarkConfig(n_trials=args.trials, seed=args.seed, n_splits=args.splits, num_boost_round=args.rounds)
     selected = [s.strip() for s in args.datasets.split(",")]
+    unknown = [s for s in selected if s not in DATASET_GENERATORS]
+    if unknown:
+        raise SystemExit(f"Unknown dataset(s): {unknown}. Known: {list(DATASET_GENERATORS)}")
 
     out_dir = os.path.dirname(args.out) or "."
     os.makedirs(out_dir, exist_ok=True)
@@ -534,20 +553,10 @@ def main():
                           "splits": args.splits, "seed": args.seed, "datasets": selected}}
     all_slice_paths: dict = {}
 
-    if "synthetic" in selected:
-        X, y, _ = generate_synthetic_data(seed=cfg.seed)
-        ds_out, sp = run_study("synthetic", X, y, args.trials, args.n_jobs, cfg, slice_dir)
-        results["synthetic"] = ds_out
-        all_slice_paths.update(sp)
-    if "hamilton" in selected:
-        X, y, _ = generate_hamilton_gnp_data(seed=cfg.seed)
-        ds_out, sp = run_study("hamilton", X, y, args.trials, args.n_jobs, cfg, slice_dir)
-        results["hamilton"] = ds_out
-        all_slice_paths.update(sp)
-    if "vix" in selected:
-        X, y, _ = generate_vix_data(seed=cfg.seed)
-        ds_out, sp = run_study("vix", X, y, args.trials, args.n_jobs, cfg, slice_dir)
-        results["vix"] = ds_out
+    for ds_name in selected:
+        X, y, _ = DATASET_GENERATORS[ds_name](cfg.seed)
+        ds_out, sp = run_study(ds_name, X, y, args.trials, args.n_jobs, cfg, slice_dir)
+        results[ds_name] = ds_out
         all_slice_paths.update(sp)
 
     with open(args.out, "w") as f:

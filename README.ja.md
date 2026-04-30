@@ -47,7 +47,7 @@ import lightgbm_moe as lgb
 params = {
     'boosting': 'mixture',           # MoE モードを有効化
     'mixture_num_experts': 3,        # Expert 数
-    'mixture_gate_type': 'gbdt',     # 1000-trial スタディで全データセットで勝者
+    'mixture_gate_type': 'gbdt',     # 500-trial / 5-dataset スタディで全データセットで勝者
     'mixture_routing_mode': 'token_choice',
     'objective': 'regression',
     'metric': 'rmse',
@@ -73,80 +73,88 @@ expert_preds = model.predict_expert_pred(X_test)    # 各 expert の予測 (N, K
 
 ## MoE が効く条件
 
-**MoE は regime が特徴量から観測可能なときのみ効く** — その逆ではない。1000-trial スタディの結果が裏付け:
+下記の 5 dataset / 500-trial スタディでは、MoE は **5 dataset 中 4 つで精度を改善** (`sp500` のみ tie)。最大の改善は **`vix` (−15.1 % RMSE)** — ここは regime 構造 (低 vol / 高 vol 期間) が一番くっきりしている dataset。ただし MoE は **CV fold あたり 1.5-4.8 倍の計算コスト** を払う。なので「精度向上が要る *かつ* wall time の余裕がある場面で使う」が今のルール — 「regime が特徴量から観測可能でないとダメ」という以前の主張ほど狭くはない。
 
-- **Synthetic** (regime が X から決定可能): MoE 3.41 vs Standard 4.96 RMSE → **+31% 改善**
-- **Hamilton** (latent regime + 時系列特徴量): MoE 0.6985 vs Standard 0.6990 → ほぼ互角
-- **VIX**: MoE 0.0115 vs Standard 0.0115 → 互角
+## ベンチマーク — 500-trial スタディ (naive-lightgbm vs MoE、5 dataset)
 
-精度が改善しないデータセットでは、MoE は fold あたり 1.5-1.8 倍遅い。**精度が「Yes」と言うときだけ MoE を使う、デフォルトで使うものではない。**
+5-fold time-series CV、500 Optuna trials × (variant × dataset)、5 dataset (synthetic 理想 → 実マクロ/金融 → controlled-latent)。完全レポート: [`bench_results/study_500_report.md`](bench_results/study_500_report.md)、方法論と dataset 別推奨: [docs/moe/benchmark.md](docs/moe/benchmark.md)。
 
-## ベンチマーク — 1000-trial スタディ (Standard vs MoE)
+| Dataset | Shape | naive-lightgbm 最良 | MoE 最良 | Δ RMSE | 速度 (MoE / naive、fold あたり中央値秒) |
+|---|---|---|---|---|---|
+| `synthetic` | 2000 × 5 | 4.9765 | **4.6651** | −6.3 % | 0.663 / 0.240 = **2.76 ×** |
+| `fred_gdp` | 311 × 12 | 0.9286 | **0.9128** | −1.7 % | 0.122 / 0.055 = **2.22 ×** |
+| `sp500` | 3761 × 13 | 0.0100 | 0.0100 | tie | 0.136 / 0.091 = **1.49 ×** |
+| `vix` | 3762 × 13 | 2.8942 | **2.4574** | **−15.1 %** | 0.386 / 0.081 = **4.77 ×** |
+| `hmm` | 2000 × 5 | 2.1893 | **2.1096** | −3.6 % | 0.126 / 0.074 = **1.70 ×** |
 
-5-fold time-series CV、1000 Optuna trials × (variant × dataset)。完全レポート: [`bench_results/study_1k_report.md`](bench_results/study_1k_report.md)、方法論と dataset 別推奨: [docs/moe/benchmark.md](docs/moe/benchmark.md)。
+### Dataset の概要
 
-| Dataset | Shape | Standard 最良 | MoE 最良 | MoE 速度ペナルティ |
-|---|---|---|---|---|
-| Synthetic (feature 由来 regime) | 2000 × 5 | 4.96 | **3.41** | 1.09 × |
-| Hamilton (latent regime) | 500 × 12 | 0.6990 | 0.6985 | 1.79 × |
-| VIX | 1000 × 5 | 0.0115 | 0.0115 | 1.53 × |
+regime-switching の適用可能性スペクトラムをカバーする 5 dataset: MoE 理想合成 1 本、実時系列 3 本 (regime-switching 文献の canonical reference)、真の regime label が既知の HMM 1 本 (gate の regime recovery 評価用)。
 
-### Dataset の概要 (生成器は `examples/benchmark.py`)
+#### `synthetic` — feature 由来 regime、MoE 理想ケース (2000 × 5)
 
-3 つとも regime 構造が既知の合成データで、「MoE 理想」から「latent」までスペクトラムをカバーするように選んでいます。固定 seed (`42`)、5-fold time-series CV。
+- **Source**: 本リポジトリ内の generator (`examples/benchmark.py` の `generate_synthetic_data`)。
+- **構成**: i.i.d. Gauss 特徴量 5 本; regime は `X` の決定論的関数なので gate が完璧にルーティングできる:
 
-**Synthetic** — *feature 由来 regime、MoE 理想ケース (2000 × 5)*
+  ```
+  regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
+  y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
+  y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
+  ```
 
-i.i.d. Gauss 特徴量 5 本。regime は `X` の決定論的関数なので、gate が完璧にルーティングできます:
+  2 つの regime は同じ特徴量に **符号が逆** の係数を使うので、単一 GBDT は両者を平均せざるを得ない — MoE が解消できる構造の典型例。
 
-```
-regime = (0.5·X1 + 0.3·X2 − 0.2·X3 > 0)
-y | regime=0 :   5·X0 + 3·X0·X2 + 2·sin(2·X3) + 10  +  ε
-y | regime=1 :  −5·X0 − 2·X1²   + 3·cos(2·X4) − 10  +  ε     ε ~ N(0, 0.5²)
-```
+#### `fred_gdp` — US Real GDP、Hamilton 流 MS-AR(4) (~310 × 12)
 
-2 つの regime は同じ特徴量に **符号が逆** の係数を使うので、単一 GBDT は両者を平均せざるを得ない — これが MoE が解消できる構造の典型例。
+- **Source**: FRED 系列 [`GDPC1`](https://fred.stlouisfed.org/series/GDPC1) — Real Gross Domestic Product, Chained 2017 Dollars, Quarterly, Seasonally Adjusted Annual Rate (BEA via FRED, 認証不要 CSV エンドポイント)。
+- **メソドロジー出典**: Hamilton, J. D. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* **Econometrica** 57(2), 357-384. <https://www.jstor.org/stable/1912559>。
+- **構成**: target は四半期成長率 `100·Δlog(GDP)`、特徴量は成長率の lag 4 (Hamilton の MS-AR(4)) と派生 MA / volatility / regime-proxy。Regime (好況 / 不況) は完全に latent。Generator: `generate_fred_gdp_data`。
 
-**Hamilton** — *latent regime + 時系列特徴量 (500 × 12)*
+#### `sp500` — S&P 500 日次 log return (~3760 × 13)
 
-Hamilton GNP 風: regime は **latent** (特徴量に含まれない)。時間方向に sin で変調された Bernoulli `P(regime=1) = 0.5 + 0.3·sin(2π·t/100)` で遷移。target:
+- **Source**: Yahoo Finance、symbol [`^GSPC`](https://finance.yahoo.com/quote/%5EGSPC/history) (デフォルト `2010-01-01` から `2024-12-31`)。
+- **指数定義**: [S&P Dow Jones Indices, S&P 500](https://www.spglobal.com/spdji/en/indices/equity/sp-500/)。
+- **構成**: 日次 Close を log return に変換。Target は翌日 log return (意図的に難しい予測設定)。特徴量: lag {1, 2, 3, 5, 10} + MA / ローリング vol / MA クロスオーバー。Regime は latent (低 vol / 高 vol)。Generator: `generate_sp500_data`。
 
-```
-y | regime=0 :   0.8 + 0.3·X0 + 0.2·X1  +  ε
-y | regime=1 :  −0.5 + 0.1·X0 − 0.3·X2  +  ε                 ε ~ N(0, 0.3²)
-```
+#### `vix` — CBOE Volatility Index 日次レベル (~3760 × 13)
 
-ベースの Gauss 特徴量 4 本に、過去の `y` から計算した **8 本の時系列派生特徴** を追加: window {5, 10, 20} の移動平均、{5, 10} のローリング標準偏差、MA(5)−MA(20) クロスオーバー、sign(MA(5))、過去 10 期間の正値率。これで latent regime が **部分的に** 履歴から観測可能になる。それでも gate は regime を完全分離できず、Standard と互角になる。
+- **Source**: Yahoo Finance、symbol [`^VIX`](https://finance.yahoo.com/quote/%5EVIX/history) (`sp500` と同じ期間)。
+- **指数定義**: [CBOE VIX](https://www.cboe.com/tradable_products/vix/)。
+- **構成**: target は翌日 VIX レベル。特徴量: VIX の lag {1, 2, 3, 5, 10} + MA / ローリング vol。`sp500` と同じ低 vol / 高 vol 構造を implied-vol レンズで見たもの。Generator: `generate_vix_data`。
 
-**VIX** — *latent volatility regime、小さなスケール (1000 × 5)*
+#### `hmm` — 真の regime label 既知の 3 状態 Gaussian HMM (2000 × 5)
 
-VIX 風: 低 vol / 高 vol regime が `P(high) = 0.3 + 0.4·𝟙[sin(2π·t/200) > 0]` で交代。target は小さい正の値:
+- **Source**: 本リポジトリ内の generator (`generate_hmm_data`)。
+- **メソドロジー出典**: Rabiner, L. R. (1989). *A Tutorial on Hidden Markov Models and Selected Applications in Speech Recognition.* **Proceedings of the IEEE** 77(2), 257-286. <https://www.cs.ubc.ca/~murphyk/Bayes/rabiner.pdf>。
+- **構成**: 隠れ状態は 3 状態 Markov 連鎖 (95% 対角の persistent transition); emission は Gauss で平均がよく分離 `{−3, 0, +3}`、scale `{0.4, 0.7, 1.0}`。5 本の特徴量のうち 2 本は隠れ状態の弱い線形シグナルを持ち (gate に多少の手がかりはあるが「タダ飯」ではない)、残り 3 本は純ノイズ。**真の regime label を返す** — RMSE だけでなく regime recovery 精度を測れる。
 
-```
-y | regime=0 :   0.01 + 0.002·|X0|                          +  ε
-y | regime=1 :   0.025 + 0.005·|X0| + 0.003·X1²             +  ε     ε ~ N(0, 0.005²)
-```
+### キャッシュ
 
-Hamilton と同じく regime は latent だが、こちらは **TS 特徴量を追加していない** — gate に与えられる唯一の信号はノイズ支配の `X` のみ。MoE はルーティングできる根拠がなく、Standard と互角になる。
+実時系列の取得 (FRED, yfinance) は `examples/data_cache/` 以下にキャッシュ (gitignore 済)。初回はネットワーク取得、以降はオフライン動作。
 
-### 全 dataset で勝った設定 (普遍ルール)
+### 全 dataset で勝った設定
 
-| パラメータ | 推奨 |
-|---|---|
-| `mixture_num_experts` | 3-4 |
-| `mixture_gate_type` | `gbdt` |
-| `mixture_routing_mode` | `token_choice` |
-| `extra_trees` | `true` |
-| `mixture_diversity_lambda` | 0.0–0.5 を探索 (fANOVA importance で常に top-3、最適値は dataset 依存) |
+5 dataset 全部で絶対最良 (min) RMSE を出した唯一の categorical 設定は **`mixture_gate_type='gbdt'`** のみ。それ以外は dataset 依存 — 詳細表は [docs/moe/benchmark.md](docs/moe/benchmark.md) 参照。
 
-dataset 依存の設定 (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `learning_rate`) は問題ごとに探索が必要 — 詳細は benchmark ドキュメント参照。
+| パラメータ | 普遍? | 補足 |
+|---|---|---|
+| `mixture_gate_type` | **`gbdt`** | 全 dataset で最良 min RMSE。`leaf_reuse` と `none` は絶対最良を取れず |
+| `mixture_routing_mode` | **No** | synthetic は `token_choice`、fred_gdp / vix / hmm は `expert_choice` が勝った。両方探索すべき |
+| `mixture_num_experts` | やや 3-4 | Q4 quartile mean がほぼの dataset で最良だが差は小さい |
+| `mixture_diversity_lambda` | 0.0–0.5 を探索 | MoE の fANOVA importance で常に top-5、単一最適値はないが探索は必須 |
+
+dataset 依存の設定 (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `extra_trees`, `learning_rate`) は問題ごとに探索が必要 — 詳細表は [docs/moe/benchmark.md](docs/moe/benchmark.md) 参照。
 
 ```bash
-# Headline スタディの再現 (12-core / 24-thread で約 17 分)
-python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+# Headline スタディの再現 (12-core / 24-thread で約 25-35 分)
+python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 
-# 動作確認 (約 30 秒)
-python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
+# 動作確認 (~1 分、5 dataset 全体)
+python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
+
+# Dataset を絞って実行
+python examples/comparative_study.py --trials 500 \
+    --datasets synthetic,hmm --out bench_results/study_two.json
 ```
 
 ## ドキュメント
@@ -155,7 +163,7 @@ python examples/comparative_study.py --trials 30 --out bench_results/smoke.json
 |---|---|
 | 全パラメータリファレンス (MoE core, Gate, Smoothing, Prediction APIs) | [docs/moe/parameters.md](docs/moe/parameters.md) |
 | Optuna 探索テンプレート | [docs/moe/optuna-recipes.md](docs/moe/optuna-recipes.md) |
-| 1000-trial ベンチマーク方法論と dataset 別推奨 | [docs/moe/benchmark.md](docs/moe/benchmark.md) |
+| 500-trial / 5-dataset ベンチマーク方法論と dataset 別推奨 | [docs/moe/benchmark.md](docs/moe/benchmark.md) |
 | Per-expert ハイパーパラメータと role-based レシピ | [docs/moe/per-expert-hp.md](docs/moe/per-expert-hp.md) |
 | Expert Choice routing | [docs/moe/advanced-routing.md](docs/moe/advanced-routing.md) |
 | Progressive training (EvoMoE) と gate temperature annealing | [docs/moe/advanced-progressive.md](docs/moe/advanced-progressive.md) |
