@@ -1,6 +1,6 @@
 # Benchmark — 500-trial naive-lightgbm vs MoE Study
 
-Headline study: 500 Optuna trials × 2 variants (`naive-lightgbm`, `moe`) × **5 datasets** spanning the regime-switching applicability spectrum (one MoE-ideal synthetic, three real macro/financial series, one HMM with known regime labels). 5-fold time-series CV, early stopping. Full per-trial dump in [`bench_results/study_500.json`](../../bench_results/study_500.json), generated report in [`bench_results/study_500_report.md`](../../bench_results/study_500_report.md).
+Headline study: 500 Optuna trials × 2 variants (`naive-lightgbm`, `moe`) × **5 datasets** (sp500 evaluated under two parallel feature sets, so 6 rows) spanning the regime-switching applicability spectrum. 5-fold time-series CV, early stopping. Full per-trial dump in [`bench_results/study_500.json`](../../bench_results/study_500.json), generated report in [`bench_results/study_500_report.md`](../../bench_results/study_500_report.md).
 
 ## Datasets
 
@@ -8,7 +8,8 @@ Headline study: 500 Optuna trials × 2 variants (`naive-lightgbm`, `moe`) × **5
 |---|---|---|---|---|
 | **synthetic** | `generate_synthetic_data` (synthetic, K=2, oracle features) | 2000 × 5 | Regime is a deterministic function of `X` — MoE-ideal | yes |
 | **fred_gdp** | FRED `GDPC1` via `generate_fred_gdp_data` (Hamilton 1989's MS-AR(4) on 100·Δlog(GDP)) | ~310 × 12 | Quarterly US Real GDP — regime (expansion/recession) is latent | no (latent) |
-| **sp500** | yfinance `^GSPC` (2010-2024) via `generate_sp500_data` | ~3760 × 13 | Daily log returns, low-vol / high-vol regimes | no (latent) |
+| **sp500_basic** | yfinance `^GSPC` via `generate_sp500_basic_data` (13 features: lags + standard MA / vol block) | ~3760 × 13 | Daily log returns, low-vol / high-vol regimes (basic feature set) | no (latent) |
+| **sp500** | yfinance `^GSPC` via `generate_sp500_data` (28 features: lags + momentum + RSI + realized vol + skew/kurt + Bollinger + drawdown) | ~3710 × 28 | Same series as `sp500_basic`; ablates the value of richer features | no (latent) |
 | **vix** | yfinance `^VIX` (2010-2024) via `generate_vix_data` | ~3760 × 13 | Daily VIX level, same vol regimes from the implied-vol angle | no (latent) |
 | **hmm** | `generate_hmm_data` (3-state Gaussian HMM, 95 % diagonal transition) | 2000 × 5 | Hidden Markov state with weak observable signal in 2 of 5 features | **yes** |
 
@@ -22,9 +23,12 @@ The `hmm` dataset is the only one where `diagnose_moe`'s regime-recovery metrics
 |---|---|---|---|---|---|---|
 | synthetic | 4.9765 | **4.6651** | −6.3 % | 0.240 | 0.663 | 2.76 × |
 | fred_gdp | 0.9286 | **0.9128** | −1.7 % | 0.055 | 0.122 | 2.22 × |
-| sp500 | 0.0100 | 0.0100 | tie | 0.091 | 0.136 | 1.49 × |
+| **sp500_basic** (13 feat) | **0.01003** | 0.01005 | +0.18 % *(naive wins)* | 0.127 | 0.152 | 1.20 × |
+| **sp500** (28 feat, enriched) | 0.01002 | **0.00998** | −0.34 % | 0.158 | 0.134 | 0.85 × *(MoE faster)* |
 | vix | 2.8942 | **2.4574** | **−15.1 %** | 0.081 | 0.386 | 4.77 × |
-| hmm | 2.1096 | **2.1096** | −3.6 % | 0.074 | 0.126 | 1.70 × |
+| hmm | 2.1893 | **2.1096** | −3.6 % | 0.074 | 0.126 | 1.70 × |
+
+The **sp500 pair is a controlled feature-engineering ablation on the same raw series** (identical period, CV, Optuna budget, seed). With the 13-column basic feature set `naive-lightgbm` wins by 0.18 %; with the 28-column enriched set MoE flips to a 0.34 % win and is also 15 % faster per fold. This is the cleanest in-repo demonstration that **MoE's lift scales with how observable the regime is from features**.
 
 See [`bench_results/study_500_report.md`](../../bench_results/study_500_report.md) for the full auto-generated report (median / p10 RMSE, fANOVA importance per dataset, all categorical breakdowns, slice plots).
 
@@ -73,15 +77,15 @@ For the canonical Optuna template that bakes in `mixture_gate_type='gbdt'` and s
 ## Reproduction
 
 ```bash
-# Full study (~25-35 min on 12-core / 24-thread machine, n_jobs=6)
+# Full study (~30-40 min on 12-core / 24-thread machine, n_jobs=6, 6 dataset rows)
 python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 
-# Smoke test (~1 min, all 5 datasets)
+# Smoke test (~1 min, all 6 dataset rows)
 python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
 
-# Subset of datasets
+# sp500 feature-engineering ablation only
 python examples/comparative_study.py --trials 500 \
-    --datasets synthetic,hmm --out bench_results/study_two.json
+    --datasets sp500_basic,sp500 --out bench_results/sp500_ablation.json
 ```
 
 The script writes:

@@ -47,6 +47,7 @@ from benchmark import (  # noqa: E402
     BenchmarkConfig,
     generate_fred_gdp_data,
     generate_hmm_data,
+    generate_sp500_basic_data,
     generate_sp500_data,
     generate_synthetic_data,
     generate_vix_data,
@@ -517,7 +518,8 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
 DATASET_GENERATORS = {
     "synthetic": lambda seed: generate_synthetic_data(seed=seed),
     "fred_gdp": lambda seed: generate_fred_gdp_data(seed=seed),
-    "sp500": lambda seed: generate_sp500_data(seed=seed),
+    "sp500_basic": lambda seed: generate_sp500_basic_data(seed=seed),  # ~13 features
+    "sp500": lambda seed: generate_sp500_data(seed=seed),              # ~28 features (enriched)
     "vix": lambda seed: generate_vix_data(seed=seed),
     "hmm": lambda seed: generate_hmm_data(seed=seed),
 }
@@ -533,7 +535,7 @@ def main():
     p.add_argument(
         "--datasets",
         type=str,
-        default="synthetic,fred_gdp,sp500,vix,hmm",
+        default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm",
         help=f"Comma-separated subset of: {','.join(DATASET_GENERATORS.keys())}",
     )
     p.add_argument("--out", type=str, required=True)
