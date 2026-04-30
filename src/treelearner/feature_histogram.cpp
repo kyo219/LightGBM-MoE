@@ -690,8 +690,10 @@ void FeatureHistogram::FindBestThresholdCategoricalIntInner(int64_t int_sum_grad
     const double best_sum_right_gradient = int_best_sum_right_gradient * grad_scale;
     const double best_sum_right_hessian = int_best_sum_right_hessian * hess_scale;
 
-    const data_size_t best_left_count = Common::RoundInt(static_cast<double>(int_best_sum_left_hessian) * cnt_factor);
-    const data_size_t best_right_count = Common::RoundInt(static_cast<double>(int_best_sum_right_hessian) * cnt_factor);
+    // Clamp to >=1: counts are reconstructed from quantized hessian and can round to 0
+    // for very-small-hessian leaves, tripping CHECK_GT in serial_tree_learner.cpp.
+    const data_size_t best_left_count = std::max<data_size_t>(1, Common::RoundInt(static_cast<double>(int_best_sum_left_hessian) * cnt_factor));
+    const data_size_t best_right_count = std::max<data_size_t>(1, Common::RoundInt(static_cast<double>(int_best_sum_right_hessian) * cnt_factor));
 
     const int64_t best_sum_left_gradient_and_hessian_int64 = HIST_BITS_ACC == 16 ?
         ((static_cast<int64_t>(static_cast<int16_t>(best_sum_left_gradient_and_hessian >> 16)) << 32) |
