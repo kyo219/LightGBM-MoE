@@ -548,24 +548,23 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
   // include_label=true:  cluster on (features ⊕ label) — biased toward y
   // include_label=false: cluster on features only — true regime discovery
   //
-  // Falls back to label-only if raw features are not available, regardless
-  // of include_label, because there's nothing else to cluster on.
+  // Feature values are read via Dataset::FeatureIterator, which returns the
+  // *bin* index for each (feature, sample) pair. The previous implementation
+  // used Dataset::raw_index(f), which is null whenever the dataset wasn't
+  // created with keep_raw_data=true (the LightGBM default is false). With
+  // raw features unavailable, the code emitted a warning and silently fell
+  // back to labels-only clustering — the "K-means on features" mode was
+  // never actually K-means on features for the typical user. Bin indices
+  // are an int discretization of the continuous features (typically 256
+  // bins), which is sufficient resolution for K-means seeding of K experts
+  // and is available regardless of keep_raw_data. The z-score
+  // normalization below absorbs the per-feature scale of the bins.
 
   const int K = num_experts_;
   const data_size_t N = num_data_;
   const int max_iters = 20;
 
-  int num_features = train_data_->num_features();
-  bool has_raw = train_data_->has_raw();
-
-  if (!has_raw || num_features == 0) {
-    Log::Warning("MixtureGBDT: Raw features not available, falling back to "
-                 "labels-only Balanced K-Means");
-    num_features = 0;
-    include_label = true;  // label is all we have
-  }
-
-  // Trailing label dim is appended only when include_label is true.
+  const int num_features = train_data_->num_features();
   const int D = num_features + (include_label ? 1 : 0);
   if (D == 0) {
     Log::Warning("MixtureGBDT: Cannot run Balanced K-Means with 0 dimensions, "
@@ -583,16 +582,25 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
   std::vector<double> feat_mean(D, 0.0);
   std::vector<double> feat_std(D, 1.0);
 
+  std::vector<BinIterator*> iters(num_features, nullptr);
+  for (int f = 0; f < num_features; ++f) {
+    iters[f] = train_data_->FeatureIterator(f);
+  }
+
   for (data_size_t i = 0; i < N; ++i) {
     for (int f = 0; f < num_features; ++f) {
-      const float* raw_feat = train_data_->raw_index(f);
-      X[i * D + f] = static_cast<double>(raw_feat[i]);
-      feat_mean[f] += X[i * D + f];
+      const double v = static_cast<double>(iters[f]->RawGet(i));
+      X[i * D + f] = v;
+      feat_mean[f] += v;
     }
     if (include_label) {
       X[i * D + num_features] = static_cast<double>(labels[i]);
       feat_mean[num_features] += X[i * D + num_features];
     }
+  }
+
+  for (BinIterator* p : iters) {
+    delete p;
   }
 
   // Compute means
@@ -809,24 +817,16 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
   //    M-step: update means, variances, mixing coefficients
   // 3. Final posteriors become the initial responsibilities
   //
-  // Falls back to label-only if raw features are not available.
+  // Feature values are read via Dataset::FeatureIterator (bin indices), the
+  // same fix used for InitResponsibilitiesBalancedKMeans — see that
+  // function for the rationale on why raw_index() was wrong by default.
 
   const int K = num_experts_;
   const data_size_t N = num_data_;
   const int max_iters = 30;  // EM iterations
   const double min_variance = 1e-6;  // Prevent collapse
 
-  // Get number of features
-  int num_features = train_data_->num_features();
-  bool has_raw = train_data_->has_raw();
-
-  if (!has_raw || num_features == 0) {
-    Log::Warning("MixtureGBDT: Raw features not available, falling back to "
-                 "labels-only GMM");
-    num_features = 0;
-    include_label = true;
-  }
-
+  const int num_features = train_data_->num_features();
   const int D = num_features + (include_label ? 1 : 0);
   if (D == 0) {
     Log::Warning("MixtureGBDT: Cannot run GMM with 0 dimensions, falling "
@@ -842,14 +842,22 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
 
   std::vector<double> X(static_cast<size_t>(N) * D);
 
+  std::vector<BinIterator*> iters(num_features, nullptr);
+  for (int f = 0; f < num_features; ++f) {
+    iters[f] = train_data_->FeatureIterator(f);
+  }
+
   for (data_size_t i = 0; i < N; ++i) {
     for (int f = 0; f < num_features; ++f) {
-      const float* raw_feat = train_data_->raw_index(f);
-      X[i * D + f] = static_cast<double>(raw_feat[i]);
+      X[i * D + f] = static_cast<double>(iters[f]->RawGet(i));
     }
     if (include_label) {
       X[i * D + num_features] = static_cast<double>(labels[i]);
     }
+  }
+
+  for (BinIterator* p : iters) {
+    delete p;
   }
 
   // Compute global mean and std for normalization
@@ -2154,15 +2162,41 @@ void MixtureGBDT::MStepExperts() {
         all_hess[k][i] = static_cast<score_t>(std::max(hess_val, kMixtureEpsilon));
 
         if (diversity_lambda > 0.0) {
+          // Diversity regularizer — encourages f_k to differ from f_j on
+          // samples j owns (high r_ij). Earlier code added
+          //     +λ Σ_{j≠k} r_ij (f_k − f_j)
+          // to the gradient — that is the gradient of *aligning* f_k with
+          // the other experts, not diversifying them. Verified empirically:
+          // at λ=0.05 with K=3 the old sign drove pairwise expert distance
+          // down to 22% of the λ=0 baseline.
+          //
+          // Sign-flipping alone is unstable (the natural diversity reward
+          // R_k = -½ λ Σ r_ij (f_k − f_j)² is unbounded below; predictions
+          // run off to ±∞ at any non-trivial λ — λ=0.001 was empirically
+          // shown to inflate peak |pred| 25× in 30 iters). Huber-style
+          // saturation: clip (f_k − f_j) to ±δ before summing so the per-
+          // pair contribution is bounded by ±λ·δ·r_ij. Inside the clip
+          // region the reward is quadratic; outside it is linear. Hessian
+          // damping +λ·Σ r_ij keeps the leaf-value Newton step
+          // well-conditioned (the un-saturated true Hessian of a diversity
+          // reward is negative, which destabilizes Newton).
+          constexpr double kDiversityClip = 1.0;
           double div_grad = 0.0;
+          double div_hess = 0.0;
           for (int j = 0; j < num_experts_; ++j) {
             if (j == k) continue;
-            double r_ij = responsibilities_[i * num_experts_ + j];
-            double f_k = expert_k_pred[i];
-            double f_j = expert_pred_sm_[i * num_experts_ + j];
-            div_grad += r_ij * (f_k - f_j);
+            const double r_ij = responsibilities_[i * num_experts_ + j];
+            const double f_k = expert_k_pred[i];
+            const double f_j = expert_pred_sm_[i * num_experts_ + j];
+            const double diff = f_k - f_j;
+            const double clipped = std::max(-kDiversityClip,
+                                            std::min(kDiversityClip, diff));
+            div_grad += r_ij * clipped;
+            div_hess += r_ij;
           }
-          all_grads[k][i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
+          const double inv_pairs = 1.0 / (num_experts_ - 1);
+          all_grads[k][i] -= static_cast<score_t>(diversity_lambda * div_grad * inv_pairs);
+          all_hess[k][i] += static_cast<score_t>(diversity_lambda * div_hess * inv_pairs);
         }
       }
     } else {
@@ -2176,15 +2210,26 @@ void MixtureGBDT::MStepExperts() {
             std::max(r_ik * 2.0, kMixtureEpsilon));
 
         if (diversity_lambda > 0.0) {
+          // Same Huber-saturated diversity regularizer as the
+          // objective_function_ branch above. See that branch for the
+          // sign / clip / Hessian damping rationale.
+          constexpr double kDiversityClip = 1.0;
           double div_grad = 0.0;
+          double div_hess = 0.0;
           for (int j = 0; j < num_experts_; ++j) {
             if (j == k) continue;
-            double r_ij = responsibilities_[i * num_experts_ + j];
-            double f_k = expert_k_pred[i];
-            double f_j = expert_pred_sm_[i * num_experts_ + j];
-            div_grad += r_ij * (f_k - f_j);
+            const double r_ij = responsibilities_[i * num_experts_ + j];
+            const double f_k = expert_k_pred[i];
+            const double f_j = expert_pred_sm_[i * num_experts_ + j];
+            const double dd = f_k - f_j;
+            const double clipped = std::max(-kDiversityClip,
+                                            std::min(kDiversityClip, dd));
+            div_grad += r_ij * clipped;
+            div_hess += r_ij;
           }
-          all_grads[k][i] += static_cast<score_t>(diversity_lambda * div_grad / (num_experts_ - 1));
+          const double inv_pairs = 1.0 / (num_experts_ - 1);
+          all_grads[k][i] -= static_cast<score_t>(diversity_lambda * div_grad * inv_pairs);
+          all_hess[k][i] += static_cast<score_t>(diversity_lambda * div_hess * inv_pairs);
         }
       }
     }
