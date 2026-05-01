@@ -162,16 +162,22 @@ class MixtureGBDT : public GBDTBase {
   void InitResponsibilities();
 
   /*!
-   * \brief Initialize responsibilities using Balanced K-Means on labels
+   * \brief Initialize responsibilities using Balanced K-Means.
    * \param labels Label array
+   * \param include_label If true, label is concatenated as an extra feature
+   *   dimension (legacy "balanced_kmeans" behavior — biases clusters toward
+   *   y-magnitude). If false, clustering uses raw features only — proper
+   *   regime discovery in X-space.
    */
-  void InitResponsibilitiesBalancedKMeans(const label_t* labels);
+  void InitResponsibilitiesBalancedKMeans(const label_t* labels, bool include_label);
 
   /*!
-   * \brief Initialize responsibilities using GMM on labels
+   * \brief Initialize responsibilities using GMM.
    * \param labels Label array
+   * \param include_label If true, label is included as an extra dimension
+   *   (legacy "gmm" behavior). If false, GMM is fit on features only.
    */
-  void InitResponsibilitiesGMM(const label_t* labels);
+  void InitResponsibilitiesGMM(const label_t* labels, bool include_label);
 
   /*!
    * \brief Initialize responsibilities using tree-based hierarchical clustering
@@ -196,6 +202,21 @@ class MixtureGBDT : public GBDTBase {
    * \brief E-step: update responsibilities based on expert fit and gate probability
    */
   void EStep();
+
+  /*!
+   * \brief Update per-expert noise scale (σ_k² for L2, b_k for L1) from
+   * responsibility-weighted residuals. Required for proper Gaussian/Laplace
+   * MoE EM (Jordan-Jacobs). No-op when mixture_estimate_variance is false.
+   */
+  void UpdateExpertVariances();
+
+  /*!
+   * \brief Compute training-set marginal log-likelihood (ELBO):
+   *     Σ_i log Σ_k π_k(x_i) p(y_i | x_i, f_k, σ_k²)
+   * Returns -inf if the model isn't fit yet. Only meaningful when variances
+   * are estimated.
+   */
+  double ComputeMarginalLogLikelihood() const;
 
   /*!
    * \brief Apply time-series smoothing to responsibilities (EMA or Markov)
@@ -297,6 +318,20 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief E-step loss type (l2, l1, quantile) */
   std::string e_step_loss_type_;
+
+  /*! \brief Per-expert noise scale (size K).
+   *
+   * Interpretation depends on e_step_loss_type_:
+   *   - "l2"      → variance σ_k² (Gaussian likelihood)
+   *   - "l1"      → Laplace scale b_k
+   *   - "quantile"→ pseudo-scale carrying the same role as σ_k² (no proper density)
+   *
+   * Updated each iter from responsibility-weighted residuals when
+   * mixture_estimate_variance=true. Initialized to a sensible default
+   * (overall residual scale / K) and floored with kMixtureVarianceFloor to
+   * prevent collapse.
+   */
+  std::vector<double> expert_variance_;
 
   /*! \brief Loaded parameter string for serialization */
   std::string loaded_parameter_;
