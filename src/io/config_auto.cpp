@@ -334,6 +334,7 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_gate_iters_per_round",
   "mixture_init",
   "mixture_e_step_alpha",
+  "mixture_estimate_variance",
   "mixture_e_step_loss",
   "mixture_e_step_mode",
   "mixture_load_balance_alpha",
@@ -735,6 +736,8 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetDouble(params, "mixture_e_step_alpha", &mixture_e_step_alpha);
   CHECK_GE(mixture_e_step_alpha, 0.0);
 
+  GetBool(params, "mixture_estimate_variance", &mixture_estimate_variance);
+
   GetString(params, "mixture_e_step_loss", &mixture_e_step_loss);
 
   GetString(params, "mixture_e_step_mode", &mixture_e_step_mode);
@@ -978,6 +981,7 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_gate_iters_per_round: " << mixture_gate_iters_per_round << "]\n";
   str_buf << "[mixture_init: " << mixture_init << "]\n";
   str_buf << "[mixture_e_step_alpha: " << mixture_e_step_alpha << "]\n";
+  str_buf << "[mixture_estimate_variance: " << mixture_estimate_variance << "]\n";
   str_buf << "[mixture_e_step_loss: " << mixture_e_step_loss << "]\n";
   str_buf << "[mixture_e_step_mode: " << mixture_e_step_mode << "]\n";
   str_buf << "[mixture_load_balance_alpha: " << mixture_load_balance_alpha << "]\n";
@@ -1167,6 +1171,7 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_gate_iters_per_round", {}},
     {"mixture_init", {}},
     {"mixture_e_step_alpha", {}},
+    {"mixture_estimate_variance", {}},
     {"mixture_e_step_loss", {}},
     {"mixture_e_step_mode", {}},
     {"mixture_load_balance_alpha", {}},
@@ -1356,6 +1361,7 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_gate_iters_per_round", "int"},
     {"mixture_init", "string"},
     {"mixture_e_step_alpha", "double"},
+    {"mixture_estimate_variance", "bool"},
     {"mixture_e_step_loss", "string"},
     {"mixture_e_step_mode", "string"},
     {"mixture_load_balance_alpha", "double"},
