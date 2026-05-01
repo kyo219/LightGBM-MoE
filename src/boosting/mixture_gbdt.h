@@ -31,7 +31,8 @@ namespace LightGBM {
  * Training uses EM-style updates:
  * - E-step: Update responsibilities based on expert fit and gate probability
  * - M-step: Update experts with responsibility-weighted gradients
- * - M-step: Update gate with argmax responsibilities as pseudo-labels
+ * - M-step: Update gate with soft cross-entropy against full responsibilities
+ *   (gradient = p_ik - r_ik), per Jordan-Jacobs hierarchical MoE.
  */
 class MixtureGBDT : public GBDTBase {
  public:
@@ -208,7 +209,7 @@ class MixtureGBDT : public GBDTBase {
   void MStepExperts();
 
   /*!
-   * \brief M-step for gate: update with argmax responsibilities as pseudo-labels
+   * \brief M-step for gate: soft CE against full responsibilities (p - r)
    */
   void MStepGate();
 
