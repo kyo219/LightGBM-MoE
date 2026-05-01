@@ -1177,10 +1177,17 @@ struct Config {
   std::string mixture_init = "uniform";
 
   // check = >=0.0
-  // desc = alpha parameter for E-step responsibility calculation
+  // desc = alpha parameter for E-step responsibility calculation (legacy fixed-temperature mode)
   // desc = controls the balance between gate probability and expert fit
   // desc = higher values give more weight to expert fit (likelihood)
+  // desc = ignored when ``mixture_estimate_variance=true`` — alpha is then derived from the per-expert estimated variance
   double mixture_e_step_alpha = 1.0;
+
+  // desc = whether to estimate per-expert noise variance σ_k² from responsibility-weighted residuals each iteration
+  // desc = when true, the E-step score becomes ``log π_k − 0.5·log(σ_k²) − (y−f_k)²/(2σ_k²)`` (proper Gaussian MoE EM, Jordan-Jacobs)
+  // desc = when false, falls back to the legacy ``log gate − alpha·loss`` temperature hack with a fixed shared alpha
+  // desc = enabling this is required for ELBO tracking to be meaningful
+  bool mixture_estimate_variance = true;
 
   // type = enum
   // options = l2, l1, quantile, auto
