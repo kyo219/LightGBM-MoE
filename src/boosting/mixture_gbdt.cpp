@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -1229,6 +1230,21 @@ void MixtureGBDT::InitResponsibilitiesTreeHierarchical(const label_t* labels) {
   }
 }
 
+void MixtureGBDT::ComputeGateProbForInference(const double* gate_raw,
+                                              double* gate_prob) const {
+  // Mirror Forward()/ForwardValid(): apply per-expert bias and temperature
+  // before softmax. Without this, models trained with non-default
+  // `mixture_balance_factor` (which drives expert_bias_) or temperature
+  // annealing produce a routing at inference that does not match the routing
+  // used during training — silently degrading test metrics.
+  std::vector<double> scores(num_experts_);
+  const double inv_T = 1.0 / std::max(gate_temperature_, kMixtureEpsilon);
+  for (int k = 0; k < num_experts_; ++k) {
+    scores[k] = (gate_raw[k] + expert_bias_[k]) * inv_T;
+  }
+  Softmax(scores.data(), num_experts_, gate_prob);
+}
+
 void MixtureGBDT::Softmax(const double* scores, int n, double* probs) const {
   // Find max for numerical stability
   double max_score = scores[0];
@@ -1370,38 +1386,57 @@ void MixtureGBDT::Forward() {
     }
   }
 
-  // Markov mode: blend gate_proba with prev_gate_proba
-  // This makes regime transitions smoother and dependent on previous state
+  // Markov mode: temporal smoothing of gate_proba_ along the row (time) axis.
+  //
+  // Audit fix: previously this used a class-member `prev_gate_proba_` that
+  // got overwritten with gate_proba_[i-1] after each iteration's blend, then
+  // re-used as the smoothing source on the *next* training iteration. That
+  // accumulated an iteration-axis EMA on top of the time-axis shift, so
+  // sample i's "previous" was an exponentially weighted average of past
+  // training iterations' (already-smoothed) routing — not a Markov prior.
+  //
+  // The corrected smoothing is a single-pass forward sweep using only the
+  // unsmoothed value of row i-1 from THIS iteration as sample i's prior. No
+  // state survives across training iterations.
   if (use_markov_) {
     const double lambda = config_->mixture_smoothing_lambda;
-    if (lambda > 0.0) {
-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-      for (data_size_t i = 0; i < num_data_; ++i) {
+    if (lambda > 0.0 && num_data_ > 1) {
+      // prev_row_unsmoothed: row (i-1)'s value BEFORE this iter's blend.
+      // We must save it before overwriting gate_proba_[i-1] when smoothing
+      // moves on to row i — but the sweep is sequential and only reads
+      // already-smoothed gate_proba_[i-1] otherwise. Use a thread-local
+      // 1-row buffer to keep the unsmoothed source.
+      std::vector<double> prev_row(num_experts_);
+      // Row 0 is never blended (no prior available).
+      for (int k = 0; k < num_experts_; ++k) {
+        prev_row[k] = gate_proba_[k];
+      }
+      for (data_size_t i = 1; i < num_data_; ++i) {
+        // Snapshot row i's unsmoothed value before the blend.
+        std::vector<double> cur_row(num_experts_);
+        for (int k = 0; k < num_experts_; ++k) {
+          cur_row[k] = gate_proba_[i * num_experts_ + k];
+        }
         double sum = 0.0;
         for (int k = 0; k < num_experts_; ++k) {
-          size_t idx = i * num_experts_ + k;
-          // Blend: new_proba = (1-lambda) * current + lambda * prev
-          gate_proba_[idx] = (1.0 - lambda) * gate_proba_[idx] +
-                             lambda * prev_gate_proba_[idx];
-          sum += gate_proba_[idx];
+          gate_proba_[i * num_experts_ + k] =
+              (1.0 - lambda) * cur_row[k] + lambda * prev_row[k];
+          sum += gate_proba_[i * num_experts_ + k];
         }
-        // Renormalize (should be close to 1 already, but for numerical stability)
+        // Renormalize (numerical drift only; both inputs were already
+        // probability vectors).
+        const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
         for (int k = 0; k < num_experts_; ++k) {
-          gate_proba_[i * num_experts_ + k] /= sum;
+          gate_proba_[i * num_experts_ + k] *= inv_sum;
         }
+        // Advance prev_row to row i's UNSMOOTHED value (so row i+1 gets a
+        // clean Markov prior, not a doubly-smoothed one).
+        prev_row.swap(cur_row);
       }
     }
-
-    // Update prev_gate_proba with current values (for next iteration)
-    // Using row-wise copy: prev[i] = current[i-1] for time series
-    // First row keeps its initial/previous value
-    for (data_size_t i = num_data_ - 1; i > 0; --i) {
-      for (int k = 0; k < num_experts_; ++k) {
-        prev_gate_proba_[i * num_experts_ + k] = gate_proba_[(i - 1) * num_experts_ + k];
-      }
-    }
-    // First row: use current gate_proba (no previous available in this batch)
-    // This maintains consistency for the first sample
+    // prev_gate_proba_ is no longer carried across iterations; it remains
+    // sized for back-compat with the predict-time PredictWithPrevProba path
+    // which takes its prior from a caller-supplied argument anyway.
   }
 
   // Transpose expert_pred_ (expert-major) → expert_pred_sm_ (sample-major)
@@ -1458,30 +1493,33 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
     Softmax(scores.data(), num_experts_, gate_proba.data() + i * num_experts_);
   }
 
-  // Markov mode: blend gate_proba with prev_gate_proba
-  if (use_markov_ && valid_idx < static_cast<int>(prev_gate_proba_valid_.size())) {
+  // Markov mode: same single-pass forward sweep as Forward(); see audit
+  // note there. No iteration-axis state is carried in prev_gate_proba_valid_;
+  // each call computes the time-axis Markov prior fresh from this iter's
+  // gate_proba.
+  if (use_markov_) {
     const double lambda = config_->mixture_smoothing_lambda;
-    std::vector<double>& prev_gate_proba = prev_gate_proba_valid_[valid_idx];
-    if (lambda > 0.0) {
-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-      for (data_size_t i = 0; i < num_valid; ++i) {
+    if (lambda > 0.0 && num_valid > 1) {
+      std::vector<double> prev_row(num_experts_);
+      for (int k = 0; k < num_experts_; ++k) {
+        prev_row[k] = gate_proba[k];
+      }
+      for (data_size_t i = 1; i < num_valid; ++i) {
+        std::vector<double> cur_row(num_experts_);
+        for (int k = 0; k < num_experts_; ++k) {
+          cur_row[k] = gate_proba[i * num_experts_ + k];
+        }
         double sum = 0.0;
         for (int k = 0; k < num_experts_; ++k) {
-          size_t idx = i * num_experts_ + k;
-          gate_proba[idx] = (1.0 - lambda) * gate_proba[idx] + lambda * prev_gate_proba[idx];
-          sum += gate_proba[idx];
+          gate_proba[i * num_experts_ + k] =
+              (1.0 - lambda) * cur_row[k] + lambda * prev_row[k];
+          sum += gate_proba[i * num_experts_ + k];
         }
-        // Renormalize
+        const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
         for (int k = 0; k < num_experts_; ++k) {
-          gate_proba[i * num_experts_ + k] /= sum;
+          gate_proba[i * num_experts_ + k] *= inv_sum;
         }
-      }
-    }
-
-    // Update prev_gate_proba for next iteration (time series shift)
-    for (data_size_t i = num_valid - 1; i > 0; --i) {
-      for (int k = 0; k < num_experts_; ++k) {
-        prev_gate_proba[i * num_experts_ + k] = gate_proba[(i - 1) * num_experts_ + k];
+        prev_row.swap(cur_row);
       }
     }
   }
@@ -2287,54 +2325,100 @@ void MixtureGBDT::MStepExperts() {
 void MixtureGBDT::MStepGate() {
   // Soft cross-entropy against the full responsibility distribution r_ik.
   //
-  // Standard MoE/EM (Jordan-Jacobs hierarchical mixture of experts) trains the
-  // gate to minimize KL(r_i || g_i) per sample, which gives the gradient
-  //     dL/dz_ik = p_ik - r_ik
-  // for pre-softmax logits z_ik. Earlier versions of this code collapsed r_i
-  // to a one-hot via argmax before computing CE, which discards the soft
-  // routing signal: r=[0.4,0.35,0.15,0.10] and r=[0.99,0.005,0.003,0.002]
-  // produced identical gradients. That information loss was the dominant
-  // gate-training pathology — see audit notes for full discussion.
+  // The gate produces raw logits z_ik. At routing time those are combined
+  // with `expert_bias_` (load-balancing nudge) and `gate_temperature_`
+  // (annealing) before softmax: routing_prob = softmax((z + b) / T).
+  //
+  // Two design choices in the gradient below — both fixes from the gate audit:
+  //
+  //  (a) Gradient is computed against `softmax(z / T)` *without* bias. We
+  //      want the gate's own logits to fit r directly; if bias enters the
+  //      training target, the gate would spend capacity each iter undoing
+  //      the bias the load-balancer just added (DeepSeek "Auxiliary-Loss-Free
+  //      Load Balancing" applies bias only to the routing decision, never
+  //      to the gate's training target).
+  //
+  //  (b) Chain rule through the temperature: with logit `u = z / T` and
+  //      `p = softmax(u)`, the cross-entropy loss against target r has
+  //          dL/dz = (1/T)(p − r),    d²L/dz² = (1/T²) p(1 − p).
+  //      Earlier code used `p − r` and `p(1 − p)` directly, mis-scaling the
+  //      Newton step by T. Invisible at the default T=1; meaningful as soon
+  //      as `mixture_gate_temperature_*` differs from 1.
+  //
+  // Earlier versions of this code collapsed r_i to a one-hot via argmax
+  // before computing CE, which discarded the soft routing signal: that fix
+  // landed in PR #23 (Jordan-Jacobs soft EM) — kept here.
   std::vector<score_t> gate_grad(static_cast<size_t>(num_data_) * num_experts_);
   std::vector<score_t> gate_hess(static_cast<size_t>(num_data_) * num_experts_);
 
-  // Gate Entropy Regularization:
-  // Encourages gate to produce more uniform (uncertain) predictions
-  // This helps prevent premature expert collapse where gate assigns all samples to one expert
-  //
-  // Entropy H(g) = -Σ g_k log(g_k) is maximized when g_k = 1/K (uniform)
-  // We add a regularization term that pushes probabilities toward uniform:
-  // grad_reg = λ * (p_k - 1/K)
-  // The Hessian of this regularizer w.r.t. the logit is λ * p_k * (1-p_k) +
-  // (cross terms), which we conservatively absorb as +λ on the diagonal.
-  // Without this term the effective Newton step for the gate was scale-
-  // mismatched whenever entropy_lambda > 0.
-  const double entropy_lambda = config_->mixture_gate_entropy_lambda;
+  // Recompute the gate's bias-free softmax for the gradient target. We pull
+  // raw scores out of the gate booster directly (gate_proba_ has bias baked
+  // in from Forward — see (a) above).
+  std::vector<double> gate_raw_no_bias(
+      static_cast<size_t>(num_data_) * num_experts_);
+  {
+    int64_t out_len;
+    gate_->GetPredictAt(0, gate_raw_no_bias.data(), &out_len);
+  }
+
+  // Dirichlet-shrinkage regularizer (kept under the legacy
+  // `mixture_gate_entropy_lambda` parameter name for back-compat — see the
+  // audit note in the header for why the gradient `λ(p − 1/K)` corresponds
+  // to a Dirichlet shrinkage toward uniform, not the entropy gradient
+  // d(−H)/dz which would vanish near simplex corners and so be a weak
+  // anti-collapse signal). Same /T chain rule as the base gradient.
+  const double dirichlet_lambda = config_->mixture_gate_entropy_lambda;
   const double uniform_prob = 1.0 / num_experts_;
+  const double T = std::max(gate_temperature_, kMixtureEpsilon);
+  const double inv_T = 1.0 / T;
+  const double inv_T2 = inv_T * inv_T;
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
+    // Per-sample bias-free softmax. Use a thread-local buffer to avoid the
+    // per-iter heap thrash of `std::vector<double> p(num_experts_)`.
+    double scores_buf[64];
+    double p_buf[64];
+    double* scores = (num_experts_ <= 64) ? scores_buf
+                                          : new double[num_experts_];
+    double* p = (num_experts_ <= 64) ? p_buf : new double[num_experts_];
+
+    for (int k = 0; k < num_experts_; ++k) {
+      scores[k] = gate_raw_no_bias[k * num_data_ + i] * inv_T;
+    }
+    Softmax(scores, num_experts_, p);
+
     for (int k = 0; k < num_experts_; ++k) {
       size_t idx = i + k * num_data_;  // Gate uses class-major order
-      double p = gate_proba_[i * num_experts_ + k];
-      double r = responsibilities_[i * num_experts_ + k];
+      const double r = responsibilities_[i * num_experts_ + k];
 
-      // Soft softmax cross-entropy gradient against responsibility target.
-      double base_grad = p - r;
+      // Chain-rule-correct gradient on z (logit-space). Both base CE and
+      // Dirichlet shrinkage are scaled by 1/T.
+      const double base_grad = (p[k] - r) * inv_T;
+      const double reg_grad =
+          dirichlet_lambda * (p[k] - uniform_prob) * inv_T;
 
-      double entropy_reg = entropy_lambda * (p - uniform_prob);
+      gate_grad[idx] = static_cast<score_t>(base_grad + reg_grad);
 
-      gate_grad[idx] = static_cast<score_t>(base_grad + entropy_reg);
-
-      // Diagonal Hessian: softmax CE gives p*(1-p); add λ for the entropy
-      // regularizer so the Newton step matches the gradient magnitude.
+      // Diagonal Hessian: softmax CE has p(1-p)/T². The Dirichlet term's
+      // exact diagonal Hessian on z involves cross-couplings; we
+      // conservatively add λ/T² which preserves the right scaling and
+      // matches the gradient magnitude for the Newton step.
       gate_hess[idx] = static_cast<score_t>(
-          std::max(p * (1.0 - p) + entropy_lambda, kMixtureEpsilon));
+          std::max((p[k] * (1.0 - p[k]) + dirichlet_lambda) * inv_T2,
+                   kMixtureEpsilon));
+    }
+
+    if (num_experts_ > 64) {
+      delete[] scores;
+      delete[] p;
     }
   }
 
-  // Log entropy regularization effect (occasionally)
-  if (entropy_lambda > 0.0 && iter_ % 10 == 0) {
+  // Log Dirichlet-shrinkage effect (occasionally). Reads gate_proba_ which
+  // includes bias — that's intentional, this metric describes the actual
+  // routing distribution's entropy, not the bias-free gate output.
+  if (dirichlet_lambda > 0.0 && iter_ % 10 == 0) {
     // Compute average entropy for monitoring
     double total_entropy = 0.0;
     for (data_size_t i = 0; i < num_data_; ++i) {
@@ -2350,8 +2434,9 @@ void MixtureGBDT::MStepGate() {
     double avg_entropy = total_entropy / num_data_;
     double max_entropy = std::log(static_cast<double>(num_experts_));
     double normalized_entropy = avg_entropy / max_entropy;
-    Log::Debug("MixtureGBDT: Gate entropy regularization active (lambda=%.3f), "
-               "avg normalized entropy=%.3f", entropy_lambda, normalized_entropy);
+    Log::Debug("MixtureGBDT: Gate Dirichlet-shrinkage active (lambda=%.3f), "
+               "avg normalized routing entropy=%.3f",
+               dirichlet_lambda, normalized_entropy);
   }
 
   // Train gate for specified iterations
@@ -2524,15 +2609,22 @@ void MixtureGBDT::MStepGateLeafReuse() {
   std::vector<score_t> gate_grad_lr(static_cast<size_t>(num_data_) * num_experts_);
   std::vector<score_t> gate_hess_lr(static_cast<size_t>(num_data_) * num_experts_);
 
-  const double entropy_lambda_lr = config_->mixture_gate_entropy_lambda;
+  // Gate audit fixes mirroring MStepGate (gbdt path):
+  //  (a) train against bias-free softmax — bias is for routing, not for the
+  //      gate's training target (DeepSeek loss-free LB);
+  //  (b) chain-rule scale gradient by 1/T and Hessian by 1/T².
+  const double dirichlet_lambda_lr = config_->mixture_gate_entropy_lambda;
   const double uniform_prob_lr = 1.0 / num_experts_;
+  const double T_lr = std::max(gate_temperature_, kMixtureEpsilon);
+  const double inv_T_lr = 1.0 / T_lr;
+  const double inv_T2_lr = inv_T_lr * inv_T_lr;
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    // Compute gate's current softmax (with bias + temperature) for sample i.
+    // Bias-free softmax q_k = softmax(z_k / T) for the gradient target.
     std::vector<double> scores(num_experts_);
     for (int k = 0; k < num_experts_; ++k) {
-      scores[k] = (gate_raw_lr[k * num_data_ + i] + expert_bias_[k]) / gate_temperature_;
+      scores[k] = gate_raw_lr[k * num_data_ + i] * inv_T_lr;
     }
     std::vector<double> q(num_experts_);
     Softmax(scores.data(), num_experts_, q.data());
@@ -2550,11 +2642,13 @@ void MixtureGBDT::MStepGateLeafReuse() {
 
     for (int k = 0; k < num_experts_; ++k) {
       const size_t idx = i + static_cast<size_t>(k) * num_data_;
-      const double base_grad = q[k] - target[k];
-      const double entropy_reg = entropy_lambda_lr * (q[k] - uniform_prob_lr);
-      gate_grad_lr[idx] = static_cast<score_t>(base_grad + entropy_reg);
+      const double base_grad = (q[k] - target[k]) * inv_T_lr;
+      const double reg_grad =
+          dirichlet_lambda_lr * (q[k] - uniform_prob_lr) * inv_T_lr;
+      gate_grad_lr[idx] = static_cast<score_t>(base_grad + reg_grad);
       gate_hess_lr[idx] = static_cast<score_t>(
-          std::max(q[k] * (1.0 - q[k]) + entropy_lambda_lr, kMixtureEpsilon));
+          std::max((q[k] * (1.0 - q[k]) + dirichlet_lambda_lr) * inv_T2_lr,
+                   kMixtureEpsilon));
     }
   }
 
@@ -2936,7 +3030,7 @@ void MixtureGBDT::Predict(const double* features, double* output,
   gate_->PredictRaw(features, gate_raw.data(), early_stop_ptr);
 
   std::vector<double> gate_prob(num_experts_);
-  Softmax(gate_raw.data(), num_experts_, gate_prob.data());
+  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
 
   // Compute weighted sum
   double sum = 0.0;
@@ -2967,7 +3061,7 @@ void MixtureGBDT::PredictByMap(const std::unordered_map<int, double>& features, 
   gate_->PredictRawByMap(features, gate_raw.data(), early_stop_ptr);
 
   std::vector<double> gate_prob(num_experts_);
-  Softmax(gate_raw.data(), num_experts_, gate_prob.data());
+  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
 
   double sum = 0.0;
   for (int k = 0; k < num_experts_; ++k) {
@@ -2990,7 +3084,7 @@ void MixtureGBDT::PredictRegime(const double* features, int* output) const {
   gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
 
   std::vector<double> gate_prob(num_experts_);
-  Softmax(gate_raw.data(), num_experts_, gate_prob.data());
+  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
 
   // Find argmax
   int best_k = 0;
@@ -3011,7 +3105,7 @@ void MixtureGBDT::PredictRegimeProba(const double* features, double* output) con
 
   std::vector<double> gate_raw(num_experts_);
   gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
-  Softmax(gate_raw.data(), num_experts_, output);
+  ComputeGateProbForInference(gate_raw.data(), output);
 }
 
 void MixtureGBDT::PredictExpertPred(const double* features, double* output) const {
@@ -3042,7 +3136,7 @@ void MixtureGBDT::PredictWithPrevProba(const double* features, const double* pre
   gate_->PredictRaw(features, gate_raw.data(), early_stop_ptr);
 
   std::vector<double> gate_prob(num_experts_);
-  Softmax(gate_raw.data(), num_experts_, gate_prob.data());
+  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
 
   // Blend with prev_proba if provided and in Markov mode
   if (use_markov_ && prev_proba != nullptr) {
@@ -3077,7 +3171,7 @@ void MixtureGBDT::PredictRegimeProbaWithPrevProba(const double* features, const 
   // Get current gate probabilities
   std::vector<double> gate_raw(num_experts_);
   gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
-  Softmax(gate_raw.data(), num_experts_, output);
+  ComputeGateProbForInference(gate_raw.data(), output);
 
   // Blend with prev_proba if provided and in Markov mode
   if (use_markov_ && prev_proba != nullptr) {
@@ -3285,6 +3379,27 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   ss << "mixture_e_step_mode=" << config_->mixture_e_step_mode << "\n";
   ss << "mixture_r_smoothing=" << config_->mixture_r_smoothing << "\n";
   ss << "mixture_smoothing_lambda=" << config_->mixture_smoothing_lambda << "\n";
+
+  // Runtime-trained scalars used by the inference-time gate softmax. Without
+  // these, a saved model loaded fresh would default to bias=0, T=1, var=1 and
+  // route differently from the same model in-memory. See ComputeGateProbForInference.
+  ss << "mixture_gate_temperature=" << gate_temperature_ << "\n";
+  {
+    ss << "mixture_expert_bias=";
+    for (int k = 0; k < num_experts_; ++k) {
+      if (k > 0) ss << ",";
+      ss << expert_bias_[k];
+    }
+    ss << "\n";
+  }
+  {
+    ss << "mixture_expert_variance=";
+    for (int k = 0; k < num_experts_; ++k) {
+      if (k > 0) ss << ",";
+      ss << expert_variance_[k];
+    }
+    ss << "\n";
+  }
   ss << "\n";
 
   // Gate model
@@ -3345,7 +3460,46 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
     e_step_loss_type_ = params["mixture_e_step_loss"];
   }
 
-  // Store loaded parameters for GetLoadedParam (must be valid JSON)
+  // Restore runtime-trained gate scalars. Defaults match constructor / Init
+  // values so models saved before this field was added still load correctly.
+  expert_bias_.assign(num_experts_, 0.0);
+  expert_variance_.assign(num_experts_, 1.0);
+  gate_temperature_ = 1.0;
+  if (params.count("mixture_gate_temperature")) {
+    gate_temperature_ = std::stod(params["mixture_gate_temperature"]);
+  }
+  auto parse_csv_doubles = [&](const std::string& csv,
+                               std::vector<double>* out, int expected) {
+    std::stringstream sss(csv);
+    std::string tok;
+    int idx = 0;
+    while (std::getline(sss, tok, ',') && idx < expected) {
+      try {
+        (*out)[idx] = std::stod(Common::Trim(tok));
+      } catch (...) {
+        (*out)[idx] = 0.0;
+      }
+      ++idx;
+    }
+  };
+  if (params.count("mixture_expert_bias")) {
+    parse_csv_doubles(params["mixture_expert_bias"], &expert_bias_, num_experts_);
+  }
+  if (params.count("mixture_expert_variance")) {
+    parse_csv_doubles(params["mixture_expert_variance"], &expert_variance_,
+                      num_experts_);
+  }
+
+  // Store loaded parameters for GetLoadedParam (must be valid JSON).
+  // We classify a value as numeric only if it parses end-to-end as a number;
+  // otherwise (e.g. comma-separated lists like `mixture_expert_bias`,
+  // mode strings, anything with non-digit body) we quote it.
+  auto is_full_number = [](const std::string& s) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    std::strtod(s.c_str(), &end);
+    return end != nullptr && *end == '\0';
+  };
   std::stringstream param_ss;
   param_ss << "{";
   bool first = true;
@@ -3355,9 +3509,7 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
     }
     first = false;
     param_ss << "\"" << kv.first << "\": ";
-    // Try to detect numeric values
-    bool is_numeric = !kv.second.empty() && (std::isdigit(kv.second[0]) || kv.second[0] == '-' || kv.second[0] == '.');
-    if (is_numeric) {
+    if (is_full_number(kv.second)) {
       param_ss << kv.second;
     } else {
       param_ss << "\"" << kv.second << "\"";
