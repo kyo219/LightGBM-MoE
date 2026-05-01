@@ -251,6 +251,19 @@ class MixtureGBDT : public GBDTBase {
    */
   void Softmax(const double* scores, int n, double* probs) const;
 
+  /*!
+   * \brief Apply softmax to gate raw scores using the inference-time pipeline:
+   * `softmax((gate_raw + expert_bias_) / gate_temperature_)`.
+   *
+   * Forward()/ForwardValid() apply bias and temperature when computing the
+   * routing distribution at training/validation time, so any model trained
+   * with non-default `mixture_balance_factor` (which moves expert_bias_) or
+   * temperature annealing (`mixture_gate_temperature_*`) produces a routing
+   * that depends on those scalars. Predict* paths must apply the same
+   * transformation or test-time routing silently diverges from training.
+   */
+  void ComputeGateProbForInference(const double* gate_raw, double* gate_prob) const;
+
   /*! \brief Number of experts (K) */
   int num_experts_;
 

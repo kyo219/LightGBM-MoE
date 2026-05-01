@@ -1300,10 +1300,15 @@ struct Config {
 
   // check = >=0.0
   // check = <=1.0
-  // desc = entropy regularization coefficient for gate output
-  // desc = encourages gate to produce more uncertain (uniform) predictions
+  // desc = Dirichlet-shrinkage coefficient for gate output (legacy parameter
+  // desc = name kept for back-compat; the implementation does not use the
+  // desc = entropy gradient d(-H)/dz, which would vanish near simplex corners
+  // desc = and so be a weak anti-collapse signal — instead it uses
+  // desc = grad = lambda * (p - 1/K) which corresponds to a Dirichlet shrinkage
+  // desc = with target (r + lambda/K) / (1 + lambda); behaviour is unchanged
+  // desc = encourages gate to produce more uncertain (near-uniform) predictions
   // desc = helps prevent premature expert collapse where gate assigns all samples to one expert
-  // desc = higher values produce more uniform gate probabilities
+  // desc = higher values pull gate probabilities harder toward 1/K (uniform)
   // desc = 0.0 means no regularization (default)
   // desc = recommended range: 0.01-0.1
   double mixture_gate_entropy_lambda = 0.0;
