@@ -277,6 +277,26 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
     Log::Info("MixtureGBDT: Momentum mode enabled (lambda=%.2f)",
               config_->mixture_smoothing_lambda);
   }
+
+  // Time-order guard for any mode whose responsibility / gate-proba update
+  // shifts by row index. EMA / momentum / Markov smoothing all assume row i
+  // is the temporal successor of row i-1. If the dataset is shuffled (which
+  // is LightGBM's default for non-time-series problems and for any random
+  // CV fold), these shifts blend unrelated samples and silently corrupt
+  // routing. There is no reliable way to detect ordering from the in-memory
+  // dataset, so we surface a loud warning instead.
+  const bool order_dependent_smoothing =
+      use_markov_ || use_momentum_ ||
+      config_->mixture_r_smoothing == "ema";
+  if (order_dependent_smoothing && config_->mixture_smoothing_lambda > 0.0) {
+    Log::Warning(
+        "MixtureGBDT: r_smoothing='%s' (lambda=%.2f) shifts responsibilities "
+        "by row index — only valid if rows are in true temporal order. "
+        "Random shuffling (default for many CV setups) will silently mix "
+        "unrelated samples. Disable smoothing (lambda=0) for shuffled data.",
+        config_->mixture_r_smoothing.c_str(),
+        config_->mixture_smoothing_lambda);
+  }
   gate_->Init(gate_config_.get(), train_data_, nullptr, {});
   Log::Debug("MixtureGBDT::Init - gate initialized");
 
@@ -299,6 +319,39 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
 
   // Initialize expert bias for loss-free load balancing
   expert_bias_.resize(num_experts_, 0.0);
+
+  // Initialize per-expert noise scale to the marginal residual variance.
+  // Using the empirical variance of y as a proxy for the worst-case scale
+  // ensures the first E-step does not divide by an absurdly small σ_k² for
+  // experts that haven't yet predicted anything (all f_k start at 0).
+  expert_variance_.resize(num_experts_, 1.0);
+  if (config_->mixture_estimate_variance) {
+    const label_t* init_labels = train_data_->metadata().label();
+    if (init_labels != nullptr && num_data_ > 0) {
+      double mean = 0.0;
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        mean += static_cast<double>(init_labels[i]);
+      }
+      mean /= num_data_;
+      double var_or_scale = 0.0;
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        const double r = static_cast<double>(init_labels[i]) - mean;
+        if (e_step_loss_type_ == "l1") {
+          var_or_scale += std::fabs(r);  // Laplace b
+        } else {
+          var_or_scale += r * r;          // Gaussian σ²
+        }
+      }
+      var_or_scale /= num_data_;
+      var_or_scale = std::max(var_or_scale, kMixtureEpsilon);
+      for (int k = 0; k < num_experts_; ++k) {
+        expert_variance_[k] = var_or_scale;
+      }
+      Log::Info("MixtureGBDT: initial per-expert noise scale = %.4g (%s)",
+                var_or_scale,
+                e_step_loss_type_ == "l1" ? "Laplace b" : "Gaussian σ²");
+    }
+  }
 
   // Initialize expert load for auxiliary load balancing
   // Add small random perturbation to break initial symmetry
@@ -324,6 +377,13 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
 
   // Initialize adaptive per-expert learning rate tracking
   if (config_->mixture_adaptive_lr) {
+    Log::Warning(
+        "MixtureGBDT: mixture_adaptive_lr=true scales each expert's learning "
+        "rate by its own loss trend, which means the K experts no longer "
+        "share a joint EM objective. The marginal log-likelihood is no longer "
+        "guaranteed to improve monotonically and ELBO diagnostics may be "
+        "misleading. Disable for principled EM unless you have a specific "
+        "reason to use it.");
     const int window = config_->mixture_adaptive_lr_window;
     expert_loss_history_.resize(num_experts_, std::vector<double>(window, 0.0));
     expert_lr_scale_.resize(num_experts_, 1.0);
@@ -419,20 +479,35 @@ void MixtureGBDT::InitResponsibilities() {
       }
     }
   } else if (config_->mixture_init == "balanced_kmeans") {
-    // Balanced K-Means initialization on labels
-    // Each expert gets exactly N/K samples (balanced clusters)
-    // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment
-    Log::Info("MixtureGBDT: Using Balanced K-Means initialization on labels");
+    // Balanced K-Means on (features, label). Each expert gets exactly N/K
+    // samples. The label is concatenated as an extra dimension, which biases
+    // clusters toward y-magnitude — useful when y is the strongest signal,
+    // but does NOT discover regimes in X-space alone.
+    Log::Info("MixtureGBDT: Using Balanced K-Means init on features + label");
+    InitResponsibilitiesBalancedKMeans(labels, /*include_label=*/true);
 
-    InitResponsibilitiesBalancedKMeans(labels);
+  } else if (config_->mixture_init == "kmeans_features") {
+    // Balanced K-Means on raw features only. Discovers regimes as regions
+    // in X-space, independent of y-magnitude. Recommended for regime-
+    // switching problems where the regime is a function of features
+    // (e.g. macro indicators, market microstructure) rather than y itself.
+    Log::Info("MixtureGBDT: Using Balanced K-Means init on features only "
+              "(regime discovery in X-space)");
+    InitResponsibilitiesBalancedKMeans(labels, /*include_label=*/false);
 
   } else if (config_->mixture_init == "gmm") {
-    // GMM (Gaussian Mixture Model) initialization on labels
-    // Produces soft responsibilities (probabilities) that align with EM theory
-    // Reference: Classical MoE (Jacobs 1991) uses GMM for gating
-    Log::Info("MixtureGBDT: Using GMM initialization on labels");
+    // GMM on (features, label). Soft responsibilities aligned with EM
+    // theory (Jacobs 1991), but again y is included as a dim so y-magnitude
+    // dominates the partition.
+    Log::Info("MixtureGBDT: Using GMM init on features + label");
+    InitResponsibilitiesGMM(labels, /*include_label=*/true);
 
-    InitResponsibilitiesGMM(labels);
+  } else if (config_->mixture_init == "gmm_features") {
+    // GMM on raw features only — the cleanest probabilistic regime-init
+    // when regimes live in X-space.
+    Log::Info("MixtureGBDT: Using GMM init on features only "
+              "(regime discovery in X-space)");
+    InitResponsibilitiesGMM(labels, /*include_label=*/false);
 
   } else if (config_->mixture_init == "tree_hierarchical") {
     // Tree-based hierarchical clustering initialization
@@ -459,51 +534,64 @@ void MixtureGBDT::InitResponsibilities() {
   }
 }
 
-void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels) {
-  // Balanced K-Means on features (with label as additional feature)
-  // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment
+void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
+                                                     bool include_label) {
+  // Balanced K-Means with optional label dimension.
+  // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment.
   //
   // Algorithm:
-  // 1. Initialize centroids using K-means++ on features
+  // 1. Initialize centroids using K-means++
   // 2. Iterate: assign samples to nearest centroid
-  // 3. Balance: ensure each cluster has exactly N/K samples using greedy assignment
+  // 3. Balance: ensure each cluster has exactly N/K samples (greedy)
   //
-  // Falls back to label-only if raw features are not available.
+  // include_label=true:  cluster on (features ⊕ label) — biased toward y
+  // include_label=false: cluster on features only — true regime discovery
+  //
+  // Falls back to label-only if raw features are not available, regardless
+  // of include_label, because there's nothing else to cluster on.
 
   const int K = num_experts_;
   const data_size_t N = num_data_;
-  const int max_iters = 20;  // K-means iterations
+  const int max_iters = 20;
 
-  // Get number of features
   int num_features = train_data_->num_features();
   bool has_raw = train_data_->has_raw();
 
-  // If no raw features, use labels only (1D clustering)
   if (!has_raw || num_features == 0) {
-    Log::Warning("MixtureGBDT: Raw features not available, using labels only for Balanced K-Means");
+    Log::Warning("MixtureGBDT: Raw features not available, falling back to "
+                 "labels-only Balanced K-Means");
     num_features = 0;
+    include_label = true;  // label is all we have
   }
 
-  const int D = num_features + 1;  // features + label
+  // Trailing label dim is appended only when include_label is true.
+  const int D = num_features + (include_label ? 1 : 0);
+  if (D == 0) {
+    Log::Warning("MixtureGBDT: Cannot run Balanced K-Means with 0 dimensions, "
+                 "falling back to uniform responsibilities");
+    const double uniform_r = 1.0 / num_experts_;
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] = uniform_r;
+      }
+    }
+    return;
+  }
 
-  // Build feature matrix (N x D) - sample-major order
   std::vector<double> X(static_cast<size_t>(N) * D);
-
-  // Compute feature statistics for normalization
   std::vector<double> feat_mean(D, 0.0);
   std::vector<double> feat_std(D, 1.0);
 
-  // Fill feature matrix and compute means
   for (data_size_t i = 0; i < N; ++i) {
-    // Copy features
     for (int f = 0; f < num_features; ++f) {
       const float* raw_feat = train_data_->raw_index(f);
       X[i * D + f] = static_cast<double>(raw_feat[i]);
       feat_mean[f] += X[i * D + f];
     }
-    // Add label as last feature
-    X[i * D + num_features] = static_cast<double>(labels[i]);
-    feat_mean[num_features] += X[i * D + num_features];
+    if (include_label) {
+      X[i * D + num_features] = static_cast<double>(labels[i]);
+      feat_mean[num_features] += X[i * D + num_features];
+    }
   }
 
   // Compute means
@@ -708,7 +796,8 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels) {
   Log::Info("MixtureGBDT: Balanced K-Means cluster sizes = [%s]", count_str.c_str());
 }
 
-void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels) {
+void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
+                                          bool include_label) {
   // Gaussian Mixture Model initialization
   // Reference: Classical MoE (Jacobs et al., 1991)
   //
@@ -731,13 +820,25 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels) {
   bool has_raw = train_data_->has_raw();
 
   if (!has_raw || num_features == 0) {
-    Log::Warning("MixtureGBDT: Raw features not available, using labels only for GMM");
+    Log::Warning("MixtureGBDT: Raw features not available, falling back to "
+                 "labels-only GMM");
     num_features = 0;
+    include_label = true;
   }
 
-  const int D = num_features + 1;  // features + label
+  const int D = num_features + (include_label ? 1 : 0);
+  if (D == 0) {
+    Log::Warning("MixtureGBDT: Cannot run GMM with 0 dimensions, falling "
+                 "back to uniform responsibilities");
+    const double uniform_r = 1.0 / num_experts_;
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] = uniform_r;
+      }
+    }
+    return;
+  }
 
-  // Build feature matrix (N x D)
   std::vector<double> X(static_cast<size_t>(N) * D);
 
   for (data_size_t i = 0; i < N; ++i) {
@@ -745,7 +846,9 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels) {
       const float* raw_feat = train_data_->raw_index(f);
       X[i * D + f] = static_cast<double>(raw_feat[i]);
     }
-    X[i * D + num_features] = static_cast<double>(labels[i]);
+    if (include_label) {
+      X[i * D + num_features] = static_cast<double>(labels[i]);
+    }
   }
 
   // Compute global mean and std for normalization
@@ -1153,12 +1256,15 @@ double MixtureGBDT::ComputePointwiseLoss(double y, double pred) const {
   } else if (e_step_loss_type_ == "l1") {
     return std::fabs(diff);
   } else if (e_step_loss_type_ == "quantile") {
-    // TODO(shiyu1994): Get quantile alpha from config
-    double alpha = 0.5;  // default median
+    // Pull the quantile level τ from config (same field LightGBM's quantile
+    // objective uses). Earlier this was hardcoded to 0.5 with a TODO, so
+    // E-step responsibilities were computed against the median even when the
+    // user trained for τ=0.9 — silently inconsistent with the objective.
+    const double tau = config_->alpha;
     if (diff >= 0) {
-      return alpha * diff;
+      return tau * diff;
     } else {
-      return (alpha - 1.0) * diff;
+      return (tau - 1.0) * diff;
     }
   }
   // Default to L2
@@ -1398,6 +1504,7 @@ void MixtureGBDT::EStep() {
   const label_t* labels = train_data_->metadata().label();
   const double alpha = config_->mixture_e_step_alpha;
   const double lb_alpha = config_->mixture_load_balance_alpha;
+  const bool estimate_var = config_->mixture_estimate_variance;
   // When gate_type="none", force loss_only mode (no gate probabilities available)
   // leaf_reuse has valid gate_proba from leaf statistics, so use configured mode
   const std::string mode = (config_->mixture_gate_type == "none")
@@ -1416,40 +1523,166 @@ void MixtureGBDT::EStep() {
     }
   }
 
+  // Precompute the per-expert log-density normalizer that does NOT depend on i.
+  //   Gaussian (l2): log p(y|x,f,σ²) = -0.5 log(2πσ²) - (y-f)²/(2σ²)
+  //                  → norm_k = -0.5 log(2π σ_k²)         and  scale_k = 1/(2σ_k²)
+  //   Laplace (l1):  log p(y|x,f,b)  = -log(2b) - |y-f|/b
+  //                  → norm_k = -log(2 b_k)                and  scale_k = 1/b_k
+  //   quantile/other: no proper density. Treat the loss as a pseudo-energy
+  //                   using a single scale, no normalizer (cancels in softmax).
+  std::vector<double> log_norm(num_experts_, 0.0);
+  std::vector<double> inv_scale(num_experts_, alpha);
+  if (estimate_var) {
+    for (int k = 0; k < num_experts_; ++k) {
+      const double s = std::max(expert_variance_[k], kMixtureEpsilon);
+      if (e_step_loss_type_ == "l1") {
+        // s holds Laplace b_k.
+        log_norm[k]  = -std::log(2.0 * s);
+        inv_scale[k] = 1.0 / s;
+      } else if (e_step_loss_type_ == "l2") {
+        // s holds variance σ_k². Constant 0.5*log(2π) is sample-independent
+        // and cancels under softmax across k *only if* it doesn't depend on
+        // k — which it doesn't, so we drop it for cleanliness. The
+        // -0.5*log(σ_k²) term DOES depend on k and is essential.
+        log_norm[k]  = -0.5 * std::log(s);
+        inv_scale[k] = 1.0 / (2.0 * s);
+      } else {
+        // quantile / other: 1/scale acts as alpha; no normalizer.
+        log_norm[k]  = 0.0;
+        inv_scale[k] = 1.0 / s;
+      }
+    }
+  }
+
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    // Create local scores vector for each thread
     std::vector<double> scores(num_experts_);
 
-    // Compute scores based on mode
     for (int k = 0; k < num_experts_; ++k) {
       double score = 0.0;
 
       if (mode == "gate_only") {
-        // gate_only mode: use only gate probability, ignore expert loss
-        double gate_prob = gate_proba_[i * num_experts_ + k];
+        const double gate_prob = gate_proba_[i * num_experts_ + k];
         score = std::log(gate_prob + kMixtureEpsilon);
       } else if (mode == "loss_only") {
-        // loss_only mode: use only expert loss, ignore gate probability
-        double expert_p = expert_pred_sm_[i * num_experts_ + k];
-        double loss = ComputePointwiseLoss(labels[i], expert_p);
-        score = -alpha * loss;
+        const double expert_p = expert_pred_sm_[i * num_experts_ + k];
+        const double loss = ComputePointwiseLoss(labels[i], expert_p);
+        if (estimate_var) {
+          score = log_norm[k] - inv_scale[k] * loss;
+        } else {
+          score = -alpha * loss;
+        }
       } else {
-        // em mode (default): use both gate probability and expert loss
-        double gate_prob = gate_proba_[i * num_experts_ + k];
-        double expert_p = expert_pred_sm_[i * num_experts_ + k];
-        double loss = ComputePointwiseLoss(labels[i], expert_p);
-        score = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
+        // em mode: log π_k(x) + log p(y | x, f_k, scale_k)
+        const double gate_prob = gate_proba_[i * num_experts_ + k];
+        const double expert_p = expert_pred_sm_[i * num_experts_ + k];
+        const double loss = ComputePointwiseLoss(labels[i], expert_p);
+        if (estimate_var) {
+          score = std::log(gate_prob + kMixtureEpsilon)
+                + log_norm[k] - inv_scale[k] * loss;
+        } else {
+          score = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
+        }
       }
 
-      // Apply auxiliary load balancing penalty
-      // This discourages routing to overloaded experts
       scores[k] = score - load_penalty[k];
     }
 
-    // Apply softmax to get responsibilities
     Softmax(scores.data(), num_experts_, responsibilities_.data() + i * num_experts_);
   }
+}
+
+void MixtureGBDT::UpdateExpertVariances() {
+  if (!config_->mixture_estimate_variance) return;
+
+  const label_t* labels = train_data_->metadata().label();
+  // Standard MoE M-step for the noise scale (per Jordan-Jacobs):
+  //   σ_k² = Σ_i r_ik (y_i - f_k(x_i))² / Σ_i r_ik
+  //   b_k  = Σ_i r_ik |y_i - f_k(x_i)| / Σ_i r_ik       (Laplace)
+  // Using a sample-major reduction with per-thread accumulators to avoid the
+  // false-sharing pitfall when num_experts_ is small.
+  std::vector<double> num_acc(num_experts_, 0.0);
+  std::vector<double> den_acc(num_experts_, 0.0);
+
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    const double y = static_cast<double>(labels[i]);
+    for (int k = 0; k < num_experts_; ++k) {
+      const double r = responsibilities_[i * num_experts_ + k];
+      const double f = expert_pred_sm_[i * num_experts_ + k];
+      const double diff = y - f;
+      const double residual_term =
+          (e_step_loss_type_ == "l1") ? std::fabs(diff) : (diff * diff);
+      num_acc[k] += r * residual_term;
+      den_acc[k] += r;
+    }
+  }
+
+  for (int k = 0; k < num_experts_; ++k) {
+    if (den_acc[k] > kMixtureEpsilon) {
+      expert_variance_[k] = std::max(num_acc[k] / den_acc[k], kMixtureEpsilon);
+    }
+    // else: keep previous estimate; den ~ 0 means no samples are routed to k
+  }
+
+  if (iter_ % 10 == 0) {
+    std::string buf;
+    for (int k = 0; k < num_experts_; ++k) {
+      buf += std::to_string(expert_variance_[k]).substr(0, 6) + " ";
+    }
+    Log::Debug("MixtureGBDT: per-expert noise scale = [%s]", buf.c_str());
+  }
+}
+
+double MixtureGBDT::ComputeMarginalLogLikelihood() const {
+  // Σ_i log Σ_k π_k(x_i) p(y_i | x_i, f_k, scale_k)
+  // computed via logsumexp for numerical stability.
+  if (num_data_ == 0) {
+    return -std::numeric_limits<double>::infinity();
+  }
+  const label_t* labels = train_data_->metadata().label();
+  const bool estimate_var = config_->mixture_estimate_variance;
+
+  std::vector<double> log_norm(num_experts_, 0.0);
+  std::vector<double> inv_scale(num_experts_, config_->mixture_e_step_alpha);
+  if (estimate_var) {
+    for (int k = 0; k < num_experts_; ++k) {
+      const double s = std::max(expert_variance_[k], kMixtureEpsilon);
+      if (e_step_loss_type_ == "l1") {
+        log_norm[k]  = -std::log(2.0 * s);
+        inv_scale[k] = 1.0 / s;
+      } else if (e_step_loss_type_ == "l2") {
+        log_norm[k]  = -0.5 * (std::log(2.0 * M_PI) + std::log(s));
+        inv_scale[k] = 1.0 / (2.0 * s);
+      } else {
+        log_norm[k]  = 0.0;
+        inv_scale[k] = 1.0 / s;
+      }
+    }
+  }
+
+  double total = 0.0;
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) reduction(+:total)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    double max_term = -std::numeric_limits<double>::infinity();
+    std::vector<double> terms(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      const double pi  = gate_proba_[i * num_experts_ + k];
+      const double f   = expert_pred_sm_[i * num_experts_ + k];
+      const double y   = static_cast<double>(labels[i]);
+      const double loss =
+          (e_step_loss_type_ == "l1") ? std::fabs(y - f) : (y - f) * (y - f);
+      const double t = std::log(pi + kMixtureEpsilon)
+                     + log_norm[k] - inv_scale[k] * loss;
+      terms[k] = t;
+      if (t > max_term) max_term = t;
+    }
+    double sum_exp = 0.0;
+    for (int k = 0; k < num_experts_; ++k) {
+      sum_exp += std::exp(terms[k] - max_term);
+    }
+    total += max_term + std::log(sum_exp + kMixtureEpsilon);
+  }
+  return total;
 }
 
 void MixtureGBDT::UpdateExpertLoad() {
@@ -1701,6 +1934,12 @@ void MixtureGBDT::UpdateExpertBias() {
 
   const double min_usage = 1.0 / (config_->mixture_balance_factor * num_experts_);
   const double bias_update_rate = 0.1;
+  // Decay rate for healthy experts. Bias is a *corrective* force — once an
+  // expert is no longer underloaded, its bias should drift back to zero so
+  // the gate's own signal can take over. Without decay, bias accumulated
+  // monotonically across iterations and eventually dominated the gate
+  // softmax, making the gate's learning effectively a no-op late in training.
+  const double bias_decay_rate = 0.02;
 
   // Compute actual load per expert (mean responsibility)
   std::vector<double> actual_load(num_experts_, 0.0);
@@ -1713,15 +1952,19 @@ void MixtureGBDT::UpdateExpertBias() {
     actual_load[k] /= num_data_;  // Normalize to [0, 1]
   }
 
-  // Update bias: only increase for underloaded experts (below threshold)
-  // Do NOT decrease for overloaded - allow natural imbalance
+  // Bidirectional update with decay:
+  //   - underloaded (load < min_usage): push bias up to recover
+  //   - healthy (load >= min_usage): exponentially decay bias toward 0
+  // Natural regime imbalance (e.g. 70:30) still survives because as long as
+  // both experts are above min_usage, neither bias is forced anywhere — they
+  // simply decay back to whatever the gate's own logits naturally produce.
   for (int k = 0; k < num_experts_; ++k) {
     if (actual_load[k] < min_usage) {
-      double load_diff = min_usage - actual_load[k];
+      const double load_diff = min_usage - actual_load[k];
       expert_bias_[k] += bias_update_rate * load_diff;
+    } else {
+      expert_bias_[k] *= (1.0 - bias_decay_rate);
     }
-    // Note: We don't decrease bias for overloaded experts
-    // This allows natural regime imbalance (e.g., 70:30)
   }
 
   // Log for debugging (only occasionally to avoid spam)
@@ -2421,6 +2664,14 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
 
     // Update expert bias for loss-free load balancing
     UpdateExpertBias();
+
+    // M-step for the per-expert noise scale σ_k² (or Laplace b_k). This
+    // closes the EM loop on the parameter that the legacy code held fixed
+    // via the temperature hyperparameter `mixture_e_step_alpha`. With the
+    // scale estimated from the data, the responsibility softmax becomes the
+    // proper Bayesian posterior of the mixture model rather than a hand-
+    // tuned reweighting of expert losses.
+    UpdateExpertVariances();
   }
 
   // M-step: update experts
@@ -2443,6 +2694,21 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
       MStepGateLeafReuse();
     }
     // "none": skip gate training entirely
+  }
+
+  // ELBO / marginal log-likelihood diagnostic. EM with an exact M-step is
+  // monotone non-decreasing in this quantity; here the M-step is
+  // approximate (each expert / the gate adds one tree per iter), so
+  // monotonicity is not guaranteed but should hold "most of the time".
+  // A persistent decrease across many iters indicates the EM machinery is
+  // not actually fitting the mixture — log it loudly so we notice.
+  if (config_->mixture_estimate_variance &&
+      moe_iter >= warmup_iters &&
+      (iter_ % 10 == 0 || iter_ < 5)) {
+    const double ll = ComputeMarginalLogLikelihood();
+    Log::Info("MixtureGBDT: iter=%d  marginal_log_lik=%.6f  (per_sample=%.6f)",
+              iter_, ll,
+              num_data_ > 0 ? ll / num_data_ : 0.0);
   }
 
   ++iter_;
