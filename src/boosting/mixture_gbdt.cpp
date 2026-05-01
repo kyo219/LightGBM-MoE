@@ -1858,21 +1858,19 @@ void MixtureGBDT::MStepExperts() {
       std::vector<score_t> temp_hess(num_data_);
       objective_function_->GetGradients(expert_k_pred_vec.data(), temp_grad.data(), temp_hess.data());
 
+      // Gradient weighting is always soft (r_ik). The hard_m_step flag now
+      // only restricts which samples each expert sees via SetBaggingData
+      // (sparse subset of argmax winners) — see the bagging branch above.
+      // Earlier behavior zeroed gradients for non-winners outright, which
+      // produced expert collapse whenever bagging fell back to the full
+      // dataset (assigned < min_safe): losers got no gradient signal at all
+      // for those samples, so the gate could not learn to route to them.
       #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
       for (data_size_t i = 0; i < num_data_; ++i) {
-        if (hard_m_step) {
-          if (best_expert[i] == k) {
-            all_grads[k][i] = temp_grad[i];
-            all_hess[k][i] = temp_hess[i];
-          } else {
-            all_grads[k][i] = 0.0;
-            all_hess[k][i] = static_cast<score_t>(kMixtureEpsilon);
-          }
-        } else {
-          double r_ik = responsibilities_[i * num_experts_ + k];
-          all_grads[k][i] = static_cast<score_t>(r_ik * temp_grad[i]);
-          all_hess[k][i] = static_cast<score_t>(r_ik * temp_hess[i]);
-        }
+        double r_ik = responsibilities_[i * num_experts_ + k];
+        all_grads[k][i] = static_cast<score_t>(r_ik * temp_grad[i]);
+        const double hess_val = r_ik * static_cast<double>(temp_hess[i]);
+        all_hess[k][i] = static_cast<score_t>(std::max(hess_val, kMixtureEpsilon));
 
         if (diversity_lambda > 0.0) {
           double div_grad = 0.0;
@@ -1887,23 +1885,14 @@ void MixtureGBDT::MStepExperts() {
         }
       }
     } else {
+      // L2 fallback path: same soft-gradient policy as above.
       #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
       for (data_size_t i = 0; i < num_data_; ++i) {
         double diff = expert_k_pred[i] - labels[i];
-
-        if (hard_m_step) {
-          if (best_expert[i] == k) {
-            all_grads[k][i] = static_cast<score_t>(2.0 * diff);
-            all_hess[k][i] = static_cast<score_t>(2.0);
-          } else {
-            all_grads[k][i] = 0.0;
-            all_hess[k][i] = static_cast<score_t>(kMixtureEpsilon);
-          }
-        } else {
-          double r_ik = responsibilities_[i * num_experts_ + k];
-          all_grads[k][i] = static_cast<score_t>(r_ik * 2.0 * diff);
-          all_hess[k][i] = static_cast<score_t>(r_ik * 2.0);
-        }
+        double r_ik = responsibilities_[i * num_experts_ + k];
+        all_grads[k][i] = static_cast<score_t>(r_ik * 2.0 * diff);
+        all_hess[k][i] = static_cast<score_t>(
+            std::max(r_ik * 2.0, kMixtureEpsilon));
 
         if (diversity_lambda > 0.0) {
           double div_grad = 0.0;
@@ -2053,29 +2042,16 @@ void MixtureGBDT::MStepExperts() {
 }
 
 void MixtureGBDT::MStepGate() {
-  // Create pseudo-labels: z_i = argmax_k r_ik
-  std::vector<label_t> pseudo_labels(num_data_);
-
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    int best_k = 0;
-    double best_r = responsibilities_[i * num_experts_];
-    for (int k = 1; k < num_experts_; ++k) {
-      double r = responsibilities_[i * num_experts_ + k];
-      if (r > best_r) {
-        best_r = r;
-        best_k = k;
-      }
-    }
-    pseudo_labels[i] = static_cast<label_t>(best_k);
-  }
-
-  // Update gate's labels
-  // Note: This requires modifying the dataset's labels, which is complex.
-  // For now, we'll use the gate's TrainOneIter with custom gradients.
-  // TODO(shiyu1994): Implement proper label update for gate training
-
-  // For multiclass, we compute softmax cross-entropy gradients
+  // Soft cross-entropy against the full responsibility distribution r_ik.
+  //
+  // Standard MoE/EM (Jordan-Jacobs hierarchical mixture of experts) trains the
+  // gate to minimize KL(r_i || g_i) per sample, which gives the gradient
+  //     dL/dz_ik = p_ik - r_ik
+  // for pre-softmax logits z_ik. Earlier versions of this code collapsed r_i
+  // to a one-hot via argmax before computing CE, which discards the soft
+  // routing signal: r=[0.4,0.35,0.15,0.10] and r=[0.99,0.005,0.003,0.002]
+  // produced identical gradients. That information loss was the dominant
+  // gate-training pathology — see audit notes for full discussion.
   std::vector<score_t> gate_grad(static_cast<size_t>(num_data_) * num_experts_);
   std::vector<score_t> gate_hess(static_cast<size_t>(num_data_) * num_experts_);
 
@@ -2086,37 +2062,31 @@ void MixtureGBDT::MStepGate() {
   // Entropy H(g) = -Σ g_k log(g_k) is maximized when g_k = 1/K (uniform)
   // We add a regularization term that pushes probabilities toward uniform:
   // grad_reg = λ * (p_k - 1/K)
-  // This makes the gate less confident early in training, allowing experts to differentiate
+  // The Hessian of this regularizer w.r.t. the logit is λ * p_k * (1-p_k) +
+  // (cross terms), which we conservatively absorb as +λ on the diagonal.
+  // Without this term the effective Newton step for the gate was scale-
+  // mismatched whenever entropy_lambda > 0.
   const double entropy_lambda = config_->mixture_gate_entropy_lambda;
   const double uniform_prob = 1.0 / num_experts_;
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    int label = static_cast<int>(pseudo_labels[i]);
     for (int k = 0; k < num_experts_; ++k) {
       size_t idx = i + k * num_data_;  // Gate uses class-major order
       double p = gate_proba_[i * num_experts_ + k];
+      double r = responsibilities_[i * num_experts_ + k];
 
-      // Base gradient: softmax cross-entropy
-      double base_grad;
-      if (k == label) {
-        base_grad = p - 1.0;
-      } else {
-        base_grad = p;
-      }
+      // Soft softmax cross-entropy gradient against responsibility target.
+      double base_grad = p - r;
 
-      // Entropy regularization: push toward uniform distribution
-      // grad_reg = λ * (p - 1/K)
-      // When p > 1/K (over-confident), this adds positive gradient to reduce p
-      // When p < 1/K (under-confident), this adds negative gradient to increase p
       double entropy_reg = entropy_lambda * (p - uniform_prob);
 
       gate_grad[idx] = static_cast<score_t>(base_grad + entropy_reg);
 
-      // Hessian for softmax cross-entropy: p * (1 - p)
-      // Note: We don't modify hessian for entropy regularization (would be λ, constant)
-      // The constant hessian is implicitly absorbed into the learning rate
-      gate_hess[idx] = static_cast<score_t>(std::max(p * (1.0 - p), kMixtureEpsilon));
+      // Diagonal Hessian: softmax CE gives p*(1-p); add λ for the entropy
+      // regularizer so the Newton step matches the gradient magnitude.
+      gate_hess[idx] = static_cast<score_t>(
+          std::max(p * (1.0 - p) + entropy_lambda, kMixtureEpsilon));
     }
   }
 
@@ -2290,18 +2260,63 @@ void MixtureGBDT::MStepGateLeafReuse() {
     }
   }
 
-  // Step 4: Periodically retrain gate GBDT for inference on new data.
+  // Step 4: Train the gate GBDT every iteration via soft CE against the
+  // leaf-aggregated routing distribution. Earlier behavior trained the gate
+  // only every mixture_gate_retrain_interval iterations against argmax
+  // pseudo-labels, leaving the GBDT trees decorative: Forward read
+  // gate_proba_ from leaf statistics during training, so the GBDT
+  // contributed nothing to in-domain routing and was sparsely fit for
+  // out-of-domain inference (PredictRegimeProba on unseen data).
   //
-  // On non-retrain iterations we used to call gate_->TrainOneIter with
-  // zero gradients to keep the tree count in sync, but that produced empty
-  // trees, made the gate's tree_learner share_state diverge from the active
-  // OMP thread count, and contributed to the issue #16 crash. The gate's
-  // iteration count is not actually required between retrains here — Forward
-  // pulls gate_proba_ directly when mixture_gate_type == "leaf_reuse", so
-  // skipping the no-op call is safe.
-  const int retrain_interval = config_->mixture_gate_retrain_interval;
-  if (iter_ % retrain_interval == 0) {
-    MStepGate();
+  // We compute the gate GBDT's *current* softmax predictions q_ik directly
+  // (NOT gate_proba_, which was just overwritten with the leaf-aggregated
+  // targets in Step 3). The CE gradient is then q_ik - target_ik, which
+  // matches the same soft-EM gradient used by MStepGate in gbdt mode.
+  std::vector<double> gate_raw_lr(static_cast<size_t>(num_data_) * num_experts_);
+  {
+    int64_t out_len;
+    gate_->GetPredictAt(0, gate_raw_lr.data(), &out_len);
+  }
+
+  std::vector<score_t> gate_grad_lr(static_cast<size_t>(num_data_) * num_experts_);
+  std::vector<score_t> gate_hess_lr(static_cast<size_t>(num_data_) * num_experts_);
+
+  const double entropy_lambda_lr = config_->mixture_gate_entropy_lambda;
+  const double uniform_prob_lr = 1.0 / num_experts_;
+
+  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    // Compute gate's current softmax (with bias + temperature) for sample i.
+    std::vector<double> scores(num_experts_);
+    for (int k = 0; k < num_experts_; ++k) {
+      scores[k] = (gate_raw_lr[k * num_data_ + i] + expert_bias_[k]) / gate_temperature_;
+    }
+    std::vector<double> q(num_experts_);
+    Softmax(scores.data(), num_experts_, q.data());
+
+    // Resolve target distribution from the leaf assignment.
+    const int leaf = sample_leaf[i];
+    const double* target;
+    std::vector<double> uniform_buf;
+    if (leaf >= 0 && leaf < num_leaves) {
+      target = leaf_expert_sum_buf_.data() + static_cast<size_t>(leaf) * num_experts_;
+    } else {
+      uniform_buf.assign(num_experts_, uniform_prob_lr);
+      target = uniform_buf.data();
+    }
+
+    for (int k = 0; k < num_experts_; ++k) {
+      const size_t idx = i + static_cast<size_t>(k) * num_data_;
+      const double base_grad = q[k] - target[k];
+      const double entropy_reg = entropy_lambda_lr * (q[k] - uniform_prob_lr);
+      gate_grad_lr[idx] = static_cast<score_t>(base_grad + entropy_reg);
+      gate_hess_lr[idx] = static_cast<score_t>(
+          std::max(q[k] * (1.0 - q[k]) + entropy_lambda_lr, kMixtureEpsilon));
+    }
+  }
+
+  for (int g = 0; g < config_->mixture_gate_iters_per_round; ++g) {
+    gate_->TrainOneIter(gate_grad_lr.data(), gate_hess_lr.data());
   }
 }
 
@@ -2391,7 +2406,9 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   const int warmup_iters = config_->mixture_warmup_iters;
   const int moe_iter = use_progressive_ ? (iter_ - seed_iterations_) : iter_;
 
-  if (moe_iter >= warmup_iters) {
+  const bool past_warmup = (moe_iter >= warmup_iters);
+
+  if (past_warmup) {
     if (use_expert_choice_) {
       EStepExpertChoice();
     } else {
@@ -2409,14 +2426,24 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   // M-step: update experts
   MStepExperts();
 
-  // M-step: update gate
-  if (config_->mixture_gate_type == "gbdt") {
-    // Gate should always be trained, even during warmup.
-    MStepGate();
-  } else if (config_->mixture_gate_type == "leaf_reuse") {
-    MStepGateLeafReuse();
+  // M-step: update gate.
+  //
+  // Skip gate training during warmup. Responsibilities are still at their
+  // initialization values (uniform / quantile / kmeans / etc.) and have not
+  // been refined by an E-step yet, so any trees added now would be fitting
+  // a frozen target — those iterations later need to be implicitly "unlearned"
+  // by subsequent updates because GBDT is additive. Letting the gate sit at
+  // its default uniform softmax for the warmup window is strictly cheaper
+  // and avoids a cold-start lag where the gate trails the experts by
+  // warmup_iters trees.
+  if (past_warmup) {
+    if (config_->mixture_gate_type == "gbdt") {
+      MStepGate();
+    } else if (config_->mixture_gate_type == "leaf_reuse") {
+      MStepGateLeafReuse();
+    }
+    // "none": skip gate training entirely
   }
-  // "none": skip gate training entirely
 
   ++iter_;
 
