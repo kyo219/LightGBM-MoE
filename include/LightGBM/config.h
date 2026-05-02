@@ -1333,6 +1333,57 @@ struct Config {
   // check = >=0
   int mixture_elbo_min_iter_for_plateau = 20;
 
+  // [doc-only] v0.8 partition re-grow
+  // desc = enable partition re-grow during refit fires (LightGBM-MoE v0.8)
+  // desc = when ``true`` AND ``mixture_refit_leaves=true``, each refit fire
+  //        first regrows the oldest ``mixture_regrow_per_fire`` trees per
+  //        expert (and gate, if ``mixture_gate_type='gbdt'``) by discarding
+  //        their split structures and rebuilding via the tree learner against
+  //        current r-weighted gradients, BEFORE running the standard v0.7
+  //        leaf-value refit
+  // desc = leaf refit (v0.7) only updates ``v_k^{(s)}`` (leaf values) with
+  //        ``S_k^{(s)}`` (split structure) frozen at construction-round r;
+  //        partition re-grow rewrites the (S, v) pair so split selection sees
+  //        current r — block coordinate ascent on the (split, leaf) pair
+  // desc = default ``false`` keeps v0.7 behavior bit-identical
+  // desc = auto-disabled at Init when ``mixture_gate_type='leaf_reuse'``
+  //        (refit/regrow rewrite expert leaves but leaf_reuse's gate GBDT
+  //        stays frozen, producing an asymmetric update)
+  // desc = see issue #41 / docs/v0.8/partition_regrow_design.md
+  bool mixture_regrow_oldest_trees = false;
+
+  // [doc-only] v0.8 partition re-grow
+  // desc = number of oldest trees to regrow per refit fire (per expert and,
+  //        when applicable, per gate). Larger = more aggressive basin escape,
+  //        higher per-fire wall cost (each regrow ≈ one tree-build)
+  // desc = ignored when ``mixture_regrow_oldest_trees=false``
+  // check = >0
+  int mixture_regrow_per_fire = 1;
+
+  // [doc-only] v0.8 partition re-grow
+  // desc = floor on the number of trees that must remain after regrow.
+  //        regrow stops when ``num_trees - regrow_per_fire < min_remaining``.
+  //        Prevents complete capacity destruction in extreme schedules where
+  //        the trigger fires many times early in training
+  // desc = ignored when ``mixture_regrow_oldest_trees=false``
+  // check = >=0
+  int mixture_regrow_min_remaining = 5;
+
+  // [doc-only] v0.8 partition re-grow
+  // type = enum
+  // options = replace, delete
+  // desc = how to handle the regrown slot:
+  // desc = ``replace`` (default): rebuild a new tree at the same slot via
+  //        ``tree_learner_->Train()``; ensemble size unchanged. Practical
+  //        choice — preserves capacity AND updates structure
+  // desc = ``delete``: remove the tree entirely; ensemble shrinks by
+  //        ``num_tree_per_iteration_`` per regrow. Subsequent training rounds
+  //        refill via normal MStepExperts. Included primarily as ablation to
+  //        isolate "partition update" effect from "capacity preservation"
+  //        effect — should not generally beat ``replace`` on tuned configs
+  // desc = ignored when ``mixture_regrow_oldest_trees=false``
+  std::string mixture_regrow_mode = "replace";
+
   // type = enum
   // options = value, value_and_regime, all
   // desc = output mode for mixture prediction

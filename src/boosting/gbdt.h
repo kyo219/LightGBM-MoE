@@ -213,6 +213,73 @@ class GBDT : public GBDTBase {
       double refit_decay);
 
   /*!
+   * \brief v0.8 partition re-grow. Drops the iter-`s_iter` tree(s) and rebuilds
+   *        them via `tree_learner_->Train()` against gradients/hessians supplied
+   *        by the callback.
+   *
+   * Where RefitLeavesByGradients only rewrites leaf VALUES with each tree's
+   * split structure frozen, this method discards the splits at iter `s_iter`
+   * and lets the tree learner pick fresh splits for the current gradient
+   * landscape. This is block coordinate ascent on the (split, leaf) pair
+   * — one step closer to a free-parameter EM M-step within the GBDT-MoE
+   * framework. See docs/v0.8/partition_regrow_design.md §2-3 for the math.
+   *
+   * Mechanics:
+   *   1. Zero train_score_updater_ and all valid_score_updater_, then replay
+   *      iters [0, s_iter) so the score reflects f^{(s_iter-1)} (the backbone
+   *      with iter s_iter's tree(s) removed)
+   *   2. Invoke `recompute_grad_hess(g_buf, h_buf)` once. Buffers are sized
+   *      `num_tree_per_iteration_ * num_data_` in class-major layout, matching
+   *      RefitLeavesByGradients. The callback may read GetTrainingScore() to
+   *      compute gradients against the backbone (the score is at f^{(s_iter-1)}
+   *      at this point).
+   *   3. For each tree_id in [0, num_tree_per_iteration_):
+   *        - tree_learner_->Train(g, h, is_first_tree=false) → new Tree*
+   *        - Apply Tree::Shrinkage(shrinkage_rate_) (matches gbdt.cpp:581)
+   *        - Replace models_[s_iter * K + tree_id] (in-place unique_ptr swap)
+   *        - AddScore(tree_learner_.get(), new_tree, tree_id) on all updaters
+   *   4. Replay iters (s_iter, T) so the score reflects the new full ensemble
+   *
+   * Bagging: forced to full-data inside this call (`SetBaggingData` with all
+   * indices 0..num_data_-1) so the regrown tree sees every sample weighted
+   * by `r`, not whatever hard partition MStepExperts last set. The next
+   * MStepExperts call will reset bagging to its expected state.
+   *
+   * No-op when models_ has fewer than `(s_iter+1)` iters or when num_data_<=0.
+   *
+   * \param s_iter Iteration index of the tree(s) to regrow. For multiclass
+   *        boosters (num_tree_per_iteration_>1, e.g. K-class softmax gate),
+   *        all K trees at this iter are rebuilt as a unit (their softmax
+   *        coupling makes per-class regrow ill-defined).
+   * \param recompute_grad_hess Callback invoked exactly once after the score
+   *        updaters are at f^{(s_iter-1)}; writes per-class g/h buffers.
+   * \param l2_reg Reserved for future symmetry with RefitLeavesByGradients;
+   *        currently the tree learner uses its own config-driven lambda.
+   */
+  virtual void RegrowTreeAt(
+      int s_iter,
+      std::function<void(score_t* grad_buf, score_t* hess_buf)> recompute_grad_hess,
+      double l2_reg);
+
+  /*!
+   * \brief v0.8 partition re-grow, delete-mode variant. Removes iter-`s_iter`
+   *        tree(s) entirely. Subsequent iters shift down by one;
+   *        num_tree_per_iteration_ trees disappear from `models_`.
+   *
+   * Provided primarily as an ablation against RegrowTreeAt's `replace` mode:
+   * isolates the effect of "current-r partition" from "preserved capacity".
+   * In normal use prefer RegrowTreeAt — capacity loss generally hurts.
+   *
+   * Mechanics:
+   *   1. Zero score updaters, replay iters [0, s_iter)
+   *   2. `models_.erase` the K trees at slot `s_iter * K`
+   *   3. Replay the remaining (now-shifted) iters
+   *
+   * No-op when models_ has fewer than `(s_iter+1)` iters.
+   */
+  virtual void DeleteTreeAt(int s_iter);
+
+  /*!
   * \brief Training logic
   * \param gradients nullptr for using default objective, otherwise use self-defined boosting
   * \param hessians nullptr for using default objective, otherwise use self-defined boosting
