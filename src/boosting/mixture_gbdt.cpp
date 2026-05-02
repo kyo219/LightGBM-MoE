@@ -3785,6 +3785,43 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
   config_ = std::unique_ptr<Config>(new Config());
   config_->mixture_num_experts = num_experts_;
 
+  // Restore training-time mixture parameters into the freshly-default config.
+  // Without this block, every save/load round-trip silently snapped these
+  // back to defaults — and `lgb.train` performs that round-trip *internally*
+  // at the end of training (engine.py: `booster.model_from_string(model_to_string())`),
+  // so even users who never explicitly save/load were affected.
+  //
+  // The most user-visible symptom was Markov inference: training with
+  // `mixture_r_smoothing=markov` set `use_markov_=true` during fitting, but
+  // after the post-train round-trip the loaded booster had `use_markov_=false`
+  // and `mixture_smoothing_lambda=0`. `predict_markov()` then silently no-ops
+  // (line 3341 / 3376 guards on `use_markov_`), and Python's
+  // `predict_regime_proba_markov` no-ops too because it reads `lambda=0` /
+  // `smoothing="none"` out of the loaded params dict. Test-set predictions
+  // diverged from validation behaviour without any error or warning.
+  if (params.count("mixture_r_smoothing")) {
+    config_->mixture_r_smoothing = params["mixture_r_smoothing"];
+  }
+  if (params.count("mixture_smoothing_lambda")) {
+    try {
+      config_->mixture_smoothing_lambda =
+          std::stod(params["mixture_smoothing_lambda"]);
+    } catch (...) { /* keep default */ }
+  }
+  if (params.count("mixture_e_step_alpha")) {
+    try {
+      config_->mixture_e_step_alpha =
+          std::stod(params["mixture_e_step_alpha"]);
+    } catch (...) { /* keep default */ }
+  }
+  if (params.count("mixture_e_step_mode")) {
+    config_->mixture_e_step_mode = params["mixture_e_step_mode"];
+  }
+  // Re-derive smoothing-mode flags from the restored config (mirrors Init()
+  // line ~266). These flags are not serialized themselves; they are computed.
+  use_markov_ = (config_->mixture_r_smoothing == "markov");
+  use_momentum_ = (config_->mixture_r_smoothing == "momentum");
+
   // Initialize experts
   experts_.clear();
   experts_.reserve(num_experts_);
