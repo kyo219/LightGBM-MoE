@@ -98,6 +98,8 @@ Three pathology guards worth knowing about:
 - **Diversity regularizer sign** was inverted in earlier code (pushed experts *together*). Sign + Huber clip + Hessian damping fix in [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) — the empirical "`mixture_diversity_lambda` is the only universal MoE knob" finding ([Settings that won](#settings-that-won--search-every-knob)) only became real after this.
 - **ELBO is logged every 10 iters** (`Σ_i log Σ_k π_k p(y_i | f_k, σ_k²)`). Approximate M-step makes small dips normal; persistent / >5% drops have historically meant high expert dropout, adaptive-LR decoupling experts from EM, or a recent gradient/Hessian regression — flagged loudly so we don't miss it.
 
+A v0.7 opt-in (`mixture_refit_leaves=true`, [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)) goes one step further: it makes the M-step refit every existing tree's leaves in closed form against the current `r_ik` before the next tree is appended — recovering classical EM's "free-parameter M-step" within each tree's partition. See [Limitations § v0.7 leaf-value refit](#v07-leaf-value-refit--opt-in-safety-net-for-bad-inits) for when this helps (bad-init recovery) vs. when it doesn't (already-tuned configs).
+
 Full deep dive with code refs: [docs/moe/architecture.md](docs/moe/architecture.md).
 
 ## Limitations
@@ -121,7 +123,30 @@ Two consequences worth being honest about:
 - **Large regime re-assignments don't happen mid-training.** Some refinement happens — that's why the [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) diversity term and the [#36](https://github.com/kyo219/LightGBM-MoE/pull/36) symmetry breaker matter — but you don't see the "EM flipped two components" behavior of free-parameter EM. Snapshotting `model.get_responsibilities()` from a per-iter callback (see the docstring in `python-package/lightgbm_moe/basic.py:4994`) shows `r` smoothing toward its fixed point, not bouncing between modes.
 - **This compounds init dependence above** — the basin set by `r_init` is sticky because the model cannot take big jumps in `r` to escape it.
 
-If your problem genuinely needs mode-discovery rather than mode-refinement (e.g. unsupervised regime detection where the regime structure is unknown a priori), this implementation will under-deliver versus a free-parameter EM with K random restarts. **The root-cause fix — leaf-value refit-on-r-update, which restores the closed-form M-step on each tree's existing partition structure — is planned for v0.7** (tracked in [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)). Until then, this is a real limitation; track it via `model.get_responsibilities()` snapshots and watch for ELBO-monotonicity warnings.
+### v0.7 leaf-value refit — opt-in safety net for bad inits
+
+The root-cause fix — **leaf-value refit-on-r-update**, which restores the closed-form M-step on each tree's existing partition structure — landed in v0.7 ([#37](https://github.com/kyo219/LightGBM-MoE/issues/37) / [PR #40](https://github.com/kyo219/LightGBM-MoE/pull/40)). Enable with `mixture_refit_leaves=true` (default `false`); the M-step then rewrites every existing tree's leaves against the current `r_ik` before appending the next tree, instead of leaving them frozen at the `r` of their construction round.
+
+```python
+params = {
+    "boosting": "mixture",
+    ...,
+    "mixture_refit_leaves": True,         # opt-in v0.7 behavior
+    "mixture_refit_trigger": "elbo",      # always | elbo (default safest) | every_n
+    "mixture_refit_decay_rate": 0.0,      # 0.0=full replace, 1.0=no-op
+}
+```
+
+**Empirical position (verified by [`bench_results/v0_7_acceptance_FINAL.md`](bench_results/v0_7_acceptance_FINAL.md))**:
+
+- **Refit is a safety net for bad inits, not a free improvement on Optuna-tuned configs.** On the 6-dataset 500-trial study with v0.6 winning configs held fixed (per-config ablation), refit on `decay=0.0`/`every_n=10` slightly *degrades* RMSE on 5/6 datasets (+0.4–7.6%) — those configs were tuned to work well *under* append-only EM, and refit breaks the invariants they relied on. Tiny improvement on `fred_gdp` (−0.21%) is within one std.
+- **The strongest case is genuinely bad init.** On synthetic two-regime data with `mixture_init=random`, refit recovers from RMSE 1.015 → 0.634 (**−37%**) and `||r_t − r_init||_F` climbs to 0.99 (escapes the bad basin). On the same data with `mixture_init=gmm`, refit *hurts* (0.885 → 1.002, +13%) because the gmm init was already near the right mode and refit drifts away from it. See [`examples/em_refit_regime_evolution.py`](examples/em_refit_regime_evolution.py) for the four-config side-by-side regime tape plots.
+- **`elbo` trigger is bit-identical to off** when EM is well-behaved — the trigger condition (>5% ELBO drop) doesn't fire for monotone-converging configs. So `trigger=elbo` is the safe opt-in: zero cost when nothing's wrong, leaf-refit kicks in when it is.
+- **`gate_type="leaf_reuse"` is incompatible with refit and is auto-force-disabled at Init** with a one-time warning (refit rewrites expert leaves, but leaf_reuse's gate GBDT stays frozen, producing an asymmetric update — empirically +7% RMSE on `vix`).
+
+Track regime evolution mid-training with `model.get_responsibilities()` from a per-iter callback — `RegimeEvolutionRecorder` in `python-package/lightgbm_moe/viz.py` does this with a 4-panel diagnostic plot.
+
+If your problem genuinely needs mode-discovery rather than mode-refinement (e.g. unsupervised regime detection where the regime structure is unknown a priori), this implementation still under-delivers versus a free-parameter EM with K random restarts even with refit on. The structural limitation hasn't gone away — refit pushes the bound but doesn't fully eliminate it.
 
 ## When to use MoE
 
@@ -252,7 +277,8 @@ python examples/comparative_study.py --trials 500 \
 | Expert collapse prevention & `diagnose_moe` | [docs/moe/advanced-collapse.md](docs/moe/advanced-collapse.md) |
 | SHAP analysis for MoE components | [docs/moe/shap.md](docs/moe/shap.md) |
 | `int8` & `use_quantized_grad` compatibility (8-axis matrix) | [docs/moe/int8-compat.md](docs/moe/int8-compat.md) |
-| Architecture & EM-loop deep dive | [docs/moe/architecture.md](docs/moe/architecture.md) |
+| Architecture & EM-loop deep dive (incl. v0.7 leaf-refit §2.7) | [docs/moe/architecture.md](docs/moe/architecture.md) |
+| v0.7 leaf-refit acceptance bench (per-config + search-level + bad-init) | [bench_results/v0_7_acceptance_FINAL.md](bench_results/v0_7_acceptance_FINAL.md) |
 
 ## License
 
