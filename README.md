@@ -46,9 +46,9 @@ import lightgbm_moe as lgb
 
 params = {
     'boosting': 'mixture',           # Enable MoE mode
-    'mixture_num_experts': 3,        # Number of experts
-    'mixture_gate_type': 'gbdt',     # Universal winner in the 500-trial / 5-dataset study
-    'mixture_routing_mode': 'token_choice',
+    'mixture_num_experts': 3,        # Number of experts (search 2-6 for your data)
+    'mixture_gate_type': 'gbdt',     # Best on 4/6 datasets; search 'leaf_reuse' too
+    'mixture_routing_mode': 'token_choice',  # Tied 3/3 with 'expert_choice' across datasets
     'objective': 'regression',
     'metric': 'rmse',
     'verbose': -1,
@@ -73,22 +73,22 @@ expert_preds = model.predict_expert_pred(X_test)    # Expert predictions (N, K)
 
 ## When to use MoE
 
-The 5-dataset, 500-trial study below (sp500 is included in two parallel feature configurations, so 6 rows) shows MoE provides accuracy improvements on every dataset, ranging from sub-percent (`sp500_basic`, essentially a tie) to substantial (**`vix` −15.1 %**, the dataset where the low-vol / high-vol regime structure is most pronounced). The most informative comparison is **`sp500_basic` (13 features) vs `sp500` (28 features)** on the same raw series: MoE's edge grows as the feature set makes the latent regime more observable — the broader thesis that "MoE wins scale with regime observability" is reproducible *within* a single dataset by changing only the feature engineering. Compute trade-off varies: most datasets cost **1.7–4.8 ×** naive's per-fold train time, but `fred_gdp` and the enriched `sp500` are only **0.85–2.2 ×** (MoE is in fact slightly *faster* than naive on `sp500`). Net rule: try MoE when you care about the last few percent and your wall time has 2–5× headroom.
+The 5-dataset, 500-trial study below (sp500 is included in two parallel feature configurations, so 6 rows) shows MoE matches or beats naive LightGBM on 5 of 6 rows, with gains ranging from **sub-percent ties** (`sp500`, `sp500_basic`) to **substantial wins on the regime-structured datasets** (**`synthetic` −26.8 %**, **`vix` −7.4 %**, `hmm` −2.1 %). On `fred_gdp` (only ~310 quarterly samples — likely the smallest-data regime where MoE's K-way capacity hurts more than it helps) naive narrowly wins by +0.75 %. Compute trade-off: MoE costs **1.3–9.8 ×** naive's per-fold train time across these datasets — the ratio is highest on the small `sp500` and `hmm` series where naive's per-fold time is already tiny. Net rule: try MoE when there is real regime structure in the data and your wall time has at least 5–10 × headroom relative to naive.
 
 ## Benchmark — 500-trial study (naive-lightgbm vs MoE, 5 datasets)
 
-5-fold time-series CV, 500 Optuna trials per (variant × dataset), 5 datasets spanning synthetic-ideal → real macro/financial → controlled-latent. Full report: [`bench_results/study_500_report.md`](bench_results/study_500_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
+5-fold time-series CV, 500 Optuna trials per (variant × dataset), 5 datasets spanning synthetic-ideal → real macro/financial → controlled-latent. Numbers below are **deterministic** — `--n-jobs 1` (the default since [PR #30](https://github.com/kyo219/LightGBM-MoE/pull/30)) makes Optuna's TPE sampler reproducible across runs and across builds with the same seed, so build-to-build comparisons are not contaminated by parallel-worker scheduling noise (which historically had ±0.3 RMSE-std on synthetic). Full report: [`bench_results/study_500_report.md`](bench_results/study_500_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
 
 | Dataset | Shape | naive-lightgbm best | MoE best | Δ RMSE | Speed (MoE / naive, median train s/fold) |
 |---|---|---|---|---|---|
-| `synthetic` | 2000 × 5 | 4.9765 | **4.6651** | −6.3 % | 0.663 / 0.240 = **2.76 ×** |
-| `fred_gdp` | 311 × 12 | 0.9286 | **0.9128** | −1.7 % | 0.122 / 0.055 = **2.22 ×** |
-| `sp500_basic` (13 feat) | 3761 × 13 | **0.01003** | 0.01005 | +0.18 % *(naive wins)* | 0.152 / 0.127 = **1.20 ×** |
-| `sp500` (28 feat, enriched) | 3711 × 28 | 0.01002 | **0.00998** | −0.34 % | 0.134 / 0.158 = **0.85 ×** *(MoE faster)* |
-| `vix` | 3762 × 13 | 2.8942 | **2.4574** | **−15.1 %** | 0.386 / 0.081 = **4.77 ×** |
-| `hmm` | 2000 × 5 | 2.1893 | **2.1096** | −3.6 % | 0.126 / 0.074 = **1.70 ×** |
+| `synthetic` | 2000 × 5 | 5.0233 | **3.6779** | **−26.8 %** | 0.044 / 0.034 = **1.29 ×** |
+| `fred_gdp` | 311 × 12 | **0.9311** | 0.9381 | +0.75 % *(naive wins)* | 0.020 / 0.003 = **6.44 ×** |
+| `sp500_basic` (13 feat) | 3761 × 13 | 0.01003 | **0.00996** | −0.66 % | 0.119 / 0.012 = **9.79 ×** |
+| `sp500` (28 feat, enriched) | 3711 × 28 | 0.01002 | 0.01002 | ±0.00 % *(tie)* | 0.054 / 0.009 = **6.18 ×** |
+| `vix` | 3762 × 13 | 2.8869 | **2.6745** | **−7.4 %** | 0.062 / 0.011 = **5.91 ×** |
+| `hmm` | 2000 × 5 | 2.1913 | **2.1465** | −2.1 % | 0.046 / 0.005 = **8.34 ×** |
 
-> **The sp500 pair is a controlled feature-engineering ablation on the same raw series**: only the feature set changes between rows, identical CV / Optuna budget / seed. With 13 features `naive-lightgbm` wins by 0.18 %; with 28 features MoE flips to a 0.34 % win *and* trains 15 % faster. The flip from "basic" to "enriched" is the cleanest in-repo demonstration that MoE's lift scales with how observable the regime is from the features you provide.
+> **The sp500 pair is a controlled feature-engineering ablation on the same raw series**: only the feature set changes between rows, identical CV / Optuna budget / seed. Both rows are essentially ties (`sp500_basic` MoE 0.66 % win, `sp500` exact tie at 0.01002). The next-day-log-return objective on this series appears to hit the irreducible noise floor under both architectures — neither model extracts more signal from the broader feature set, but neither is hurt by it either.
 
 ### Datasets
 
@@ -145,24 +145,26 @@ The empirical takeaway from the side-by-side: with the basic feature set the res
 
 Real-world fetches (FRED, yfinance) are cached under `examples/data_cache/` (gitignored). First run pulls from the network; subsequent runs are offline.
 
-### Settings that won on every dataset
+### Settings that won — search every knob
 
-The only categorical setting that produced the absolute best (min) RMSE on all 5 datasets is **`mixture_gate_type='gbdt'`**. For everything else, the optimal value depends on the dataset — full per-dataset table in [docs/moe/benchmark.md](docs/moe/benchmark.md).
+In the deterministic 500-trial study, **no MoE knob was a universal winner**: the best `mixture_gate_type` is `gbdt` on 4 of 6 rows but `leaf_reuse` on `fred_gdp` and `vix`; the best `mixture_routing_mode` is split 3 / 3 between `token_choice` and `expert_choice`; the best `mixture_num_experts` is spread across {2, 3, 4}. The only knob that's **non-zero on every dataset** is `mixture_diversity_lambda` (range [0.07, 0.36] across the 6 winners), which validates that the diversity regularizer is doing real work — search it explicitly. Full per-dataset table in [docs/moe/benchmark.md](docs/moe/benchmark.md).
 
 | Parameter | Universal? | Notes |
 |---|---|---|
-| `mixture_gate_type` | **`gbdt`** | Best minimum RMSE on every dataset; `leaf_reuse` and `none` never produced the absolute best |
-| `mixture_routing_mode` | **No** | `token_choice` won on synthetic; `expert_choice` won on fred_gdp, vix, hmm. Search both. |
-| `mixture_num_experts` | weakly 3-4 | Q4 quartile mean is best on most datasets but margin is small |
-| `mixture_diversity_lambda` | search 0.0–0.5 | Consistently top-5 in fANOVA importance for MoE; no single best value, but searching it matters |
+| `mixture_gate_type` | **No** | `gbdt` wins on synthetic, sp500_basic, sp500, hmm; `leaf_reuse` wins on fred_gdp, vix. Search both. |
+| `mixture_routing_mode` | **No** | `token_choice` wins on synthetic, sp500, hmm; `expert_choice` wins on fred_gdp, sp500_basic, vix. Search both. |
+| `mixture_num_experts` | **No** | K=4 most common (3 / 6), but K=2 wins on synthetic and vix, K=3 on hmm. Search {2, 3, 4, 6}. |
+| `mixture_diversity_lambda` | search 0.05–0.4 | Always non-zero in the per-dataset best params after the [PR #26](https://github.com/kyo219/LightGBM-MoE/pull/26) sign / Hessian fix. Top-5 in fANOVA importance. |
+| `mixture_estimate_variance` | **leave at default `true`** | Default since [PR #24](https://github.com/kyo219/LightGBM-MoE/pull/24). Setting `false` re-enables the legacy fixed-`alpha` E-step temperature, which is y-scale dependent and emits a warning at Init. |
 
 Dataset-dependent knobs (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `extra_trees`, `learning_rate`) need per-problem search — see [docs/moe/benchmark.md](docs/moe/benchmark.md) for the full breakdown table.
 
 ```bash
-# Reproduce the full headline study (~30-40 min on 12-core / 24-thread; 6 dataset rows)
+# Reproduce the full headline study (~20 min on 12-core / 24-thread, 6 dataset rows;
+# default --n-jobs 1 makes the result deterministic across runs and builds — see PR #30)
 python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 
-# Smoke test (~1 min, all 6 dataset rows)
+# Smoke test (~1 min, all 6 dataset rows; --n-jobs 2 trades reproducibility for speed)
 python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
 
 # Subset of datasets
