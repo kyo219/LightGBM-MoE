@@ -71,6 +71,58 @@ regime_proba = model.predict_regime_proba(X_test)   # Gate probabilities (N, K)
 expert_preds = model.predict_expert_pred(X_test)    # Expert predictions (N, K)
 ```
 
+## How regime estimation works
+
+Each boosting round runs one **soft-EM step** (Jordan & Jacobs 1991, GBDT-ified). After a short warmup (default 5 rounds — gate fits `r_init` first so the first real E-step has a meaningful prior):
+
+```
+per round:
+  Forward    →  expert preds f_k(x),  gate prior π_k(x)
+  E-step     →  r_ik = softmax_k[ log π_k(x_i) + log p(y_i | f_k(x_i), σ_k²) ]
+  M-step σ²  →  σ_k² = Σ_i r_ik (y_i − f_k)² / Σ_i r_ik
+  M-step f   →  expert k gets +1 tree, gradient = r_ik · ∂L/∂f_k
+  M-step g   →  gate gets +K trees, soft CE  ∇z = (p − r) / T
+```
+
+`r_ik` is the **posterior probability that sample i was emitted by regime k** under the current mixture, not just a routing weight — this is what makes `predict_regime_proba` well-calibrated rather than just "where the gate happens to point". Three implementation choices distinguish this from a textbook GBDT-MoE — each was a real bug at some point:
+
+| Choice | What it fixes | PR |
+|---|---|---|
+| Per-expert noise scale `σ_k²` is **estimated each round** (default since #24) | Without it, a hand-tuned `mixture_e_step_alpha` is silently doing what `1/(2σ²)` should — y-scale variant, broken across datasets. With it, the responsibility softmax is the actual Bayesian posterior — y-scale invariant. | [#24](https://github.com/kyo219/LightGBM-MoE/pull/24) |
+| **Bias-free prior split**: `π_k = softmax(z/T)` for the E-step, `softmax((z+b)/T)` for the actual routing | DeepSeek "loss-free LB" bias is a routing nudge, not part of the probabilistic model; mixing it into the prior makes the gate spend each iter unlearning the bias the load balancer just added. | [#25](https://github.com/kyo219/LightGBM-MoE/pull/25) |
+| **Soft CE gate** with `∇z = (p − r)/T`, Hessian = `K/(K−1) · p(1−p) / T²` (Friedman) | Earlier code argmax'd `r` to hard pseudo-labels (dropped the soft routing signal); missing chain-rule mis-scaled Newton steps by T at non-unit temperatures; missing Friedman factor mis-sized leaf values by `(K−1)/K`. | [#23](https://github.com/kyo219/LightGBM-MoE/pull/23) |
+
+Three pathology guards worth knowing about:
+
+- **Uniform `r` is an EM fixed point** — same gradient → identical trees → `r` stays uniform forever. After init, a deterministic sin perturbation breaks the symmetry (no-op when `r` is non-uniform; only `mixture_init=uniform` actually triggers it). Reproducer: `examples/em_init_sensitivity.py` ([#36](https://github.com/kyo219/LightGBM-MoE/pull/36)).
+- **Diversity regularizer sign** was inverted in earlier code (pushed experts *together*). Sign + Huber clip + Hessian damping fix in [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) — the empirical "`mixture_diversity_lambda` is the only universal MoE knob" finding ([Settings that won](#settings-that-won--search-every-knob)) only became real after this.
+- **ELBO is logged every 10 iters** (`Σ_i log Σ_k π_k p(y_i | f_k, σ_k²)`). Approximate M-step makes small dips normal; persistent / >5% drops have historically meant high expert dropout, adaptive-LR decoupling experts from EM, or a recent gradient/Hessian regression — flagged loudly so we don't miss it.
+
+Full deep dive with code refs: [docs/moe/architecture.md](docs/moe/architecture.md).
+
+## Limitations
+
+Two practical caveats of regime estimation in this model. The first is universal to switching models; the second is specific to this implementation.
+
+### Init dependence (universal to switching models / MoE)
+
+EM converges to a *local* fixed point of `r`, and which fixed point you reach depends on `r_init`. This is the same multimodality that makes GMM and HMM fits init-dependent — not unique to MoE-GBDT. Practical implications:
+
+- If the regime is observable from X, prefer `mixture_init=gmm_features` or `kmeans_features` over the `[X, y]`-aware variants. Cluster on raw features, not on the label.
+- `mixture_init` is worth searching over with Optuna — it's not interchangeable across datasets, and there is no universal best init (verified in the 500-trial study).
+- **Don't read `r_ik` as "the true regime" of sample i.** It's "the regime *this* run of EM converged to under *this* init". Different runs with different inits are valid alternative explanations of the same data.
+
+### EM updates are additive-only (model-specific)
+
+Classical EM rewrites parameters freely between iterations — at iter t+1 the component means/variances can be radically different from t, and that is how EM escapes one basin and finds another mode. **Here the experts are gradient-boosted ensembles, so each EM round only *appends* one tree per expert** (historical trees are frozen). The expert function `f_k(x)` therefore evolves incrementally (one tree of `learning_rate`-scaled correction per round); `r_ik` shifts only as fast as the new tree's contribution to `loss(y_i, f_k(x_i))` shifts; and the gate's accumulated trees lock in routing toward whichever expert `r` concentrated on early.
+
+Two consequences worth being honest about:
+
+- **Large regime re-assignments don't happen mid-training.** Some refinement happens — that's why the [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) diversity term and the [#36](https://github.com/kyo219/LightGBM-MoE/pull/36) symmetry breaker matter — but you don't see the "EM flipped two components" behavior of free-parameter EM. Snapshotting `model.get_responsibilities()` from a per-iter callback (see the docstring in `python-package/lightgbm_moe/basic.py:4994`) shows `r` smoothing toward its fixed point, not bouncing between modes.
+- **This compounds init dependence above** — the basin set by `r_init` is sticky because the model cannot take big jumps in `r` to escape it.
+
+If your problem genuinely needs mode-discovery rather than mode-refinement (e.g. unsupervised regime detection where the regime structure is unknown a priori), this implementation will under-deliver versus a free-parameter EM with K random restarts. Mitigations like periodic expert re-seeding or `r_init`-restart-and-select-by-held-out-ELBO are not implemented as of v0.6.0.
+
 ## When to use MoE
 
 MoE's gating mechanism wins on regime-structured data — but the **honest baseline is not single-model naive LightGBM, it's a K-way ensemble of LightGBMs** with the same total tree budget. Simply averaging K independent models with different seeds gives variance reduction "for free"; the question is whether MoE's learned routing beats that. The 6-row study below answers it: **MoE clearly wins on `synthetic` (−24.8 %), `vix` (−6.9 %), `hmm` (−1.6 %) — datasets where the regime is observable from `X` —, ties on the `sp500` rows, and *loses to the K-way ensemble on `fred_gdp`* (+3.2 %)**. On `fred_gdp` (~310 quarterly samples) the K-way capacity helps but gating does not — the regime is too noisy or the dataset too small for the gate to learn it, and uniform averaging extracts the available capacity better than learned routing. Compute trade-off: MoE costs **1.3–8.4 ×** naive single-model time, and **0.5–2.8 ×** naive-ensemble time. Net rule: try MoE when (a) you believe the regime is observable from your features and (b) your wall time has 5–10 × headroom over single-model LightGBM.
