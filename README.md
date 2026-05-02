@@ -121,7 +121,7 @@ Two consequences worth being honest about:
 - **Large regime re-assignments don't happen mid-training.** Some refinement happens — that's why the [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) diversity term and the [#36](https://github.com/kyo219/LightGBM-MoE/pull/36) symmetry breaker matter — but you don't see the "EM flipped two components" behavior of free-parameter EM. Snapshotting `model.get_responsibilities()` from a per-iter callback (see the docstring in `python-package/lightgbm_moe/basic.py:4994`) shows `r` smoothing toward its fixed point, not bouncing between modes.
 - **This compounds init dependence above** — the basin set by `r_init` is sticky because the model cannot take big jumps in `r` to escape it.
 
-If your problem genuinely needs mode-discovery rather than mode-refinement (e.g. unsupervised regime detection where the regime structure is unknown a priori), this implementation will under-deliver versus a free-parameter EM with K random restarts. Mitigations like periodic expert re-seeding or `r_init`-restart-and-select-by-held-out-ELBO are not implemented as of v0.6.0.
+If your problem genuinely needs mode-discovery rather than mode-refinement (e.g. unsupervised regime detection where the regime structure is unknown a priori), this implementation will under-deliver versus a free-parameter EM with K random restarts. **The root-cause fix — leaf-value refit-on-r-update, which restores the closed-form M-step on each tree's existing partition structure — is planned for v0.7** (tracked in [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)). Until then, this is a real limitation; track it via `model.get_responsibilities()` snapshots and watch for ELBO-monotonicity warnings.
 
 ## When to use MoE
 
