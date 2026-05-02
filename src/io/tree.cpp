@@ -320,6 +320,76 @@ void Tree::AddPredictionToScore(const Dataset* data,
 #undef PredictionFun
 #undef PredictionFunLinear
 
+// Mirror of PredictionFun above, but writes the leaf index instead of accumulating
+// leaf_value_[leaf] into the score buffer. Used by Tree::PredictLeafIndices for
+// the LightGBM-MoE v0.7 leaf-refit path.
+#define PredictLeafFun(niter, fidx_in_iter, start_pos, decision_fun, iter_idx, \
+                       data_idx)                                                \
+  std::vector<std::unique_ptr<BinIterator>> iter((niter));                      \
+  for (int i = 0; i < (niter); ++i) {                                           \
+    iter[i].reset(data->FeatureIterator((fidx_in_iter)));                       \
+    iter[i]->Reset((start_pos));                                                \
+  }                                                                             \
+  for (data_size_t i = start; i < end; ++i) {                                   \
+    int node = 0;                                                               \
+    while (node >= 0) {                                                         \
+      node = decision_fun(iter[(iter_idx)]->Get((data_idx)), node,              \
+                          default_bins[node], max_bins[node]);                  \
+    }                                                                           \
+    out_leaf[(data_idx)] = ~node;                                               \
+  }\
+
+
+void Tree::PredictLeafIndices(const Dataset* data, data_size_t num_data,
+                              int* out_leaf) const {
+  // Linear trees route to a leaf and then evaluate a per-leaf linear model on
+  // the way out — refit is not a simple per-leaf reduction in that case, so
+  // we don't support it for the v0.7 refit path.
+  CHECK(!is_linear_);
+  if (num_leaves_ <= 1) {
+#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static, 512) if (num_data >= 1024)
+    for (data_size_t i = 0; i < num_data; ++i) {
+      out_leaf[i] = 0;
+    }
+    return;
+  }
+  std::vector<uint32_t> default_bins(num_leaves_ - 1);
+  std::vector<uint32_t> max_bins(num_leaves_ - 1);
+  for (int i = 0; i < num_leaves_ - 1; ++i) {
+    const int fidx = split_feature_inner_[i];
+    auto bin_mapper = data->FeatureBinMapper(fidx);
+    default_bins[i] = bin_mapper->GetDefaultBin();
+    max_bins[i] = bin_mapper->num_bin() - 1;
+  }
+  if (num_cat_ > 0) {
+    if (data->num_features() > num_leaves_ - 1) {
+      Threading::For<data_size_t>(0, num_data, 512, [this, &data, out_leaf, &default_bins, &max_bins]
+      (int, data_size_t start, data_size_t end) {
+        PredictLeafFun(num_leaves_ - 1, split_feature_inner_[i], start, DecisionInner, node, i);
+      });
+    } else {
+      Threading::For<data_size_t>(0, num_data, 512, [this, &data, out_leaf, &default_bins, &max_bins]
+      (int, data_size_t start, data_size_t end) {
+        PredictLeafFun(data->num_features(), i, start, DecisionInner, split_feature_inner_[node], i);
+      });
+    }
+  } else {
+    if (data->num_features() > num_leaves_ - 1) {
+      Threading::For<data_size_t>(0, num_data, 512, [this, &data, out_leaf, &default_bins, &max_bins]
+      (int, data_size_t start, data_size_t end) {
+        PredictLeafFun(num_leaves_ - 1, split_feature_inner_[i], start, NumericalDecisionInner, node, i);
+      });
+    } else {
+      Threading::For<data_size_t>(0, num_data, 512, [this, &data, out_leaf, &default_bins, &max_bins]
+      (int, data_size_t start, data_size_t end) {
+        PredictLeafFun(data->num_features(), i, start, NumericalDecisionInner, split_feature_inner_[node], i);
+      });
+    }
+  }
+}
+
+#undef PredictLeafFun
+
 double Tree::GetUpperBoundValue() const {
   double upper_bound = leaf_value_[0];
   for (int i = 1; i < num_leaves_; ++i) {

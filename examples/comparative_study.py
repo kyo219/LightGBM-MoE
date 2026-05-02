@@ -243,7 +243,19 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
     return objective
 
 
-def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
+def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
+                       refit_mode: str = "off", refit_decay: float = 0.0):
+    """Build an Optuna objective that trains MoE.
+
+    `refit_mode` (v0.7 leaf-refit, issue #37):
+      - "off"     : baseline (mixture_refit_leaves=false; v0.6 behavior)
+      - "always"  : refit every post-warmup iter (most faithful EM, ~15× cost)
+      - "elbo"    : refit only when the every-10-iter ELBO log shows >5% drop
+                    (negligible extra cost on well-behaved EM)
+      - "every_n" : refit every 10 iters past warmup
+    `refit_decay` is the leaf-blend factor (0.0 = full replace, 1.0 = no-op);
+    only used when refit_mode != "off".
+    """
     def objective(trial):
         smoothing = trial.suggest_categorical("mixture_r_smoothing", SMOOTHING_CHOICES)
         routing_mode = trial.suggest_categorical("mixture_routing_mode", ROUTING_CHOICES)
@@ -296,6 +308,14 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             params["mixture_expert_choice_score"] = "combined"
             params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
             params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
+
+        # v0.7 leaf-refit: not Optuna-searched within this study (the goal is
+        # an A/B ablation between refit-off and refit-on, not a sweep over
+        # decay rates). Set the same fixed config across all trials.
+        if refit_mode != "off":
+            params["mixture_refit_leaves"] = True
+            params["mixture_refit_trigger"] = refit_mode
+            params["mixture_refit_decay_rate"] = refit_decay
 
         rmse, train_s = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
         trial_log.append({"variant": "moe", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
@@ -596,11 +616,28 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
     out = {"dataset": dataset_name, "X_shape": list(X.shape), "y_stats": {"mean": float(y.mean()), "std": float(y.std())}}
     slice_paths: dict = {}
 
-    for variant, make_obj in [
+    # When refit ablation is requested, the moe variant is renamed to "moe-refit"
+    # so two runs (--moe-refit-mode off vs --moe-refit-mode <other>) produce
+    # JSONs whose keys distinguish the rows in the merged report. The naive
+    # variants are unaffected — so for an ablation it's typical to skip them
+    # via --variants moe to save 2/3 of the compute.
+    refit_mode = getattr(cfg, "moe_refit_mode", "off")
+    refit_decay = getattr(cfg, "moe_refit_decay", 0.0)
+    moe_variant_name = "moe" if refit_mode == "off" else f"moe-refit-{refit_mode}"
+
+    all_variants = [
         ("naive-lightgbm", lambda log: make_naive_lightgbm_objective(X, y, cfg, log)),
         ("naive-ensemble", lambda log: make_naive_ensemble_objective(X, y, cfg, log)),
-        ("moe", lambda log: make_moe_objective(X, y, cfg, log)),
-    ]:
+        (moe_variant_name, lambda log: make_moe_objective(X, y, cfg, log,
+                                                          refit_mode=refit_mode,
+                                                          refit_decay=refit_decay)),
+    ]
+    selected_variants = getattr(cfg, "variants", None)
+    if selected_variants:
+        # Match by prefix so "moe" selects "moe-refit-elbo" too.
+        all_variants = [v for v in all_variants
+                         if any(v[0] == s or v[0].startswith(s + "-") for s in selected_variants)]
+    for variant, make_obj in all_variants:
         print(f"\n  → {variant} ({n_trials} trials)...")
         trial_log: list = []
         sampler = optuna.samplers.TPESampler(seed=cfg.seed)
@@ -655,9 +692,24 @@ def main():
         help=f"Comma-separated subset of: {','.join(DATASET_GENERATORS.keys())}",
     )
     p.add_argument("--out", type=str, required=True)
+    # v0.7 leaf-refit ablation flags (issue #37). When --moe-refit-mode != "off",
+    # all MoE trials run with mixture_refit_leaves=True at the chosen trigger.
+    # The output JSON's variant key changes from "moe" to "moe-refit-<mode>"
+    # so a baseline run + an ablation run can be cleanly merged for reporting.
+    p.add_argument("--moe-refit-mode",
+                   choices=["off", "always", "elbo", "every_n"], default="off",
+                   help="v0.7 leaf-refit trigger; default off = v0.6 behavior")
+    p.add_argument("--moe-refit-decay", type=float, default=0.0,
+                   help="leaf blend factor (0=replace, 1=no-op); used when mode != off")
+    p.add_argument("--variants", type=str, default=None,
+                   help="comma-separated subset of {naive-lightgbm,naive-ensemble,moe}; "
+                        "useful with --moe-refit-mode to skip naive baselines on ablation runs")
     args = p.parse_args()
 
     cfg = BenchmarkConfig(n_trials=args.trials, seed=args.seed, n_splits=args.splits, num_boost_round=args.rounds)
+    cfg.moe_refit_mode = args.moe_refit_mode
+    cfg.moe_refit_decay = args.moe_refit_decay
+    cfg.variants = [v.strip() for v in args.variants.split(",")] if args.variants else None
     selected = [s.strip() for s in args.datasets.split(",")]
     unknown = [s for s in selected if s not in DATASET_GENERATORS]
     if unknown:

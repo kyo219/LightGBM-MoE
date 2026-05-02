@@ -12,6 +12,8 @@
 #include <LightGBM/utils/openmp_wrapper.h>
 #include <LightGBM/sample_strategy.h>
 
+#include "../treelearner/feature_histogram.hpp"  // for CalculateSplittedLeafOutput in RefitLeavesByGradients
+
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -259,6 +261,164 @@ void GBDT::Train(int snapshot_freq, const std::string& model_output_path) {
         && (iter + 1) % snapshot_freq == 0) {
       std::string snapshot_out = model_output_path + ".snapshot_iter_" + std::to_string(iter + 1);
       SaveModelToFile(0, -1, config_->saved_feature_importance_type, snapshot_out.c_str());
+    }
+  }
+}
+
+void GBDT::RefitLeavesByGradients(
+    std::function<void(score_t* grad_buf, score_t* hess_buf)> recompute_grad_hess,
+    double l2_reg,
+    double refit_decay) {
+  Common::FunctionTimer fun_timer("GBDT::RefitLeavesByGradients", global_timer);
+  if (models_.empty()) return;
+  if (refit_decay >= 1.0) return;  // pure no-op: keep all leaves at their current values
+  CHECK_GE(refit_decay, 0.0);
+  CHECK_LE(refit_decay, 1.0);
+  CHECK_GE(l2_reg, 0.0);
+  if (train_data_ == nullptr) {
+    Log::Fatal("RefitLeavesByGradients requires an attached training dataset");
+  }
+
+  const int num_iterations = static_cast<int>(models_.size()) / num_tree_per_iteration_;
+  std::vector<int> leaf_pred(num_data_);
+  // Local grad/hess buffers — owned by this method rather than reusing
+  // gradients_pointer_, because experts trained via MixtureGBDT pass
+  // objective_function_=nullptr at Init time, which leaves
+  // ResetGradientBuffers' internal allocation skipped (the lazy resize at
+  // gbdt.cpp:985 only runs when objective_function_ is non-null). We must
+  // not assume gradients_pointer_ is valid in the custom-grad/hess path.
+  const size_t total_grad_size = static_cast<size_t>(num_data_) * num_tree_per_iteration_;
+  std::vector<score_t> local_grad(total_grad_size);
+  std::vector<score_t> local_hess(total_grad_size);
+
+  // === Score reset: rebuild train_score_updater_ from scratch ===
+  // RefitTree's Newton-step convention requires that the gradient at iter t
+  // is computed against `f_without_iter_t` — i.e. the cumulative score of
+  // trees iter 0..t-1, with iter t's contribution NOT yet added. The
+  // existing train_score_updater_ already includes ALL trees, so we zero it
+  // here and re-accumulate tree-by-tree as we refit. This matches
+  // GBDT::RefitTree's Python wrapper which constructs a fresh Booster (zero
+  // score) and replays. Init scores are preserved by re-applying them after
+  // the multiply-by-zero. Without this, the per-iter Newton step undershoots
+  // by a factor of shrinkage/(1+shrinkage) (verified empirically: refit on
+  // a synthetic K=2 case drove RMSE from 0.6 to 2.6 before this fix).
+  std::vector<double> train_init_scores;  // [tree_id * num_data + i] when has_init_score
+  const bool had_train_init = train_score_updater_->has_init_score();
+  if (had_train_init) {
+    Log::Warning(
+        "GBDT::RefitLeavesByGradients: model has non-zero init_score; the "
+        "refit zeros and replays scores from zero, so init_score is dropped. "
+        "If you rely on init_score with refit, file an issue with a repro.");
+  }
+  for (int tid = 0; tid < num_tree_per_iteration_; ++tid) {
+    train_score_updater_->MultiplyScore(0.0, tid);
+  }
+  for (auto& vsu : valid_score_updater_) {
+    for (int tid = 0; tid < num_tree_per_iteration_; ++tid) {
+      vsu->MultiplyScore(0.0, tid);
+    }
+  }
+
+  // === Replay loop ===
+  // Per-iter: the caller computes grad/hess from the CURRENT
+  // train_score_updater_ state (which holds the score of refitted trees
+  // iter 0..t-1, but NOT iter t — exactly what the Newton step needs).
+  // Mirrors RefitTree's per-iter Boosting() cadence so per-iter softmax
+  // coupling for multiclass gates stays consistent.
+  for (int iter = 0; iter < num_iterations; ++iter) {
+    recompute_grad_hess(local_grad.data(), local_hess.data());
+
+    for (int tree_id = 0; tree_id < num_tree_per_iteration_; ++tree_id) {
+      const int idx = iter * num_tree_per_iteration_ + tree_id;
+      Tree* tree = models_[idx].get();
+      if (tree->num_leaves() <= 1) {
+        // Constant tree contributes its (single) value to score; still need
+        // to add it to keep cumulative score consistent for downstream iters.
+        train_score_updater_->AddScore(tree, tree_id);
+        for (auto& vsu : valid_score_updater_) {
+          vsu->AddScore(tree, tree_id);
+        }
+        continue;
+      }
+      if (tree->is_linear()) {
+        train_score_updater_->AddScore(tree, tree_id);
+        for (auto& vsu : valid_score_updater_) {
+          vsu->AddScore(tree, tree_id);
+        }
+        continue;
+      }
+
+      // Step 1: per-sample leaf assignment for this tree.
+      tree->PredictLeafIndices(train_data_, num_data_, leaf_pred.data());
+
+      const score_t* grad = local_grad.data() + static_cast<size_t>(tree_id) * num_data_;
+      const score_t* hess = local_hess.data() + static_cast<size_t>(tree_id) * num_data_;
+      const int num_leaves = tree->num_leaves();
+
+      // Step 2: per-leaf reduction with thread-local accumulators (avoids
+      // false-sharing on small num_leaves; pattern matches
+      // serial_tree_learner.cpp's per-leaf parallel reductions).
+      const int num_threads = OMP_NUM_THREADS();
+      std::vector<std::vector<double>> tl_sg(num_threads, std::vector<double>(num_leaves, 0.0));
+      std::vector<std::vector<double>> tl_sh(num_threads, std::vector<double>(num_leaves, 0.0));
+      std::vector<std::vector<int>> tl_cnt(num_threads, std::vector<int>(num_leaves, 0));
+
+      #pragma omp parallel num_threads(num_threads)
+      {
+        const int tid = omp_get_thread_num();
+        auto& sg = tl_sg[tid];
+        auto& sh = tl_sh[tid];
+        auto& cnt = tl_cnt[tid];
+        #pragma omp for schedule(static)
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          const int l = leaf_pred[i];
+          sg[l] += static_cast<double>(grad[i]);
+          sh[l] += static_cast<double>(hess[i]);
+          ++cnt[l];
+        }
+      }
+
+      std::vector<double> sum_grad(num_leaves, 0.0);
+      std::vector<double> sum_hess(num_leaves, 0.0);
+      std::vector<int> leaf_count(num_leaves, 0);
+      for (int t = 0; t < num_threads; ++t) {
+        for (int l = 0; l < num_leaves; ++l) {
+          sum_grad[l] += tl_sg[t][l];
+          sum_hess[l] += tl_sh[t][l];
+          leaf_count[l] += tl_cnt[t][l];
+        }
+      }
+
+      // Step 3: Newton-step leaf values using the same template instantiation
+      // as SerialTreeLearner::FitByExistingTree (no path smoothing, no MC
+      // constraints). The l2_reg argument is folded into lambda_l2 so it
+      // additively regularizes the denominator. The "* tree->shrinkage()"
+      // factor matches FitByExistingTree at serial_tree_learner.cpp:277 — it
+      // re-applies the cumulative learning_rate that was baked into the
+      // original leaf via Tree::Shrinkage when the tree was first added.
+      std::vector<double> new_leaves(num_leaves);
+      for (int l = 0; l < num_leaves; ++l) {
+        const double output = FeatureHistogram::CalculateSplittedLeafOutput<true, true, false>(
+            sum_grad[l], sum_hess[l],
+            config_->lambda_l1, config_->lambda_l2 + l2_reg,
+            config_->max_delta_step, /*smoothing=*/0.0,
+            leaf_count[l], /*parent=*/0);
+        const double old_v = tree->LeafOutput(l);
+        const double fit_v = output * tree->shrinkage();
+        new_leaves[l] = refit_decay * old_v + (1.0 - refit_decay) * fit_v;
+      }
+
+      // Step 4: Commit the new leaf values to the tree, then add this tree's
+      // contribution to all score updaters. Since the score updaters were
+      // zeroed at the top, AddScore adds exactly the post-refit tree
+      // contribution — no delta arithmetic needed.
+      for (int l = 0; l < num_leaves; ++l) {
+        tree->SetLeafOutput(l, new_leaves[l]);
+      }
+      train_score_updater_->AddScore(tree, tree_id);
+      for (auto& vsu : valid_score_updater_) {
+        vsu->AddScore(tree, tree_id);
+      }
     }
   }
 }

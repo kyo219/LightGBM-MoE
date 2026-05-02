@@ -220,6 +220,43 @@ via logsumexp. Logged every 10 iters (and the first 5). Exact-M-step EM is monot
 
 If you tune aggressively (high dropout, custom schedules) and see warnings, the ELBO loss is the single best signal that something is fundamentally inconsistent between E and M.
 
+### 2.7 Leaf-value refit on each E-step (v0.7, opt-in)
+
+The "additive-only EM" limitation — boosted-tree experts can only inch their predictions per round, so `r_ik` can only inch in response, so EM is stuck near `r_init` — has its root cause not in "we only append trees" but in "leaf values are write-once at the `r` of the round each tree was built in". The tree partitions form a useful data-dependent feature representation `Φ_k(x) ∈ {0,1}^{num_leaves}`; the leaf values are linear coefficients on top of `Φ_k`. Classical EM rewrites those coefficients each round in closed form. v0.6 leaves them frozen.
+
+`MixtureGBDT::RefitExpertsAndGate` (`mixture_gbdt.cpp:2522`, called from `TrainOneIter` between `UpdateExpertVariances` and `MStepExperts` when `mixture_refit_leaves=true`) restores the closed-form M-step over each tree's existing partition. For each expert k:
+
+```
+new_v_l = -shrinkage_k · (Σ_{i ∈ leaf_l} r_ik · g_i)
+                      / (Σ_{i ∈ leaf_l} r_ik · h_i + λ_l2 + l2_reg)
+final_v_l = decay · old_v_l + (1 − decay) · new_v_l
+```
+
+with `g_i, h_i` from `objective_function_->GetGradients(f_k, ...)` evaluated against the cumulative score *of trees iter 0..t-1* (NOT including tree t's own contribution — see "score reset + replay" below). For the gate (gbdt mode only — `leaf_reuse` derives routing from leaf statistics so refitting would conflict with `MStepGateLeafReuse`'s Step 4), the same machinery runs against the soft-CE gradient form `(p − r)/T` with Friedman `K/(K-1)` Hessian and Dirichlet shrinkage — identical to `MStepGate`'s gradient.
+
+**Implementation in `GBDT::RefitLeavesByGradients` (`gbdt.cpp:266`)**: a callback-based variant of `RefitTree` that:
+
+1. **Zeros all score updaters** (`MultiplyScore(0.0, tid)` per class, on both `train_score_updater_` and every `valid_score_updater_`). This is required because the per-iter Newton step targets the optimal absolute leaf value, which only matches the "replace" semantics of `Tree::SetLeafOutput` if the gradient is computed against `f_without_iter_t`. Computing it against the full score (which includes iter t's old leaf) lands at a fixed point that undershoots by `shrinkage / (1 + shrinkage)` — verified empirically: refit on a synthetic K=2 case drove RMSE from 0.6 → 2.6 before the score-reset fix.
+2. **Replays tree-by-tree**: for each iter, `recompute_grad_hess(grad, hess)` is invoked once (matching `RefitTree`'s per-iter `Boosting()` cadence so per-iter softmax coupling for multiclass gates stays correct), then each of the `num_tree_per_iteration_` trees in that iter is refit by computing per-leaf `Σ r·g`, `Σ r·h` via `Tree::PredictLeafIndices` (a new mirror of `AddPredictionToScore` that writes leaf indices instead of accumulating leaf values). New leaf values are committed via `Tree::SetLeafOutput` and the tree's contribution is added back to all score updaters via `AddScore(tree, tree_id)`.
+
+After all iters are replayed, the score updaters reflect the post-refit cumulative score, and `Forward()` is re-called from MixtureGBDT to refresh `expert_pred_` / `gate_proba_` so the subsequent `MStepExperts` / `MStepGate` see the new state.
+
+**Trigger modes** (`mixture_refit_trigger`):
+
+| Mode | When refit fires | Cost |
+|---|---|---|
+| `always` (default) | Every post-warmup iter | Highest; ~3-7× wall time at 60 rounds |
+| `elbo` | Most recent ELBO log block (every 10 iters) showed a >5% drop | Cheap — reuses the existing every-10-iter ELBO computation; requires `mixture_estimate_variance=true` (otherwise no ELBO is computed and trigger never fires) |
+| `every_n` | Every `mixture_refit_every_n` post-warmup iters | Tunable; e.g. n=10 ≈ 6× fewer fires than `always` |
+
+**Decay semantics** (`mixture_refit_decay_rate ∈ [0, 1]`): `final_v = decay · old_v + (1 − decay) · fit_v`. `0.0` (default) replaces fully — closest to classical EM. `1.0` is an exact pass-through (the refit machinery still runs but every leaf returns to its original value). Intermediate values stabilize the fixed-point iteration when E-step / M-step are temporarily out of sync (e.g. high dropout, aggressive annealing). Same parameter shape as LightGBM core's `refit_decay_rate`, but namespaced to the mixture path so non-mixture refit users are unaffected.
+
+**Empirical effect** (`examples/em_refit_demo.py`): on a synthetic two-regime regression with `mixture_init=random` (forced bad init), refit-off plateaus at validation RMSE 2.17 with `||r_t − r_init||_F` capped near 0.6 (stuck in the bad basin); refit-on with `decay=0.0` reaches RMSE 1.19 with `||r_t − r_init||_F` rising to 0.99 (escaped). The plot at `bench_results/em_refit_demo.png` shows the two trajectories side-by-side.
+
+**Subsumed pathology guards**: with refit-on, the symmetry breaker (PR #36), the diversity-reg Huber clip (PR #26), and parts of the variance-estimator anti-collapse (PR #24) become structurally redundant — they exist to compensate for the same root cause refit fixes (frozen leaves can't track changing `r`). For now the guards remain (default-off refit is a strict superset of v0.6 behavior), but a future cleanup PR could simplify them.
+
+**Incompatibility — `gate_type='leaf_reuse'`**: refit only rewrites expert leaves and (in `gbdt` gate mode) the gate's GBDT leaves. `leaf_reuse` derives gate routing from expert-tree leaf statistics and trains a separate gate GBDT for out-of-sample inference; refit would touch the experts but leave that gate GBDT frozen, producing an asymmetric update that empirically degrades performance (verified at +7% RMSE on `vix` under uniform init in `bench_results/bench_v07_per_config_uniform.md`). The Init guard auto-disables `mixture_refit_leaves` when `mixture_gate_type='leaf_reuse'` is set, with a one-time warning. Use `gate_type='gbdt'` if you want refit semantics.
+
 ## 3. Initializing `r_ik`
 
 `InitResponsibilities()` (`mixture_gbdt.cpp:462`) supports 7 schemes via `mixture_init`:
@@ -317,10 +354,14 @@ Quick file:line index for everything referenced above. All paths are `src/boosti
 | Smoothing (post-E) | `SmoothResponsibilities` | mixture_gbdt.cpp:2054 |
 | Load-balance bias | `UpdateExpertBias` | mixture_gbdt.cpp:2120 |
 | Expert M-step | `MStepExperts` | mixture_gbdt.cpp:2181 |
-| Gate M-step (gbdt) | `MStepGate` | mixture_gbdt.cpp:2522 |
-| Gate M-step (leaf_reuse) | `MStepGateLeafReuse` | mixture_gbdt.cpp:2662 |
+| Gate M-step (gbdt) | `MStepGate` | mixture_gbdt.cpp:2665 |
+| Gate M-step (leaf_reuse) | `MStepGateLeafReuse` | mixture_gbdt.cpp:2805 |
 | r initialization | `InitResponsibilities` | mixture_gbdt.cpp:462 |
 | Symmetry breaker | `BreakUniformSymmetryIfNeeded` | mixture_gbdt.cpp:1346 |
 | Pointwise loss (E-step) | `ComputePointwiseLoss` | mixture_gbdt.cpp:1314 |
 | Gate config setup | `Init` | mixture_gbdt.cpp:134 |
 | Two-view gate state | `gate_proba_*` doc | mixture_gbdt.h:338–355 |
+| Leaf-refit dispatch (v0.7) | `RefitExpertsAndGate` | mixture_gbdt.cpp:2550 |
+| Leaf-refit trigger gate | `ShouldRefit` | mixture_gbdt.cpp:2522 |
+| Leaf-refit core (LightGBM) | `GBDT::RefitLeavesByGradients` | gbdt.cpp:266 |
+| Leaf-index lookup (LightGBM) | `Tree::PredictLeafIndices` | src/io/tree.cpp |

@@ -1239,6 +1239,53 @@ struct Config {
   // desc = 0 means no warmup (may cause expert collapse)
   int mixture_warmup_iters = 5;
 
+  // [doc-only] v0.7 leaf-refit
+  // desc = enable leaf-value refit on each E-step (LightGBM-MoE v0.7)
+  // desc = when ``true``, the per-EM-round update refits leaf values of every
+  //        existing expert tree (and gate tree) to the current responsibilities
+  //        ``r_ik`` *before* appending the next tree, restoring the closed-form
+  //        M-step on each tree's existing partition structure
+  // desc = default ``false`` keeps the v0.6.0 append-only behavior bit-identical
+  // desc = see issue #37 for the design rationale
+  bool mixture_refit_leaves = false;
+
+  // [doc-only] v0.7 leaf-refit
+  // desc = decay rate for leaf-value refit blending: ``new_v = decay * old_v + (1-decay) * fit_v``
+  // desc = ``0.0`` (default) replaces leaf values fully with the Newton-step fit;
+  //        ``1.0`` is a no-op (keeps old leaves); intermediate values stabilize
+  //        the fixed-point iteration when E-step / M-step are inconsistent
+  // desc = mirrors LightGBM core's ``refit_decay_rate`` semantics; isolated to
+  //        the mixture path so non-mixture refit users are unaffected
+  // check = >=0.0
+  // check = <=1.0
+  double mixture_refit_decay_rate = 0.0;
+
+  // [doc-only] v0.7 leaf-refit
+  // desc = L2 regularization for the leaf-value Newton step during refit
+  // desc = ``new_v = -shrinkage * (Σ r·g) / (Σ r·h + l2_reg)``
+  // desc = small positive default keeps leaves bounded when ``Σ r·h → 0`` on
+  //        de-routed leaves; tune up to suppress over-confident updates
+  // check = >=0.0
+  double mixture_refit_l2_reg = 1e-3;
+
+  // [doc-only] v0.7 leaf-refit
+  // type = enum
+  // options = always, elbo, every_n
+  // desc = which iterations should fire the leaf-refit pass when
+  //        ``mixture_refit_leaves=true``
+  // desc = ``always``: refit every post-warmup iter (highest cost, most faithful EM)
+  // desc = ``elbo``: only refit when the most recent ELBO log showed a >5% drop —
+  //        cheap because ELBO is logged once every 10 iters and the trigger reuses
+  //        that pre-computed value (requires ``mixture_estimate_variance=true``)
+  // desc = ``every_n``: refit every ``mixture_refit_every_n`` iters past warmup
+  std::string mixture_refit_trigger = "always";
+
+  // [doc-only] v0.7 leaf-refit
+  // desc = period (in EM iterations) for the ``every_n`` refit trigger
+  // desc = ignored when ``mixture_refit_trigger != "every_n"``
+  // check = >0
+  int mixture_refit_every_n = 10;
+
   // type = enum
   // options = value, value_and_regime, all
   // desc = output mode for mixture prediction
