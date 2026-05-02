@@ -16,12 +16,30 @@ Standard GBDT と MoE (token + expert choice 横断) で Optuna を回し、
 
 mixture_init は {random, gmm, tree_hierarchical} に限定 (uniform/quantile/balanced_kmeans 除外)。
 
+Determinism note (--n-jobs default=1):
+    Earlier versions defaulted to n_jobs=6 to "speed up" Optuna. In practice,
+    n_jobs>1 makes best RMSE non-reproducible across runs / builds even with
+    seed fixed: the TPE sampler's recommendations depend on the order parallel
+    workers report observations back, and that order is non-deterministic. On
+    a regression-checking run (synthetic, 500 trials, 3 seeds × 2 builds, see
+    `bench_logs/regression_check_*`) the n_jobs=6 best-RMSE std was ±0.31 —
+    enough to make a single-seed n_jobs=6 result swing by ±0.6, large enough
+    to falsely flag any code change as a regression. Worse, n_jobs=6 was *not*
+    actually faster: with each LightGBM trial saturating all cores via OMP,
+    6 concurrent trials oversubscribe the CPU and run ~18% slower per dataset
+    than a single sequential pipeline (234s vs 287s on synthetic in that run).
+
+    The default is now n_jobs=1: deterministic best RMSE across runs and
+    builds, AND faster wall time. Override with --n-jobs >1 only if you
+    explicitly need the (noisy) speed/coverage tradeoff and don't care about
+    cross-run comparison.
+
 Usage:
     # 小規模 sanity check
     python examples/comparative_study.py --trials 50 --out bench_results/study_smoke.json
 
-    # 本番 1000 trials × 2 variants × 3 datasets
-    python examples/comparative_study.py --trials 1000 --out bench_results/study_1k.json
+    # 本番 500 trials × 2 variants × 6 datasets (deterministic)
+    python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 """
 from __future__ import annotations
 
@@ -528,7 +546,12 @@ DATASET_GENERATORS = {
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--trials", type=int, default=500)
-    p.add_argument("--n-jobs", type=int, default=6)
+    # n_jobs=1 is deliberately the default — see the module docstring for the
+    # determinism / speed rationale. tl;dr Optuna n_jobs>1 makes best-RMSE
+    # non-reproducible across runs even with seed fixed (TPE observation
+    # ordering depends on worker scheduling), AND oversubscribes the CPU
+    # against per-trial OMP threading so it's not actually faster.
+    p.add_argument("--n-jobs", type=int, default=1)
     p.add_argument("--rounds", type=int, default=100)
     p.add_argument("--splits", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
