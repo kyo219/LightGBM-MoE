@@ -73,22 +73,37 @@ expert_preds = model.predict_expert_pred(X_test)    # Expert predictions (N, K)
 
 ## When to use MoE
 
-The 5-dataset, 500-trial study below (sp500 is included in two parallel feature configurations, so 6 rows) shows MoE matches or beats naive LightGBM on 5 of 6 rows, with gains ranging from **sub-percent ties** (`sp500`, `sp500_basic`) to **substantial wins on the regime-structured datasets** (**`synthetic` −26.8 %**, **`vix` −7.4 %**, `hmm` −2.1 %). On `fred_gdp` (only ~310 quarterly samples — likely the smallest-data regime where MoE's K-way capacity hurts more than it helps) naive narrowly wins by +0.75 %. Compute trade-off: MoE costs **1.3–9.8 ×** naive's per-fold train time across these datasets — the ratio is highest on the small `sp500` and `hmm` series where naive's per-fold time is already tiny. Net rule: try MoE when there is real regime structure in the data and your wall time has at least 5–10 × headroom relative to naive.
+MoE's gating mechanism wins on regime-structured data — but the **honest baseline is not single-model naive LightGBM, it's a K-way ensemble of LightGBMs** with the same total tree budget. Simply averaging K independent models with different seeds gives variance reduction "for free"; the question is whether MoE's learned routing beats that. The 6-row study below answers it: **MoE clearly wins on `synthetic` (−24.8 %), `vix` (−6.9 %), `hmm` (−1.6 %) — datasets where the regime is observable from `X` —, ties on the `sp500` rows, and *loses to the K-way ensemble on `fred_gdp`* (+3.2 %)**. On `fred_gdp` (~310 quarterly samples) the K-way capacity helps but gating does not — the regime is too noisy or the dataset too small for the gate to learn it, and uniform averaging extracts the available capacity better than learned routing. Compute trade-off: MoE costs **1.3–8.4 ×** naive single-model time, and **0.5–2.8 ×** naive-ensemble time. Net rule: try MoE when (a) you believe the regime is observable from your features and (b) your wall time has 5–10 × headroom over single-model LightGBM.
 
-## Benchmark — 500-trial study (naive-lightgbm vs MoE, 5 datasets)
+## Benchmark — 500-trial study (naive vs naive-ensemble vs MoE, 5 datasets)
 
-5-fold time-series CV, 500 Optuna trials per (variant × dataset), 5 datasets spanning synthetic-ideal → real macro/financial → controlled-latent. Numbers below are **deterministic** — `--n-jobs 1` (the default since [PR #30](https://github.com/kyo219/LightGBM-MoE/pull/30)) makes Optuna's TPE sampler reproducible across runs and across builds with the same seed, so build-to-build comparisons are not contaminated by parallel-worker scheduling noise (which historically had ±0.3 RMSE-std on synthetic). Full report: [`bench_results/study_500_report.md`](bench_results/study_500_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
+5-fold time-series CV, 500 Optuna trials per (variant × dataset), 5 datasets spanning synthetic-ideal → real macro/financial → controlled-latent (sp500 is included in two parallel feature configurations, so 6 rows). Numbers are **deterministic** — `--n-jobs 1` (the default since [PR #30](https://github.com/kyo219/LightGBM-MoE/pull/30)) makes Optuna's TPE sampler reproducible across runs and builds with the same seed, so build-to-build comparisons are not contaminated by parallel-worker scheduling noise (which historically had ±0.3 RMSE-std on synthetic). Full report: [`bench_results/study_500_report.md`](bench_results/study_500_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
 
-| Dataset | Shape | naive-lightgbm best | MoE best | Δ RMSE | Speed (MoE / naive, median train s/fold) |
-|---|---|---|---|---|---|
-| `synthetic` | 2000 × 5 | 5.0233 | **3.6779** | **−26.8 %** | 0.044 / 0.034 = **1.29 ×** |
-| `fred_gdp` | 311 × 12 | **0.9311** | 0.9381 | +0.75 % *(naive wins)* | 0.020 / 0.003 = **6.44 ×** |
-| `sp500_basic` (13 feat) | 3761 × 13 | 0.01003 | **0.00996** | −0.66 % | 0.119 / 0.012 = **9.79 ×** |
-| `sp500` (28 feat, enriched) | 3711 × 28 | 0.01002 | 0.01002 | ±0.00 % *(tie)* | 0.054 / 0.009 = **6.18 ×** |
-| `vix` | 3762 × 13 | 2.8869 | **2.6745** | **−7.4 %** | 0.062 / 0.011 = **5.91 ×** |
-| `hmm` | 2000 × 5 | 2.1913 | **2.1465** | −2.1 % | 0.046 / 0.005 = **8.34 ×** |
+The third variant — **`naive-ensemble`** — is a K-way (K ∈ {2, 3, 4}) seed-ensemble of standard LightGBMs that share hyperparameters but diverge per-member via the `seed` master-seed override. Same total tree budget as MoE (K × `num_boost_round`), same Optuna search space as `naive-lightgbm` plus K. It is the fair ablation for "is gating doing real work, or would any K-way ensemble suffice?" — see [PR #33](https://github.com/kyo219/LightGBM-MoE/pull/33).
 
-> **The sp500 pair is a controlled feature-engineering ablation on the same raw series**: only the feature set changes between rows, identical CV / Optuna budget / seed. Both rows are essentially ties (`sp500_basic` MoE 0.66 % win, `sp500` exact tie at 0.01002). The next-day-log-return objective on this series appears to hit the irreducible noise floor under both architectures — neither model extracts more signal from the broader feature set, but neither is hurt by it either.
+| Dataset | Shape | naive best | ensemble best | MoE best | MoE vs naive | **MoE vs ensemble** *(the fair test)* |
+|---|---|---|---|---|---|---|
+| `synthetic` | 2000 × 5 | 5.0233 | 4.8899 | **3.6779** | −26.8 % | **−24.8 %** 🎯 |
+| `fred_gdp` | 311 × 12 | 0.9311 | **0.9094** | 0.9381 | +0.75 % | +3.2 % *(ensemble wins)* |
+| `sp500_basic` (13 feat) | 3761 × 13 | 0.01003 | 0.01002 | **0.01001** | −0.24 % | −0.12 % |
+| `sp500` (28 feat, enriched) | 3711 × 28 | 0.01002 | 0.01003 | 0.01002 | ±0.00 % | −0.06 % |
+| `vix` | 3762 × 13 | 2.8869 | 2.8724 | **2.6745** | −7.4 % | **−6.9 %** 🎯 |
+| `hmm` | 2000 × 5 | 2.1913 | 2.1818 | **2.1465** | −2.1 % | **−1.6 %** |
+
+**Read the "MoE vs ensemble" column** — that's where the gating hypothesis is actually tested. MoE clearly beats the K-way average on the three datasets where the regime is structurally observable from features (synthetic, vix, hmm), is a wash on the irreducibly hard sp500 rows, and *loses* on the smallest-data fred_gdp where the gate cannot learn the regime reliably enough to beat uniform averaging.
+
+| Dataset | naive (s/fold) | ensemble (s/fold) | MoE (s/fold) | ensemble / naive | MoE / naive | MoE / ensemble |
+|---|---|---|---|---|---|---|
+| `synthetic` | 0.033 | 0.083 | 0.044 | 2.5 × | 1.3 × | **0.53 ×** |
+| `fred_gdp` | 0.003 | 0.017 | 0.020 | 5.5 × | 6.5 × | 1.2 × |
+| `sp500_basic` | 0.012 | 0.029 | 0.081 | 2.4 × | 6.7 × | 2.8 × |
+| `sp500` | 0.009 | 0.037 | 0.055 | 4.2 × | 6.2 × | 1.5 × |
+| `vix` | 0.010 | 0.035 | 0.062 | 3.4 × | 6.0 × | 1.8 × |
+| `hmm` | 0.005 | 0.023 | 0.045 | 4.3 × | 8.4 × | 2.0 × |
+
+On `synthetic` MoE is actually **faster** than the naive-ensemble (0.53 ×) — when the regime is clearly identifiable, sparse routing means each expert sees only its share of samples and converges quickly; the ensemble has to fit all K members on full data. On harder datasets the ratio flips back.
+
+> **The sp500 pair is a controlled feature-engineering ablation on the same raw series**: only the feature set changes between rows, identical CV / Optuna budget / seed. All three variants are essentially tied at ~0.01001 across both feature sets — the next-day-log-return objective appears to hit the irreducible noise floor under any architecture and any feature set we've tried.
 
 ### Datasets
 
