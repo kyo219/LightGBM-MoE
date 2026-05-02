@@ -88,7 +88,7 @@ import matplotlib.pyplot as plt
 # =============================================================================
 # Search space constants (per user spec)
 # =============================================================================
-INIT_CHOICES = ["random", "gmm", "tree_hierarchical"]
+INIT_CHOICES = ["random", "gmm", "tree_hierarchical", "uniform"]
 GATE_CHOICES = ["gbdt", "none", "leaf_reuse"]
 ROUTING_CHOICES = ["token_choice", "expert_choice"]
 E_STEP_MODES = ["em", "loss_only", "gate_only"]
@@ -244,17 +244,30 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
 
 
 def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
-                       refit_mode: str = "off", refit_decay: float = 0.0):
+                       refit_mode: str = "search", refit_decay: float = 0.0):
     """Build an Optuna objective that trains MoE.
 
-    `refit_mode` (v0.7 leaf-refit, issue #37):
-      - "off"     : baseline (mixture_refit_leaves=false; v0.6 behavior)
-      - "always"  : refit every post-warmup iter (most faithful EM, ~15× cost)
-      - "elbo"    : refit only when the every-10-iter ELBO log shows >5% drop
-                    (negligible extra cost on well-behaved EM)
-      - "every_n" : refit every 10 iters past warmup
-    `refit_decay` is the leaf-blend factor (0.0 = full replace, 1.0 = no-op);
-    only used when refit_mode != "off".
+    `refit_mode` controls how the v0.7 / v0.8 refit + regrow machinery is
+    handled across the search:
+
+      - "search"  : (v0.8 default) refit_leaves / refit_trigger / regrow*
+                    are themselves Optuna search variables. Each trial
+                    samples its own refit/regrow configuration along with
+                    the rest of the MoE hyperparameters. This is what the
+                    v0.8 study uses to ask: "if Optuna can pick refit and
+                    regrow alongside everything else, do v0.8 features
+                    rise to the top?"
+      - "off"     : force ``mixture_refit_leaves=false`` (v0.6 baseline,
+                    used to reproduce the v0.6 README headline numbers
+                    without contamination)
+      - "always" / "elbo" / "every_n":
+                    force a specific refit trigger; regrow / decay are
+                    NOT searched (compatible with the legacy v0.7
+                    ablation runs in bench_results/study_v07_*_report.md)
+
+    `refit_decay` is only used when refit_mode is one of the legacy
+    forced-on triggers; in "search" mode the decay is itself a search
+    variable.
     """
     def objective(trial):
         smoothing = trial.suggest_categorical("mixture_r_smoothing", SMOOTHING_CHOICES)
@@ -309,10 +322,60 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
             params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
 
-        # v0.7 leaf-refit: not Optuna-searched within this study (the goal is
-        # an A/B ablation between refit-off and refit-on, not a sweep over
-        # decay rates). Set the same fixed config across all trials.
-        if refit_mode != "off":
+        # v0.7 leaf-refit + v0.8 partition re-grow.
+        #
+        # Three modes for this block:
+        #   - refit_mode == "off":     leaf refit forced off, no regrow.
+        #                              Reproduces v0.6 baseline.
+        #   - refit_mode == "search":  Optuna samples the refit/regrow
+        #                              knobs as part of the trial. This is
+        #                              the v0.8 study mode — lets the
+        #                              optimizer decide whether a tuned
+        #                              config benefits from refit/regrow
+        #                              and at what configuration.
+        #   - refit_mode in {always,elbo,every_n}: legacy v0.7 ablation
+        #                              path; trigger forced, regrow off.
+        if refit_mode == "search":
+            refit_on = trial.suggest_categorical("mixture_refit_leaves",
+                                                 [True, False])
+            if refit_on:
+                trigger = trial.suggest_categorical(
+                    "mixture_refit_trigger", ["always", "elbo", "every_n"])
+                params["mixture_refit_leaves"] = True
+                params["mixture_refit_trigger"] = trigger
+                # decay is mostly best at 0.0 (full replace) per v0.7
+                # acceptance — search a narrow range around it.
+                params["mixture_refit_decay_rate"] = trial.suggest_float(
+                    "mixture_refit_decay_rate", 0.0, 0.5)
+
+                if trigger == "elbo":
+                    # v0.8 elbo trigger has its own threshold + window
+                    # knobs. Search log-uniform over a sensible range —
+                    # 0.001-0.05 for drop, 0.0001-0.01 for plateau.
+                    params["mixture_elbo_drop_threshold"] = trial.suggest_float(
+                        "mixture_elbo_drop_threshold", 1e-3, 5e-2, log=True)
+                    params["mixture_elbo_plateau_threshold"] = trial.suggest_float(
+                        "mixture_elbo_plateau_threshold", 1e-4, 1e-2, log=True)
+                    params["mixture_elbo_window"] = trial.suggest_int(
+                        "mixture_elbo_window", 5, 20)
+                elif trigger == "every_n":
+                    params["mixture_refit_every_n"] = trial.suggest_int(
+                        "mixture_refit_every_n", 5, 30)
+
+                # v0.8 partition re-grow — only meaningful when refit is on.
+                # leaf_reuse + regrow is auto-disabled at C++ Init (warning),
+                # so no Python-side guard is needed.
+                regrow_on = trial.suggest_categorical(
+                    "mixture_regrow_oldest_trees", [True, False])
+                if regrow_on:
+                    params["mixture_regrow_oldest_trees"] = True
+                    params["mixture_regrow_per_fire"] = trial.suggest_int(
+                        "mixture_regrow_per_fire", 1, 5)
+                    params["mixture_regrow_mode"] = trial.suggest_categorical(
+                        "mixture_regrow_mode", ["replace", "delete"])
+        elif refit_mode != "off":
+            # Legacy v0.7 forced-trigger path (back-compat for older
+            # ablation scripts).
             params["mixture_refit_leaves"] = True
             params["mixture_refit_trigger"] = refit_mode
             params["mixture_refit_decay_rate"] = refit_decay
@@ -621,9 +684,13 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
     # JSONs whose keys distinguish the rows in the merged report. The naive
     # variants are unaffected — so for an ablation it's typical to skip them
     # via --variants moe to save 2/3 of the compute.
-    refit_mode = getattr(cfg, "moe_refit_mode", "off")
+    refit_mode = getattr(cfg, "moe_refit_mode", "search")
     refit_decay = getattr(cfg, "moe_refit_decay", 0.0)
-    moe_variant_name = "moe" if refit_mode == "off" else f"moe-refit-{refit_mode}"
+    # "search" and "off" both keep the canonical "moe" variant name so the
+    # v0.8 study output is directly comparable to the v0.6 README JSON.
+    # Forced-trigger ablation modes get a distinguishing suffix.
+    moe_variant_name = ("moe" if refit_mode in ("search", "off")
+                        else f"moe-refit-{refit_mode}")
 
     all_variants = [
         ("naive-lightgbm", lambda log: make_naive_lightgbm_objective(X, y, cfg, log)),
@@ -692,13 +759,22 @@ def main():
         help=f"Comma-separated subset of: {','.join(DATASET_GENERATORS.keys())}",
     )
     p.add_argument("--out", type=str, required=True)
-    # v0.7 leaf-refit ablation flags (issue #37). When --moe-refit-mode != "off",
-    # all MoE trials run with mixture_refit_leaves=True at the chosen trigger.
-    # The output JSON's variant key changes from "moe" to "moe-refit-<mode>"
-    # so a baseline run + an ablation run can be cleanly merged for reporting.
+    # v0.7 leaf-refit + v0.8 partition-regrow handling.
+    #
+    # "search" (v0.8 default): Optuna samples mixture_refit_leaves /
+    #     mixture_refit_trigger / mixture_regrow_oldest_trees / etc.
+    #     alongside the rest of the MoE hyperparameters. Used for the v0.8
+    #     500-trial study — answers "do v0.8 features rise to the top?"
+    # "off": force ``mixture_refit_leaves=false``, no regrow. Reproduces
+    #     the v0.6 baseline. Use this to re-run the v0.6 README headline.
+    # "always" / "elbo" / "every_n": legacy v0.7 forced-trigger ablation
+    #     (the variant key becomes "moe-refit-<mode>" so a baseline run
+    #     plus an ablation run can be merged). Regrow is OFF in this path.
     p.add_argument("--moe-refit-mode",
-                   choices=["off", "always", "elbo", "every_n"], default="off",
-                   help="v0.7 leaf-refit trigger; default off = v0.6 behavior")
+                   choices=["search", "off", "always", "elbo", "every_n"],
+                   default="search",
+                   help="how to handle the v0.7/v0.8 refit + regrow knobs. "
+                        "default 'search' = let Optuna pick (v0.8 study mode)")
     p.add_argument("--moe-refit-decay", type=float, default=0.0,
                    help="leaf blend factor (0=replace, 1=no-op); used when mode != off")
     p.add_argument("--variants", type=str, default=None,
