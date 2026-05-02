@@ -135,6 +135,47 @@ class MixtureGBDT : public GBDTBase {
   int NumExperts() const { return num_experts_; }
 
   /*!
+   * \brief Number of training rows the responsibilities buffer is sized for.
+   * Returns 0 outside of training (e.g. on a freshly loaded model).
+   */
+  int NumTrainData() const { return num_data_; }
+
+  /*!
+   * \brief Copy the current training-time responsibilities r_ik into a caller
+   * buffer in sample-major layout (`out[i * K + k]`).
+   *
+   * Intended for diagnostic use during training — typically from a
+   * `lgb.train(callbacks=[...])` callback that snapshots r at each iteration.
+   * What "current" means depends on the callback timing relative to the EM
+   * loop:
+   *   - Iter 0..warmup_iters-1: r holds the InitResponsibilities output
+   *     (e.g. GMM / kmeans / quantile clustering of the labels). The E-step
+   *     does not run during warmup, so this is the *initialization* you can
+   *     plot as the "before EM" baseline.
+   *   - Iter >= warmup_iters: r is the latest E-step posterior, recomputed
+   *     each iteration from the current expert predictions and gate prior.
+   *
+   * Behavior outside training: `responsibilities_` is not serialized, so a
+   * model loaded via LoadModelFromString returns an empty buffer (out_len=0)
+   * even though its experts and gate are intact. Use this only on a booster
+   * still attached to its training data.
+   *
+   * Two-call protocol matching `LGBM_BoosterGetLoadedParam`:
+   *   1. Pass `out_data=nullptr` (or buffer_len=0) to read the required size
+   *      into `out_len`.
+   *   2. Allocate a `double[out_len]` buffer and call again with
+   *      `buffer_len >= out_len`.
+   * If `buffer_len < out_len`, no copy is performed and the caller should
+   * reallocate.
+   *
+   * \param buffer_len Capacity of `out_data` in number of doubles.
+   * \param out_len    [out] Required buffer size = num_data * num_experts.
+   * \param out_data   [out] Destination buffer (may be nullptr on size query).
+   */
+  void GetResponsibilities(int64_t buffer_len, int64_t* out_len,
+                           double* out_data) const;
+
+  /*!
    * \brief Check if Markov mode is enabled
    */
   bool IsMarkovMode() const { return use_markov_; }

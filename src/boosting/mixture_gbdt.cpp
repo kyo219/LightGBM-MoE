@@ -3389,6 +3389,20 @@ void MixtureGBDT::PredictRegimeProbaWithPrevProba(const double* features, const 
   }
 }
 
+void MixtureGBDT::GetResponsibilities(int64_t buffer_len, int64_t* out_len,
+                                       double* out_data) const {
+  // See header comment for the contract. Outside training (LoadModelFromString
+  // path) num_data_ is 0 and responsibilities_ is empty — caller gets out_len=0
+  // and an empty payload, which they can interpret as "no responsibilities to
+  // snapshot here".
+  *out_len = static_cast<int64_t>(responsibilities_.size());
+  if (out_data == nullptr || buffer_len < *out_len || *out_len == 0) {
+    return;  // size-query, undersized buffer, or nothing to copy
+  }
+  std::memcpy(out_data, responsibilities_.data(),
+              static_cast<size_t>(*out_len) * sizeof(double));
+}
+
 void MixtureGBDT::PredictLeafIndex(const double* features, double* output) const {
   (void)features;
   (void)output;

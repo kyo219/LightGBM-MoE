@@ -2952,6 +2952,20 @@ int LGBM_BoosterPredictExpertPred(BoosterHandle handle,
   API_END();
 }
 
+int LGBM_BoosterGetMixtureResponsibilities(BoosterHandle handle,
+                                            int64_t buffer_len,
+                                            int64_t* out_len,
+                                            double* out_result) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(ref_booster->GetBoosting());
+  if (mixture == nullptr) {
+    Log::Fatal("LGBM_BoosterGetMixtureResponsibilities can only be used with MoE models");
+  }
+  mixture->GetResponsibilities(buffer_len, out_len, out_result);
+  API_END();
+}
+
 
 // ---- start of some help functions
 

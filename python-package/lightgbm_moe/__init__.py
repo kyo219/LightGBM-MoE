@@ -34,6 +34,11 @@ except ImportError:
 from .auto_k import select_num_experts
 from .diagnostics import diagnose_moe
 from .pruning import PrunedMoEModel, merge_experts, prune_experts
+try:
+    from .viz import RegimeEvolutionRecorder
+except ImportError:
+    # matplotlib only required when actually plotting
+    pass
 
 _version_path = Path(__file__).resolve().parent / "VERSION.txt"
 if _version_path.is_file():
@@ -69,4 +74,5 @@ __all__ = [
     "PrunedMoEModel",
     "prune_experts",
     "merge_experts",
+    "RegimeEvolutionRecorder",
 ]
