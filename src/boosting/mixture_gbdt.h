@@ -10,6 +10,7 @@
 #include <LightGBM/boosting.h>
 #include <LightGBM/objective_function.h>
 
+#include <deque>
 #include <memory>
 #include <random>
 #include <string>
@@ -297,15 +298,24 @@ class MixtureGBDT : public GBDTBase {
   void RefitExpertsAndGate();
 
   /*!
-   * \brief v0.7 leaf-refit trigger gate. Decides whether the current EM
-   *        round should run RefitExpertsAndGate. Always returns false
-   *        when `mixture_refit_leaves` is off; otherwise dispatches on
-   *        `mixture_refit_trigger`:
+   * \brief Leaf-refit trigger gate (v0.7) + partition re-grow trigger (v0.8).
+   *        Decides whether the current EM round should run RefitExpertsAndGate.
+   *        Always returns false when `mixture_refit_leaves` is off; otherwise
+   *        dispatches on `mixture_refit_trigger`:
    *
-   *   - "always": fires every post-warmup iter (highest cost, most faithful EM)
-   *   - "elbo":   fires when the most recent ELBO log showed a >5% drop —
-   *               cheap because ELBO is only computed every 10 iters and
-   *               this reads `last_elbo_drop_ratio_` set by that block
+   *   - "always":  fires every post-warmup iter (highest cost, most faithful EM)
+   *   - "elbo":    v0.8 sliding-window detector. Fires when EITHER
+   *                  • drop:    `(elbo_t - elbo_{t-W}) / max(|elbo_{t-W}|, 1) <
+   *                                -mixture_elbo_drop_threshold`
+   *                  • plateau: `(max(window) - min(window)) / max(|max|, 1) <
+   *                                mixture_elbo_plateau_threshold`
+   *                              AND `moe_iter > warmup_iters +
+   *                                              mixture_elbo_min_iter_for_plateau`
+   *                Reads `elbo_history_`, populated every post-warmup iter by
+   *                the per-iter ELBO compute in TrainOneIter (requires
+   *                `mixture_estimate_variance=true`). Replaces the v0.7
+   *                "5%-drop on every-10-iter logs" trigger that fired 0/6
+   *                datasets in the v0.7 acceptance bench (issue #41).
    *   - "every_n": fires every `mixture_refit_every_n` post-warmup iters
    */
   bool ShouldRefit() const;
@@ -400,13 +410,20 @@ class MixtureGBDT : public GBDTBase {
    */
   double prev_marginal_log_lik_ = -1e300;
 
-  /*! \brief Last seen ELBO drop ratio (positive = drop, negative = improvement),
-   *  normalized by `max(|prev_marginal_log_lik_|, 1.0)`. Updated by the
-   *  every-10-iter ELBO log block in TrainOneIter. Read by ShouldRefit() in
-   *  "elbo" trigger mode — refit fires when this exceeds 0.05.
-   *  Stays at 0.0 when `mixture_estimate_variance=false` (no ELBO computed).
+  /*! \brief Sliding window of recent ELBO values for the v0.8 "elbo" refit
+   *  trigger. Pushed every post-warmup iter (when `mixture_estimate_variance=true`),
+   *  trimmed to `mixture_elbo_window` length. Read by ShouldRefit() in "elbo"
+   *  trigger mode to detect either:
+   *    - drop:    `(elbo_t - elbo_{t-W}) / max(|elbo_{t-W}|, 1) < -mixture_elbo_drop_threshold`
+   *    - plateau: `(max(window) - min(window)) / max(|max|, 1) < mixture_elbo_plateau_threshold`
+   *               AND moe_iter > warmup_iters + mixture_elbo_min_iter_for_plateau
+   *  Stays empty when `mixture_estimate_variance=false` (no ELBO computed,
+   *  trigger never fires). Replaces the v0.7 `last_elbo_drop_ratio_` scalar:
+   *  the v0.7 trigger only saw a 5%-drop signal computed at the every-10-iter
+   *  log cadence, which empirically fired 0/6 datasets in v0.7 acceptance
+   *  because Optuna-tuned configs plateau without dropping. See issue #41.
    */
-  double last_elbo_drop_ratio_ = 0.0;
+  std::deque<double> elbo_history_;
 
   /*! \brief Gradients for mixture (N) */
   std::vector<score_t> gradients_;
