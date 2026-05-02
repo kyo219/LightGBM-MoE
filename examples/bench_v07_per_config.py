@@ -253,6 +253,10 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--datasets", type=str,
                    default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm")
+    p.add_argument("--override-init", type=str, default=None,
+                   help="if set, overrides mixture_init in every variant — useful "
+                        "for stress-testing refit on a deliberately-bad init like "
+                        "'uniform' or 'random' (the case refit was designed for)")
     p.add_argument("--out", type=str, default=None)
     args = p.parse_args()
 
@@ -272,6 +276,10 @@ def main():
                                 "n_splits": args.splits,
                                 "datasets": {}}
 
+    if args.override_init:
+        print(f"[override] mixture_init forced to '{args.override_init}' for all configs")
+        results["override_init"] = args.override_init
+
     for name in selected:
         if name not in v06_bests:
             print(f"[skip] {name}: no v0.6 best_params found")
@@ -281,8 +289,11 @@ def main():
         # Each generator returns either (X, y, ...) or (X, y); take first 2.
         X = np.asarray(gen_out[0])
         y = np.asarray(gen_out[1])
+        cfg = dict(v06_bests[name])
+        if args.override_init:
+            cfg["mixture_init"] = args.override_init
         results["datasets"][name] = bench_dataset(
-            name, X, y, v06_bests[name], args.splits, args.rounds)
+            name, X, y, cfg, args.splits, args.rounds)
 
     # Outputs
     ts = results["timestamp"]

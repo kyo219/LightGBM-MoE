@@ -74,6 +74,24 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   config_ = std::unique_ptr<Config>(new Config(*config));
   num_experts_ = config_->mixture_num_experts;
 
+  // v0.7 leaf-refit incompatibility guard: leaf_reuse gate derives routing
+  // from expert-tree leaf statistics, but RefitExpertsAndGate only refits the
+  // gate when gate_type=gbdt — refitting expert leaves while leaving the
+  // gate's accumulated GBDT trees frozen produces an asymmetric update that
+  // empirically degrades vix by +7% under uniform init (see
+  // bench_results/bench_v07_per_config_uniform.md). Force refit off in this
+  // combination and warn once at Init.
+  if (config_->mixture_refit_leaves && config_->mixture_gate_type == "leaf_reuse") {
+    Log::Warning(
+        "MixtureGBDT: mixture_refit_leaves=true is not supported with "
+        "mixture_gate_type='leaf_reuse'. Refit only rewrites expert leaves "
+        "(and gbdt-mode gate leaves); leaf_reuse's gate GBDT would stay frozen, "
+        "causing routing inconsistency. Forcing mixture_refit_leaves=false. "
+        "Either set gate_type='gbdt' to enable refit, or accept the v0.6 "
+        "append-only behavior with leaf_reuse.");
+    config_->mixture_refit_leaves = false;
+  }
+
   // Get feature info
   max_feature_idx_ = train_data_->num_total_features() - 1;
   label_idx_ = train_data_->label_idx();
@@ -3689,6 +3707,13 @@ void MixtureGBDT::ResetTrainingData(const Dataset* train_data,
 
 void MixtureGBDT::ResetConfig(const Config* config) {
   config_ = std::unique_ptr<Config>(new Config(*config));
+  // Mirror Init's leaf_reuse + refit incompatibility guard so a runtime
+  // ResetConfig can't re-enable a known-broken combination silently.
+  if (config_->mixture_refit_leaves && config_->mixture_gate_type == "leaf_reuse") {
+    Log::Warning("MixtureGBDT: ResetConfig disabled mixture_refit_leaves due to "
+                 "incompatible mixture_gate_type='leaf_reuse'. See Init for rationale.");
+    config_->mixture_refit_leaves = false;
+  }
   for (int k = 0; k < num_experts_; ++k) {
     experts_[k]->ResetConfig(config);
   }

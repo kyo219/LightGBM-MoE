@@ -533,6 +533,38 @@ class TestMixtureRefitLeaves:
             ),
         )
 
+    def test_refit_leaf_reuse_force_off(self):
+        """`mixture_refit_leaves=true` is force-disabled with gate_type='leaf_reuse'.
+
+        Refit only touches expert leaves (and gbdt-mode gate leaves); leaf_reuse's
+        gate GBDT would stay frozen → routing inconsistency. Init guards this
+        combination by setting refit_leaves=false at config-copy time and
+        emitting a warning. Verified empirically: predictions match a pure
+        refit-off baseline (with same gate_type=leaf_reuse).
+        """
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+
+        params_off = dict(self._base_params(),
+                          mixture_gate_type="leaf_reuse",
+                          mixture_refit_leaves=False,
+                          mixture_refit_decay_rate=0.0)
+        params_on = dict(self._base_params(),
+                         mixture_gate_type="leaf_reuse",
+                         mixture_refit_leaves=True,
+                         mixture_refit_decay_rate=0.0,
+                         mixture_refit_trigger="always")
+        bst_off = lgb.train(params_off, lgb.Dataset(X, label=y), num_boost_round=20)
+        bst_on = lgb.train(params_on, lgb.Dataset(X, label=y), num_boost_round=20)
+
+        # Force-off invariant: with leaf_reuse, the refit_leaves=true config
+        # is silently downgraded to false, so predictions are bit-identical
+        # to the explicit off run.
+        np.testing.assert_array_equal(
+            bst_off.predict(X), bst_on.predict(X),
+            err_msg=("leaf_reuse + refit_leaves=true should be auto-downgraded "
+                     "to refit_leaves=false; predictions diverged"),
+        )
+
     def test_refit_with_validation_does_not_diverge(self):
         """Validation-time predictions stay consistent with the model after refit.
 

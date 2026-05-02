@@ -255,6 +255,8 @@ After all iters are replayed, the score updaters reflect the post-refit cumulati
 
 **Subsumed pathology guards**: with refit-on, the symmetry breaker (PR #36), the diversity-reg Huber clip (PR #26), and parts of the variance-estimator anti-collapse (PR #24) become structurally redundant — they exist to compensate for the same root cause refit fixes (frozen leaves can't track changing `r`). For now the guards remain (default-off refit is a strict superset of v0.6 behavior), but a future cleanup PR could simplify them.
 
+**Incompatibility — `gate_type='leaf_reuse'`**: refit only rewrites expert leaves and (in `gbdt` gate mode) the gate's GBDT leaves. `leaf_reuse` derives gate routing from expert-tree leaf statistics and trains a separate gate GBDT for out-of-sample inference; refit would touch the experts but leave that gate GBDT frozen, producing an asymmetric update that empirically degrades performance (verified at +7% RMSE on `vix` under uniform init in `bench_results/bench_v07_per_config_uniform.md`). The Init guard auto-disables `mixture_refit_leaves` when `mixture_gate_type='leaf_reuse'` is set, with a one-time warning. Use `gate_type='gbdt'` if you want refit semantics.
+
 ## 3. Initializing `r_ik`
 
 `InitResponsibilities()` (`mixture_gbdt.cpp:462`) supports 7 schemes via `mixture_init`:
