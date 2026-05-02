@@ -2549,11 +2549,48 @@ bool MixtureGBDT::ShouldRefit() const {
   if (trigger == "always") {
     return true;
   } else if (trigger == "elbo") {
-    // Fires when the most-recent ELBO log block (every 10 iters past warmup,
-    // and the first 5 iters) saw a >5% drop. Stays at 0 when
-    // mixture_estimate_variance=false (the log block computes nothing then),
-    // so users who turn off variance estimation effectively get no-refit.
-    return last_elbo_drop_ratio_ > 0.05;
+    // v0.8: sliding-window drop OR plateau detection. The v0.7 single-scalar
+    // 5%-drop trigger fired 0/6 datasets in the v0.7 acceptance bench because
+    // Optuna-tuned configs do not drop ELBO — they plateau at a sub-optimal
+    // local fixed point (E-step output stops moving → M-step contributions
+    // vanish → ELBO flatlines without dropping). We detect both modes:
+    //   • drop    — fast change against the back of the window
+    //   • plateau — small spread across the entire window (basin lock-in)
+    // Both signals require mixture_estimate_variance=true (otherwise no ELBO
+    // is computed and elbo_history_ stays empty → trigger never fires).
+    if (elbo_history_.size() < 2) return false;
+    const int W = std::max(2, config_->mixture_elbo_window);
+
+    // Drop detection — usable as soon as we have ≥2 samples; references the
+    // window's earliest (t-W) and latest (t) values.
+    const double elbo_t = elbo_history_.back();
+    const double elbo_w = elbo_history_.front();
+    const double rel_drop = std::max(std::fabs(elbo_w), 1.0);
+    if ((elbo_t - elbo_w) / rel_drop < -config_->mixture_elbo_drop_threshold) {
+      return true;
+    }
+
+    // Plateau detection — requires the window to be full (otherwise "haven't
+    // seen W iters yet" looks identical to "no improvement over W iters") and
+    // gated by min_iter_for_plateau to skip the warmup-adjacent transient
+    // where ELBO is still equilibrating.
+    const double plateau_th = config_->mixture_elbo_plateau_threshold;
+    if (plateau_th > 0.0
+        && static_cast<int>(elbo_history_.size()) >= W
+        && moe_iter > config_->mixture_warmup_iters
+                      + config_->mixture_elbo_min_iter_for_plateau) {
+      double emin = elbo_history_.front();
+      double emax = elbo_history_.front();
+      for (double v : elbo_history_) {
+        if (v < emin) emin = v;
+        if (v > emax) emax = v;
+      }
+      const double rel_plat = std::max(std::fabs(emax), 1.0);
+      if ((emax - emin) / rel_plat < plateau_th) {
+        return true;
+      }
+    }
+    return false;
   } else if (trigger == "every_n") {
     const int n = std::max(1, config_->mixture_refit_every_n);
     return (moe_iter % n) == 0;
@@ -3191,49 +3228,64 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
   // monotone non-decreasing in this quantity; here the M-step is
   // approximate (each expert / the gate adds one tree per iter), so
   // monotonicity is not guaranteed but should hold "most of the time".
-  // A persistent decrease across many iters indicates the EM machinery is
-  // not actually fitting the mixture — log it loudly so we notice.
-  if (config_->mixture_estimate_variance &&
-      moe_iter >= warmup_iters &&
-      (iter_ % 10 == 0 || iter_ < 5)) {
+  //
+  // v0.8: ELBO is now computed every post-warmup iter (was every 10 in v0.7)
+  // and pushed to elbo_history_, the sliding window read by ShouldRefit() in
+  // "elbo" trigger mode. The 1-iter lag (trigger at iter t+1 reads ELBO from
+  // iter t) is intentional — refit fires at the start of iter t+1, BEFORE
+  // tree t+1 is built, modifying f_k against the freshly-detected drop or
+  // plateau. Cost: one extra O(N·K) logsumexp per iter (~5–10% wall-time).
+  //
+  // Logging cadence is unchanged from v0.7 (every 10 iters past warmup +
+  // first 5 iters) so console output looks the same to existing users. The
+  // 5%-drop warning is a separate diagnostic from the trigger and stays
+  // tied to the log cadence.
+  if (config_->mixture_estimate_variance && moe_iter >= warmup_iters) {
     const double ll = ComputeMarginalLogLikelihood();
-    Log::Info("MixtureGBDT: iter=%d  marginal_log_lik=%.6f  (per_sample=%.6f)",
-              iter_, ll,
-              num_data_ > 0 ? ll / num_data_ : 0.0);
 
-    // Monotonicity check. Approximate M-step → small dips are normal, but a
-    // drop bigger than 5% of |prev| is symptomatic of misalignment between
-    // E-step and M-step — historically this has been a sign of:
-    //   • bias-side regularizer fighting gate (pre PR #25)
-    //   • diversity sign flip (pre PR #26)
-    //   • dimension mismatch in scale estimation (pre this commit's quantile fix)
-    //   • aggressive expert dropout / adaptive_lr decoupling experts from EM
-    // The user can mute by quietening Log::Warning if expected (e.g. when
-    // deliberately running with high dropout for ablation).
-    const bool prev_finite = std::isfinite(prev_marginal_log_lik_) &&
-                             prev_marginal_log_lik_ > -1e299;
-    if (prev_finite && std::isfinite(ll)) {
-      const double drop = prev_marginal_log_lik_ - ll;
-      const double rel_scale = std::max(std::fabs(prev_marginal_log_lik_), 1.0);
-      // Cache the ratio for ShouldRefit's "elbo" trigger. Stays stale between
-      // log blocks (every 10 iters past warmup, plus the first 5) — the
-      // trigger reads the most recent value, so refit fires on the next iter
-      // after a logged drop. Negative values (= improvements) leave the
-      // trigger off.
-      last_elbo_drop_ratio_ = drop / rel_scale;
-      if (drop > 0.05 * rel_scale) {
-        Log::Warning(
-            "MixtureGBDT: marginal_log_lik dropped %.6f → %.6f "
-            "(Δ=%.6f, %.1f%% of |prev|). Approximate M-step allows small "
-            "dips; persistent / large drops mean E-step and M-step are "
-            "optimizing inconsistent objectives. Suspect: high expert "
-            "dropout, mixture_adaptive_lr, aggressive temperature "
-            "annealing, or a recent code change to gradient/Hessian.",
-            prev_marginal_log_lik_, ll, -drop,
-            100.0 * drop / rel_scale);
-      }
+    // Push to sliding window, trim to mixture_elbo_window length.
+    const int W = std::max(2, config_->mixture_elbo_window);
+    elbo_history_.push_back(ll);
+    while (static_cast<int>(elbo_history_.size()) > W) {
+      elbo_history_.pop_front();
     }
-    prev_marginal_log_lik_ = ll;
+
+    if (iter_ % 10 == 0 || iter_ < 5) {
+      Log::Info("MixtureGBDT: iter=%d  marginal_log_lik=%.6f  (per_sample=%.6f)",
+                iter_, ll,
+                num_data_ > 0 ? ll / num_data_ : 0.0);
+
+      // Monotonicity warning. Approximate M-step → small dips are normal,
+      // but a drop bigger than 5% of |prev| is symptomatic of misalignment
+      // between E-step and M-step — historically this has been a sign of:
+      //   • bias-side regularizer fighting gate (pre PR #25)
+      //   • diversity sign flip (pre PR #26)
+      //   • dimension mismatch in scale estimation (pre quantile fix)
+      //   • aggressive expert dropout / adaptive_lr decoupling experts from EM
+      // This warning is independent of the v0.8 elbo trigger: the trigger
+      // catches the *plateau* failure mode that this warning misses, and
+      // this warning catches the *gross drop* that the trigger may also
+      // catch (with a tighter threshold) but which the user should debug
+      // regardless.
+      const bool prev_finite = std::isfinite(prev_marginal_log_lik_) &&
+                               prev_marginal_log_lik_ > -1e299;
+      if (prev_finite && std::isfinite(ll)) {
+        const double drop = prev_marginal_log_lik_ - ll;
+        const double rel_scale = std::max(std::fabs(prev_marginal_log_lik_), 1.0);
+        if (drop > 0.05 * rel_scale) {
+          Log::Warning(
+              "MixtureGBDT: marginal_log_lik dropped %.6f → %.6f "
+              "(Δ=%.6f, %.1f%% of |prev|). Approximate M-step allows small "
+              "dips; persistent / large drops mean E-step and M-step are "
+              "optimizing inconsistent objectives. Suspect: high expert "
+              "dropout, mixture_adaptive_lr, aggressive temperature "
+              "annealing, or a recent code change to gradient/Hessian.",
+              prev_marginal_log_lik_, ll, -drop,
+              100.0 * drop / rel_scale);
+        }
+      }
+      prev_marginal_log_lik_ = ll;
+    }
   }
 
   ++iter_;

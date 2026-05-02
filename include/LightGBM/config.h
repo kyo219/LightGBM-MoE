@@ -1286,6 +1286,53 @@ struct Config {
   // check = >0
   int mixture_refit_every_n = 10;
 
+  // [doc-only] v0.8 elbo-trigger
+  // desc = drop threshold for the ``elbo`` refit trigger. Fires refit when the
+  //        sliding-window relative drop ``(elbo_t - elbo_{t-W}) / max(|elbo_{t-W}|, 1)``
+  //        falls below ``-mixture_elbo_drop_threshold``
+  // desc = lowered from the v0.7 hard-coded 0.05 because the cost asymmetry favors
+  //        sensitivity: false fire = one extra refit, missed fire = permanent basin
+  //        lock-in. Set to 0.05 to recover v0.7 drop sensitivity
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=0.0
+  double mixture_elbo_drop_threshold = 0.01;
+
+  // [doc-only] v0.8 elbo-trigger
+  // desc = plateau threshold for the ``elbo`` refit trigger. Fires refit when
+  //        ``(max(window) - min(window)) / max(|max(window)|, 1) < mixture_elbo_plateau_threshold``
+  //        AND ``moe_iter > mixture_warmup_iters + mixture_elbo_min_iter_for_plateau``
+  // desc = healthy Optuna-tuned configs do not drop ELBO; they plateau at sub-optimal
+  //        local fixed points where E-step output stops changing and M-step
+  //        contributions vanish. Plateau detection catches this where drop detection
+  //        cannot — empirically the v0.7 ``elbo`` trigger fired 0/6 datasets in the
+  //        v0.7 acceptance bench precisely because tuned configs do not drop
+  // desc = set to ``0`` to disable plateau detection (drop-only behavior, v0.7-like)
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=0.0
+  double mixture_elbo_plateau_threshold = 0.001;
+
+  // [doc-only] v0.8 elbo-trigger
+  // desc = sliding-window size (in iterations) for the ELBO history used by the
+  //        ``elbo`` trigger
+  // desc = larger window → more stable plateau detection, slower to react;
+  //        smaller window → faster, more false fires from natural ELBO noise
+  //        (one tree per iter ⇒ small per-iter ELBO jitter is normal)
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=2
+  int mixture_elbo_window = 10;
+
+  // [doc-only] v0.8 elbo-trigger
+  // desc = minimum number of post-warmup iterations before plateau detection can
+  //        fire. Effective floor is ``mixture_warmup_iters + mixture_elbo_min_iter_for_plateau``
+  // desc = warmup-adjacent ELBO is noisy (gate logits are still equilibrating to
+  //        ``log(r_init)``); firing too early would mistake the warmup transient
+  //        for a converged plateau
+  // desc = drop detection is unaffected by this — it can fire as soon as the
+  //        sliding window contains at least 2 ELBO samples
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=0
+  int mixture_elbo_min_iter_for_plateau = 20;
+
   // type = enum
   // options = value, value_and_regime, all
   // desc = output mode for mixture prediction
