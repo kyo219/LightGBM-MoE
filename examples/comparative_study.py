@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 # coding: utf-8
 """
-comparative_study.py — naive-lightgbm vs MoE 大規模比較 + ハイパラ重要度分析
+comparative_study.py — naive vs naive-ensemble vs MoE 大規模比較 + ハイパラ重要度分析
 
 `benchmark.py` の data generators (Synthetic / Hamilton / VIX) と独自の CV を再利用しつつ、
-Standard GBDT と MoE (token + expert choice 横断) で Optuna を回し、
+3 variants で Optuna を回す:
+
+  - **naive-lightgbm**: 単一の標準 GBDT
+  - **naive-ensemble**: K (=2〜4) 個の標準 GBDT を異なる seed で訓練して予測を平均。
+    MoE と同じ K-way 多モデル容量を持ち「単純平均で十分か / gating が真に効くか」の
+    fair な ablation。同一ハイパラ + per-member seed のみ変える seed-ensemble。
+  - **moe**: K experts + gate (token / expert choice 横断)
 
   - どっちが精度が良いか (best / median RMSE)
   - どっちが速いか (per-trial train time の中央値)
@@ -122,6 +128,57 @@ def evaluate_cv_timed(X, y, params, n_splits: int, num_boost_round: int):
     return float(np.mean(rmses)), float(np.mean(times))
 
 
+def evaluate_ensemble_cv_timed(X, y, params, n_models: int, base_seed: int,
+                               n_splits: int, num_boost_round: int):
+    """5-fold time-series CV with a K-way naive seed-ensemble of LightGBMs.
+
+    Each ensemble member uses identical hyperparameters but a per-member seed
+    offset, so bagging / feature-fraction / extra_trees randomness diverges
+    across members. Predictions are averaged. Total tree budget per fold is
+    `n_models * num_boost_round`, matching MoE's K * num_boost_round.
+
+    Returns (rmse_mean_over_folds, mean_total_train_seconds_per_fold).
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    rmses = []
+    times = []
+    for tr_idx, va_idx in tscv.split(X):
+        Xt, Xv = X[tr_idx], X[va_idx]
+        yt, yv = y[tr_idx], y[va_idx]
+        try:
+            t0 = time.perf_counter()
+            preds = np.zeros(len(va_idx), dtype=np.float64)
+            ok = True
+            for k in range(n_models):
+                p = dict(params)
+                # `seed` is LightGBM's master seed and propagates to bagging /
+                # feature-fraction / extra-trees per the docs. Setting it
+                # per-member is the cleanest way to diverge member k from j.
+                p["seed"] = base_seed + 1009 * k  # arbitrary multiplier to
+                                                  # avoid 1-step adjacency
+                train = lgb.Dataset(Xt, label=yt)
+                valid = lgb.Dataset(Xv, label=yv, reference=train)
+                model = lgb.train(
+                    p,
+                    train,
+                    num_boost_round=num_boost_round,
+                    valid_sets=[valid],
+                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+                )
+                preds += model.predict(Xv)
+            t1 = time.perf_counter()
+            if not ok:
+                raise RuntimeError("ensemble member failed")
+            preds /= n_models
+            rmse = float(np.sqrt(mean_squared_error(yv, preds)))
+            rmses.append(rmse)
+            times.append(t1 - t0)
+        except Exception:
+            rmses.append(float("inf"))
+            times.append(0.0)
+    return float(np.mean(rmses)), float(np.mean(times))
+
+
 # =============================================================================
 # Optuna objectives
 # =============================================================================
@@ -146,6 +203,41 @@ def make_naive_lightgbm_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
         }
         rmse, train_s = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
         trial_log.append({"variant": "naive-lightgbm", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
+        return rmse
+
+    return objective
+
+
+def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
+    """K-way seed-ensemble of standard LightGBM models. Same hyperparam search
+    space as `make_naive_lightgbm_objective` plus `n_models` ∈ {2, 3, 4} so
+    the ensemble has the same K-way capacity range as MoE. Per-fold compute
+    is K × naive's, matching MoE's K × num_boost_round tree budget.
+    """
+    def objective(trial):
+        n_models = trial.suggest_int("n_models", 2, 4)
+        params = {
+            "objective": "regression",
+            "boosting": "gbdt",
+            "verbose": -1,
+            "num_threads": 4,
+            # `seed` is overridden per-member inside evaluate_ensemble_cv_timed;
+            # this top-level value is not actually used by the ensemble.
+            "seed": cfg.seed,
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 8, 128),
+            "max_depth": trial.suggest_int("max_depth", 3, 12),
+            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 100),
+            "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
+            "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+            "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
+            "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
+        }
+        rmse, train_s = evaluate_ensemble_cv_timed(
+            X, y, params, n_models, cfg.seed, cfg.n_splits, cfg.num_boost_round)
+        trial_log.append({"variant": "naive-ensemble", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
         return rmse
 
     return objective
@@ -368,7 +460,7 @@ def aggregate_variant(name: str, trials: list[dict], study) -> dict:
 # =============================================================================
 def render_markdown(results: dict, out_path: str, slice_paths: dict):
     lines = []
-    lines.append("# Comparative Study Report — naive-lightgbm vs MoE\n")
+    lines.append("# Comparative Study Report — naive vs naive-ensemble vs MoE\n")
     cfg = results.get("config", {})
     lines.append(f"- **Trials per (variant × dataset)**: {cfg.get('trials')}\n")
     lines.append(f"- **Datasets**: {cfg.get('datasets')}\n")
@@ -382,7 +474,7 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
     for ds_name, ds in results.items():
         if not isinstance(ds, dict) or "naive-lightgbm" not in ds:
             continue
-        for v in ("naive-lightgbm", "moe"):
+        for v in ("naive-lightgbm", "naive-ensemble", "moe"):
             r = ds.get(v, {})
             lines.append(
                 f"| {ds_name} | {v} | {r.get('rmse_best', float('nan')):.4f} "
@@ -397,7 +489,7 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
             continue
         lines.append(f"\n---\n\n## {ds_name}  (X={ds.get('X_shape')})\n")
 
-        for v in ("naive-lightgbm", "moe"):
+        for v in ("naive-lightgbm", "naive-ensemble", "moe"):
             r = ds.get(v, {})
             if not r:
                 continue
@@ -506,6 +598,7 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
 
     for variant, make_obj in [
         ("naive-lightgbm", lambda log: make_naive_lightgbm_objective(X, y, cfg, log)),
+        ("naive-ensemble", lambda log: make_naive_ensemble_objective(X, y, cfg, log)),
         ("moe", lambda log: make_moe_objective(X, y, cfg, log)),
     ]:
         print(f"\n  → {variant} ({n_trials} trials)...")
