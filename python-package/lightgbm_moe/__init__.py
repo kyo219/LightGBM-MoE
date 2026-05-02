@@ -39,6 +39,7 @@ try:
 except ImportError:
     # matplotlib only required when actually plotting
     pass
+from .multi_init import train_multi_init, MultiInitResult, MultiInitTrial
 
 _version_path = Path(__file__).resolve().parent / "VERSION.txt"
 if _version_path.is_file():
@@ -75,4 +76,7 @@ __all__ = [
     "prune_experts",
     "merge_experts",
     "RegimeEvolutionRecorder",
+    "train_multi_init",
+    "MultiInitResult",
+    "MultiInitTrial",
 ]

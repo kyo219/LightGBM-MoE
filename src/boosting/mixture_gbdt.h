@@ -541,6 +541,27 @@ class MixtureGBDT : public GBDTBase {
   void BreakUniformSymmetryIfNeeded();
 
   /*!
+   * \brief Detect experts whose mean responsibility has fallen below
+   * `mixture_expert_reset_threshold` and surgically restart them.
+   *
+   * For each collapsed expert k:
+   *   1. Roll back its last `mixture_expert_reset_trees` iterations (drops
+   *      its trees and reverses their score contribution via
+   *      `GBDT::RollbackOneIter`).
+   *   2. Re-seed responsibilities: pick the top (N / num_experts) samples
+   *      with highest |y − yhat| under the current model and concentrate
+   *      r[i, k] on them. The next M-step will train k on these hard
+   *      cases.
+   *   3. Reset `expert_bias_[k]` so the load balancer's accumulated nudge
+   *      doesn't keep diverting traffic away from the just-revived expert.
+   *
+   * Gated on `mixture_expert_reset_enable` and the interval / warmup
+   * conditions; no-op when disabled. See config.h for the rationale on
+   * why GBDT additivity makes this surgical intervention necessary.
+   */
+  void ResetCollapsedExpertsIfNeeded(int moe_iter);
+
+  /*!
    * \brief Forward pass for validation data: compute expert predictions and gate probabilities
    * \param valid_idx Index of validation dataset
    */

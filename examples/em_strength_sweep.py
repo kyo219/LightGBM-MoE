@@ -128,6 +128,20 @@ CONFIGS = {
         mixture_e_step_temperature_init=5.0,
         mixture_e_step_temperature_final=0.5,
     ),
+    # DA-EM + expert collapse reset: when one of the K experts gets less
+    # than 5% of the routing mass, roll back its last few trees and re-seed
+    # it on the samples the rest of the model is fitting worst.
+    "C6_DA-EM+reset": dict(
+        mixture_hard_m_step=False,
+        mixture_estimate_variance=True,
+        mixture_diversity_lambda=0.05,
+        mixture_e_step_temperature_init=2.0,
+        mixture_e_step_temperature_final=1.0,
+        mixture_expert_reset_enable=True,
+        mixture_expert_reset_threshold=0.10,
+        mixture_expert_reset_interval=15,
+        mixture_expert_reset_trees=5,
+    ),
 }
 
 

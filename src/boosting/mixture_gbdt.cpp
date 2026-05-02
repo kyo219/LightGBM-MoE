@@ -1401,6 +1401,84 @@ void MixtureGBDT::BreakUniformSymmetryIfNeeded() {
             epsilon);
 }
 
+void MixtureGBDT::ResetCollapsedExpertsIfNeeded(int moe_iter) {
+  if (!config_->mixture_expert_reset_enable) return;
+  // Don't fire during warmup or in the iteration immediately after — give
+  // the E-step at least one full pass to settle before declaring collapse.
+  const int warmup = config_->mixture_warmup_iters;
+  if (moe_iter < warmup + 1) return;
+  // Only check on the configured cadence.
+  if (moe_iter % std::max(1, config_->mixture_expert_reset_interval) != 0) {
+    return;
+  }
+
+  const double thr = config_->mixture_expert_reset_threshold;
+  const int n_drop = config_->mixture_expert_reset_trees;
+  const label_t* labels = train_data_->metadata().label();
+
+  // Build the residual ranking once per call (shared across all experts that
+  // need reseeding this iter — so multiple resets in the same call don't
+  // each pay an O(N log N) sort).
+  std::vector<std::pair<double, data_size_t>> err_idx;
+  err_idx.reserve(num_data_);
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    const double e = std::abs(static_cast<double>(labels[i]) - yhat_[i]);
+    err_idx.emplace_back(e, i);
+  }
+  // Sort descending by absolute residual.
+  std::sort(err_idx.begin(), err_idx.end(),
+            [](const std::pair<double, data_size_t>& a,
+               const std::pair<double, data_size_t>& b) {
+              return a.first > b.first;
+            });
+
+  // Each reset gets a disjoint block of the top-N hardest samples so two
+  // experts collapsing at once don't fight over the same residuals.
+  const data_size_t block_size = std::max<data_size_t>(
+      1, num_data_ / std::max(1, num_experts_));
+  data_size_t block_cursor = 0;
+
+  for (int k = 0; k < num_experts_; ++k) {
+    if (expert_load_[k] >= thr) continue;
+
+    // 1) Roll back last n_drop iterations of this expert's GBDT.
+    int actual_drop = 0;
+    for (int t = 0; t < n_drop; ++t) {
+      const int before = experts_[k]->GetCurrentIteration();
+      if (before <= 0) break;
+      experts_[k]->RollbackOneIter();
+      ++actual_drop;
+    }
+
+    // 2) Reseed: dominate r[i, k] for the next block of hardest samples.
+    //    Use main_share = 0.8 so the expert gets clearly assigned without
+    //    wiping the other experts entirely (they still see 0.05 each at K=4).
+    const double main_share = 0.8;
+    const double other_share =
+        (1.0 - main_share) / std::max(1, num_experts_ - 1);
+    const data_size_t start = block_cursor;
+    const data_size_t end = std::min<data_size_t>(start + block_size,
+                                                  static_cast<data_size_t>(err_idx.size()));
+    for (data_size_t r = start; r < end; ++r) {
+      const data_size_t i = err_idx[r].second;
+      for (int j = 0; j < num_experts_; ++j) {
+        responsibilities_[i * num_experts_ + j] = (j == k) ? main_share : other_share;
+      }
+    }
+    block_cursor = end;
+
+    // 3) Reset the load-balance bias so the gate's accumulated "avoid k"
+    //    nudge doesn't immediately re-starve the just-reseeded expert.
+    expert_bias_[k] = 0.0;
+
+    Log::Warning("MixtureGBDT: reset collapsed expert %d at moe_iter=%d "
+                 "(load was %.4f < threshold %.4f, dropped %d trees, "
+                 "reseeded %d samples).",
+                 k, moe_iter, expert_load_[k], thr, actual_drop,
+                 static_cast<int>(end - start));
+  }
+}
+
 void MixtureGBDT::SpawnExpertsFromSeed() {
   const double perturbation = config_->mixture_spawn_perturbation;
   Log::Info("MixtureGBDT: Spawning %d experts from seed "
@@ -3017,6 +3095,11 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     // tuned reweighting of expert losses.
     UpdateExpertVariances();
   }
+
+  // Surgical recovery from expert collapse — see ResetCollapsedExpertsIfNeeded
+  // for the full mechanism. No-op when `mixture_expert_reset_enable=false`
+  // (default) so this slot is free for users who don't ask for it.
+  ResetCollapsedExpertsIfNeeded(moe_iter);
 
   // M-step: update experts
   MStepExperts();

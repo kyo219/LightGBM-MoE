@@ -1,0 +1,6 @@
+idx    seed              init        rmse    time
+  0      42           uniform      0.9869    0.5s  
+  1     142            random      0.8398    0.5s  
+  2     242          quantile      0.6327    0.5s ★
+  3     342   kmeans_features      0.7068    0.5s  
+  4     442               gmm      0.7345    0.5s  

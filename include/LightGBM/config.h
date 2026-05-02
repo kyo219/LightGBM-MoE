@@ -1487,6 +1487,48 @@ struct Config {
   // desc = recommended: 0.3-1.0 for exploitation in late training
   double mixture_e_step_temperature_final = 1.0;
 
+  // Expert collapse reset — periodically detect experts whose mean
+  // responsibility has fallen below `mixture_expert_reset_threshold` and
+  // re-seed them on the samples the rest of the model is fitting worst.
+  //
+  // Mechanism:
+  //   1. Roll back the collapsed expert's last `mixture_expert_reset_trees`
+  //      iterations via GBDT::RollbackOneIter — its prediction reverts
+  //      toward the baseline that hadn't yet been pushed into a corner.
+  //   2. Re-seed responsibilities: pick the top (N / num_experts) samples
+  //      by |y − yhat| and force most of their responsibility onto the
+  //      reset expert. Next M-step will train it on those hard cases.
+  //   3. Zero out the load-balance bias for that expert so the gate
+  //      doesn't keep routing past it.
+  //
+  // GBDT is additive — past trees can't be unlearned, only compensated.
+  // So once an expert specializes wrongly (or gets routed past), it stays
+  // committed unless we surgically remove a window of its trees. This is
+  // the structural counterpart to DA-EM (which softens the *next* E-step):
+  // reset acts on the M-side, redistributing model capacity between the
+  // experts when one has been starved.
+  //
+  // desc = enable periodic collapsed-expert reset (default off; turn on
+  //        when you observe one expert's load tending to ~0)
+  bool mixture_expert_reset_enable = false;
+
+  // check = >0.0
+  // check = <=1.0
+  // desc = mean-responsibility threshold below which an expert is treated
+  //        as collapsed and reset; default 0.05 ≡ "an expert getting <5%
+  //        of the mass is dead weight"
+  double mixture_expert_reset_threshold = 0.05;
+
+  // check = >=1
+  // desc = check for collapse every N MoE iterations; smaller = more
+  //        aggressive intervention, larger = let EM settle first
+  int mixture_expert_reset_interval = 20;
+
+  // check = >=1
+  // desc = number of recent iterations to roll back from a collapsed
+  //        expert; setting this too high risks dropping good early trees
+  int mixture_expert_reset_trees = 5;
+
   #ifndef __NVCC__
   #pragma endregion
 

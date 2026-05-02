@@ -367,6 +367,10 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_gate_temperature_final",
   "mixture_e_step_temperature_init",
   "mixture_e_step_temperature_final",
+  "mixture_expert_reset_enable",
+  "mixture_expert_reset_threshold",
+  "mixture_expert_reset_interval",
+  "mixture_expert_reset_trees",
   "mixture_gate_type",
   "mixture_gate_retrain_interval",
   "mixture_dropout_schedule",
@@ -840,6 +844,18 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetDouble(params, "mixture_e_step_temperature_final", &mixture_e_step_temperature_final);
   CHECK_GT(mixture_e_step_temperature_final, 0.0);
 
+  GetBool(params, "mixture_expert_reset_enable", &mixture_expert_reset_enable);
+
+  GetDouble(params, "mixture_expert_reset_threshold", &mixture_expert_reset_threshold);
+  CHECK_GT(mixture_expert_reset_threshold, 0.0);
+  CHECK_LE(mixture_expert_reset_threshold, 1.0);
+
+  GetInt(params, "mixture_expert_reset_interval", &mixture_expert_reset_interval);
+  CHECK_GE(mixture_expert_reset_interval, 1);
+
+  GetInt(params, "mixture_expert_reset_trees", &mixture_expert_reset_trees);
+  CHECK_GE(mixture_expert_reset_trees, 1);
+
   GetString(params, "mixture_gate_type", &mixture_gate_type);
 
   GetInt(params, "mixture_gate_retrain_interval", &mixture_gate_retrain_interval);
@@ -1022,6 +1038,10 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_gate_temperature_final: " << mixture_gate_temperature_final << "]\n";
   str_buf << "[mixture_e_step_temperature_init: " << mixture_e_step_temperature_init << "]\n";
   str_buf << "[mixture_e_step_temperature_final: " << mixture_e_step_temperature_final << "]\n";
+  str_buf << "[mixture_expert_reset_enable: " << mixture_expert_reset_enable << "]\n";
+  str_buf << "[mixture_expert_reset_threshold: " << mixture_expert_reset_threshold << "]\n";
+  str_buf << "[mixture_expert_reset_interval: " << mixture_expert_reset_interval << "]\n";
+  str_buf << "[mixture_expert_reset_trees: " << mixture_expert_reset_trees << "]\n";
   str_buf << "[mixture_gate_type: " << mixture_gate_type << "]\n";
   str_buf << "[mixture_gate_retrain_interval: " << mixture_gate_retrain_interval << "]\n";
   str_buf << "[mixture_dropout_schedule: " << mixture_dropout_schedule << "]\n";
@@ -1214,6 +1234,10 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_gate_temperature_final", {}},
     {"mixture_e_step_temperature_init", {}},
     {"mixture_e_step_temperature_final", {}},
+    {"mixture_expert_reset_enable", {}},
+    {"mixture_expert_reset_threshold", {}},
+    {"mixture_expert_reset_interval", {}},
+    {"mixture_expert_reset_trees", {}},
     {"mixture_gate_type", {}},
     {"mixture_gate_retrain_interval", {}},
     {"mixture_dropout_schedule", {}},
@@ -1406,6 +1430,10 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_gate_temperature_final", "double"},
     {"mixture_e_step_temperature_init", "double"},
     {"mixture_e_step_temperature_final", "double"},
+    {"mixture_expert_reset_enable", "bool"},
+    {"mixture_expert_reset_threshold", "double"},
+    {"mixture_expert_reset_interval", "int"},
+    {"mixture_expert_reset_trees", "int"},
     {"mixture_gate_type", "string"},
     {"mixture_gate_retrain_interval", "int"},
     {"mixture_dropout_schedule", "string"},
