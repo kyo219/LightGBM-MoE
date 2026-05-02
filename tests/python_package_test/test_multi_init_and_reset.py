@@ -165,6 +165,153 @@ class TestMultiInitBasic:
                 # No score_data → RMSE can't be computed.
             )
 
+    def test_accepts_xy_tuple(self):
+        """Subprocess workers can't share a constructed Dataset, so accept
+        raw (X, y) tuples directly."""
+        X, y = _toy_regression()
+        res = train_multi_init(
+            {"boosting": "mixture", "mixture_num_experts": 3,
+             "objective": "regression", "verbose": -1},
+            (X, y),
+            num_boost_round=5, n_inits=2, score_data=(X, y),
+        )
+        assert len(res.trials) == 2
+
+    def test_returned_booster_is_predictive(self):
+        """After (de)serialization the returned booster must still predict."""
+        X, y = _toy_regression()
+        res = train_multi_init(
+            {"boosting": "mixture", "mixture_num_experts": 3,
+             "objective": "regression", "verbose": -1},
+            (X, y), num_boost_round=10, n_inits=2, score_data=(X, y),
+        )
+        yhat = res.best_booster.predict(X)
+        assert yhat.shape == (X.shape[0],)
+        assert np.isfinite(yhat).all()
+
+
+# --------------------------------------------------------------------------- #
+# Speed knobs: n_jobs (parallel) + prescreen                                  #
+# --------------------------------------------------------------------------- #
+
+class TestMultiInitParallel:
+    """ProcessPoolExecutor path. Smoke tests — verifying correctness, not
+    speedup (parallel speedup is brittle in CI for small problems)."""
+
+    def test_n_jobs_2_runs_all_trials(self):
+        X, y = _toy_regression(n=300)
+        res = train_multi_init(
+            {"boosting": "mixture", "mixture_num_experts": 3,
+             "objective": "regression", "verbose": -1,
+             "mixture_warmup_iters": 2},
+            (X, y),
+            num_boost_round=10, n_inits=4,
+            init_schemes=["uniform", "kmeans_features", "gmm", "quantile"],
+            score_data=(X, y),
+            n_jobs=2,
+        )
+        assert len(res.trials) == 4
+        # Order in res.trials follows the original trial_index ordering
+        # (we re-sort by trial_index when assembling), and seeds must remain
+        # deterministic across the parallel scatter/gather.
+        seeds = sorted(t.seed for t in res.trials)
+        assert seeds == [42, 142, 242, 342]
+
+    def test_n_jobs_rejects_callable_score(self):
+        X, y = _toy_regression()
+        with pytest.raises(ValueError, match="callable score_metric"):
+            train_multi_init(
+                {"boosting": "mixture", "mixture_num_experts": 3,
+                 "objective": "regression", "verbose": -1},
+                (X, y), num_boost_round=5, n_inits=2,
+                score_metric=lambda b: 0.0, n_jobs=2,
+            )
+
+    def test_n_jobs_warns_on_callbacks_factory(self):
+        X, y = _toy_regression()
+        with pytest.warns(UserWarning, match="callbacks_factory is ignored"):
+            train_multi_init(
+                {"boosting": "mixture", "mixture_num_experts": 3,
+                 "objective": "regression", "verbose": -1},
+                (X, y), num_boost_round=5, n_inits=2,
+                score_data=(X, y),
+                callbacks_factory=lambda i: [],
+                n_jobs=2,
+            )
+
+
+class TestMultiInitPrescreen:
+    """Phase-1 cheap pass + phase-2 full retrain on survivors."""
+
+    def test_prescreen_reduces_final_trials(self):
+        X, y = _toy_regression()
+        res = train_multi_init(
+            {"boosting": "mixture", "mixture_num_experts": 3,
+             "objective": "regression", "verbose": -1,
+             "mixture_warmup_iters": 2},
+            (X, y),
+            num_boost_round=15, n_inits=5,
+            init_schemes=["uniform", "random", "quantile",
+                          "kmeans_features", "gmm"],
+            score_data=(X, y),
+            prescreen_rounds=4, prescreen_keep=2,
+        )
+        # Final result reports only the survivors (post-prescreen retrains).
+        assert len(res.trials) == 2
+
+    def test_prescreen_requires_keep(self):
+        X, y = _toy_regression()
+        with pytest.raises(ValueError, match="prescreen_keep"):
+            train_multi_init(
+                {"boosting": "mixture", "mixture_num_experts": 3,
+                 "objective": "regression", "verbose": -1},
+                (X, y), num_boost_round=10, n_inits=3,
+                score_data=(X, y),
+                prescreen_rounds=4,  # missing prescreen_keep
+            )
+
+    def test_prescreen_keep_must_be_positive(self):
+        X, y = _toy_regression()
+        with pytest.raises(ValueError, match="prescreen_keep must be"):
+            train_multi_init(
+                {"boosting": "mixture", "mixture_num_experts": 3,
+                 "objective": "regression", "verbose": -1},
+                (X, y), num_boost_round=10, n_inits=3,
+                score_data=(X, y),
+                prescreen_rounds=4, prescreen_keep=0,
+            )
+
+    def test_prescreen_picks_best_survivor(self):
+        """Prescreen ranking should select genuinely better-fitting trials."""
+        X, y = _toy_regression(n=400)
+        res = train_multi_init(
+            {"boosting": "mixture", "mixture_num_experts": 3,
+             "objective": "regression", "verbose": -1,
+             "mixture_warmup_iters": 3},
+            (X, y),
+            num_boost_round=20, n_inits=4,
+            init_schemes=["uniform", "random", "kmeans_features", "gmm"],
+            score_data=(X, y),
+            prescreen_rounds=6, prescreen_keep=2,
+        )
+        # The two reported trials should be those that *survived* the
+        # prescreen — i.e. no two of the never-promising ones.
+        # We can't assert which exact two without doing the prescreen here,
+        # but we can require that the final best is competitive: not worse
+        # than running all 4 sequentially.
+        full_run = train_multi_init(
+            {"boosting": "mixture", "mixture_num_experts": 3,
+             "objective": "regression", "verbose": -1,
+             "mixture_warmup_iters": 3},
+            (X, y),
+            num_boost_round=20, n_inits=4,
+            init_schemes=["uniform", "random", "kmeans_features", "gmm"],
+            score_data=(X, y),
+        )
+        # Allow some slack — prescreen can occasionally drop the eventual
+        # winner if the early-round score is misleading.
+        assert res.best_trial.score <= full_run.best_trial.score * 1.3
+
 
 # --------------------------------------------------------------------------- #
 # Expert collapse reset                                                       #

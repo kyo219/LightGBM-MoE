@@ -1,6 +1,22 @@
+Sequential
 idx    seed              init        rmse    time
-  0      42           uniform      0.9869    0.5s  
-  1     142            random      0.8398    0.5s  
-  2     242          quantile      0.6327    0.5s ★
-  3     342   kmeans_features      0.7068    0.5s  
-  4     442               gmm      0.7345    0.5s  
+  0      42           uniform      0.7026    0.9s  
+  1     142            random      0.6826    0.9s  
+  2     242          quantile      0.5446    0.9s  
+  3     342   kmeans_features      0.4632    0.9s  
+  4     442               gmm      0.4491    0.9s ★
+
+Parallel n_jobs=4
+idx    seed              init        rmse    time
+  0      42           uniform      0.7026    2.9s  
+  1     142            random      0.6826    3.1s  
+  2     242          quantile      0.5446    2.9s  
+  3     342   kmeans_features      0.4632    3.0s  
+  4     442               gmm      0.4491    1.4s ★
+
+Prescreen + parallel
+idx    seed              init        rmse    time
+  3     342   kmeans_features      0.4632    1.5s  
+  4     442               gmm      0.4491    1.5s ★
+
+Wall: seq=8.87s  par=7.56s  pre=5.78s
