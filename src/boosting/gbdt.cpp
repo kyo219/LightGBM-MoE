@@ -423,6 +423,173 @@ void GBDT::RefitLeavesByGradients(
   }
 }
 
+void GBDT::RegrowTreeAt(
+    int s_iter,
+    std::function<void(score_t* grad_buf, score_t* hess_buf)> recompute_grad_hess,
+    double l2_reg) {
+  Common::FunctionTimer fun_timer("GBDT::RegrowTreeAt", global_timer);
+  if (models_.empty()) return;
+  if (num_data_ <= 0) return;
+  CHECK_GE(s_iter, 0);
+
+  const int num_iterations = static_cast<int>(models_.size()) / num_tree_per_iteration_;
+  if (s_iter >= num_iterations) return;
+  if (train_data_ == nullptr) {
+    Log::Fatal("RegrowTreeAt requires an attached training dataset");
+  }
+
+  // === Phase 1: zero score updaters and replay iters [0, s_iter) ===
+  // After this block, train/valid score = f^{(s_iter-1)} = backbone with
+  // iter s_iter's tree(s) removed. Same idiom as RefitLeavesByGradients
+  // (gbdt.cpp:294-321) — extracted because we need finer-grained control
+  // over the per-iter loop (must stop *before* s_iter, build new tree,
+  // resume after).
+  for (int tid = 0; tid < num_tree_per_iteration_; ++tid) {
+    train_score_updater_->MultiplyScore(0.0, tid);
+  }
+  for (auto& vsu : valid_score_updater_) {
+    for (int tid = 0; tid < num_tree_per_iteration_; ++tid) {
+      vsu->MultiplyScore(0.0, tid);
+    }
+  }
+  for (int iter = 0; iter < s_iter; ++iter) {
+    for (int tree_id = 0; tree_id < num_tree_per_iteration_; ++tree_id) {
+      const int idx = iter * num_tree_per_iteration_ + tree_id;
+      Tree* tree = models_[idx].get();
+      train_score_updater_->AddScore(tree, tree_id);
+      for (auto& vsu : valid_score_updater_) {
+        vsu->AddScore(tree, tree_id);
+      }
+    }
+  }
+
+  // === Phase 2: callback computes (g, h) against backbone score ===
+  // The callback may read GetTrainingScore() — at this point it returns
+  // f^{(s_iter-1)}, exactly the backbone the math requires (§2.3 of
+  // docs/v0.8/partition_regrow_design.md).
+  const size_t total_grad_size = static_cast<size_t>(num_data_) * num_tree_per_iteration_;
+  std::vector<score_t> local_grad(total_grad_size);
+  std::vector<score_t> local_hess(total_grad_size);
+  recompute_grad_hess(local_grad.data(), local_hess.data());
+
+  // === Phase 3: build new tree(s) at iter s_iter ===
+  // We deliberately do NOT override the tree_learner_'s bagging state here.
+  // The previous M-step (MStepExperts for an expert, MStepGate for the gate)
+  // left a bagging configuration consistent with the booster's normal flow;
+  // overriding it here destabilized the next M-step's TrainOneIter call
+  // (segfault in serial_tree_learner state at iter 7 in the smoke test).
+  // The cost: the regrown tree sees the previous M-step's hard partition
+  // rather than the full r-weighted sample set. The gradient values
+  // themselves are still r-weighted via the callback, so the tree
+  // structure is r-aware in spirit, just restricted to the active partition.
+  // For multiclass models (num_tree_per_iteration_=K, e.g. softmax gate),
+  // all K trees are rebuilt as a unit. The grad/hess buffer is class-major
+  // (matches RefitLeavesByGradients's convention) so per-class slices are
+  // contiguous chunks of size num_data_.
+  for (int tree_id = 0; tree_id < num_tree_per_iteration_; ++tree_id) {
+    score_t* g = local_grad.data() + static_cast<size_t>(tree_id) * num_data_;
+    score_t* h = local_hess.data() + static_cast<size_t>(tree_id) * num_data_;
+
+    std::unique_ptr<Tree> new_tree(tree_learner_->Train(g, h, /*is_first_tree=*/false));
+
+    if (new_tree == nullptr || new_tree->num_leaves() <= 1) {
+      // Tree learner couldn't find a useful split. Restore the original
+      // tree's contribution to keep the score consistent (we already
+      // subtracted it above by zeroing + replaying [0, s_iter)).
+      const int idx = s_iter * num_tree_per_iteration_ + tree_id;
+      Tree* old_tree = models_[idx].get();
+      train_score_updater_->AddScore(old_tree, tree_id);
+      for (auto& vsu : valid_score_updater_) {
+        vsu->AddScore(old_tree, tree_id);
+      }
+      continue;
+    }
+
+    // Apply learning_rate (matches normal training path at gbdt.cpp:581).
+    new_tree->Shrinkage(shrinkage_rate_);
+
+    // Replace in place at iter s_iter. The old unique_ptr is destroyed.
+    const int idx = s_iter * num_tree_per_iteration_ + tree_id;
+    models_[idx] = std::move(new_tree);
+
+    // Add new tree's contribution to all score updaters. We use the simple
+    // AddScore(tree, tree_id) (no tree_learner argument) — same as
+    // RefitLeavesByGradients's score reconciliation. The tree_learner_-aware
+    // overload at gbdt.cpp:665 is for OOB-bagging score reconciliation
+    // during normal training; calling it here with the previous M-step's
+    // bagging state (which doesn't match the regrow's data view) caused
+    // crashes in the smoke test.
+    train_score_updater_->AddScore(models_[idx].get(), tree_id);
+    for (auto& vsu : valid_score_updater_) {
+      vsu->AddScore(models_[idx].get(), tree_id);
+    }
+  }
+
+  // === Phase 4: replay iters (s_iter, T) so score = f^{(T-1)} again ===
+  // After this, the score updaters reflect the full ensemble with the
+  // freshly-rebuilt iter s_iter tree(s) substituted in.
+  for (int iter = s_iter + 1; iter < num_iterations; ++iter) {
+    for (int tree_id = 0; tree_id < num_tree_per_iteration_; ++tree_id) {
+      const int idx = iter * num_tree_per_iteration_ + tree_id;
+      Tree* tree = models_[idx].get();
+      train_score_updater_->AddScore(tree, tree_id);
+      for (auto& vsu : valid_score_updater_) {
+        vsu->AddScore(tree, tree_id);
+      }
+    }
+  }
+
+  (void)l2_reg;  // currently unused; reserved for symmetry with RefitLeavesByGradients
+}
+
+void GBDT::DeleteTreeAt(int s_iter) {
+  Common::FunctionTimer fun_timer("GBDT::DeleteTreeAt", global_timer);
+  if (models_.empty()) return;
+  CHECK_GE(s_iter, 0);
+
+  const int num_iterations = static_cast<int>(models_.size()) / num_tree_per_iteration_;
+  if (s_iter >= num_iterations) return;
+
+  // Zero score updaters; we'll replay only the surviving iters.
+  for (int tid = 0; tid < num_tree_per_iteration_; ++tid) {
+    train_score_updater_->MultiplyScore(0.0, tid);
+  }
+  for (auto& vsu : valid_score_updater_) {
+    for (int tid = 0; tid < num_tree_per_iteration_; ++tid) {
+      vsu->MultiplyScore(0.0, tid);
+    }
+  }
+
+  // Erase the K trees at iter s_iter. Erase from the back to avoid
+  // re-shifting per element.
+  const int erase_start = s_iter * num_tree_per_iteration_;
+  for (int k = num_tree_per_iteration_ - 1; k >= 0; --k) {
+    models_.erase(models_.begin() + erase_start + k);
+  }
+
+  // Replay all surviving iters (now T-1 total). Indices have shifted
+  // down by one for what was [s_iter+1, T) → now [s_iter, T-1).
+  const int new_num_iterations = num_iterations - 1;
+  for (int iter = 0; iter < new_num_iterations; ++iter) {
+    for (int tree_id = 0; tree_id < num_tree_per_iteration_; ++tree_id) {
+      const int idx = iter * num_tree_per_iteration_ + tree_id;
+      Tree* tree = models_[idx].get();
+      train_score_updater_->AddScore(tree, tree_id);
+      for (auto& vsu : valid_score_updater_) {
+        vsu->AddScore(tree, tree_id);
+      }
+    }
+  }
+
+  // Decrement iter_ to reflect the smaller ensemble. Mirrors RollbackOneIter
+  // at gbdt.cpp:639 — keeps iter_-derived counters (logging, num_iteration
+  // for predict APIs that call NumberOfTotalModel/num_tree_per_iteration_)
+  // consistent with the actual model size.
+  if (iter_ > 0) {
+    --iter_;
+  }
+}
+
 void GBDT::RefitTree(const int* tree_leaf_prediction, const size_t nrow, const size_t ncol) {
   CHECK_GT(nrow * ncol, 0);
   CHECK_EQ(static_cast<size_t>(num_data_), nrow);
