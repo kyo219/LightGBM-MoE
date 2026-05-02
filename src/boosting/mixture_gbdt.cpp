@@ -1985,9 +1985,15 @@ void MixtureGBDT::ConvertSelectionToResponsibilities() {
         responsibilities_[i * num_experts_ + k] = 1.0 / num_experts_;
       }
     } else {
-      // Normalize (sum = 1)
+      // Normalize (sum = 1). Epsilon floor is defensive: in practice sum > 0
+      // because soft routing guarantees min_r > 0 for non-selected experts and
+      // hard routing's num_selected == 0 path is handled above. Underflow is
+      // only possible if every selected expert has affinity ≪ -700 (exp → 0)
+      // — vanishingly unlikely given gate logits are bounded — but the cost
+      // of floor()ing is zero and it forecloses one NaN-propagation route.
+      const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
       for (int k = 0; k < num_experts_; ++k) {
-        responsibilities_[i * num_experts_ + k] /= sum;
+        responsibilities_[i * num_experts_ + k] *= inv_sum;
       }
     }
   }
@@ -2011,9 +2017,13 @@ void MixtureGBDT::SmoothResponsibilities() {
                                  lambda * responsibilities_[prev_idx];
         sum += responsibilities_[idx];
       }
-      // Renormalize
+      // Renormalize. Mathematically sum ≡ 1 here (convex combination of two
+      // already-normalized rows), so the epsilon floor is purely defensive
+      // against floating-point pathologies — but it matches the momentum
+      // branch below, which has carried the same guard for a while.
+      const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
       for (int k = 0; k < num_experts_; ++k) {
-        responsibilities_[i * num_experts_ + k] /= sum;
+        responsibilities_[i * num_experts_ + k] *= inv_sum;
       }
     }
   } else if (config_->mixture_r_smoothing == "momentum") {
