@@ -283,8 +283,9 @@ class MixtureGBDT : public GBDTBase {
    *        partition structure (issue #37).
    *
    * Called from TrainOneIter between the E-step and MStepExperts when
-   * `mixture_refit_leaves=true`. After refit, Forward() is re-run so
-   * MStepExperts / MStepGate see the post-refit expert_pred_ / gate_proba_.
+   * `mixture_refit_leaves=true` AND ShouldRefit() fires. After refit,
+   * Forward() is re-run so MStepExperts / MStepGate see the post-refit
+   * expert_pred_ / gate_proba_.
    *
    * For each expert k: builds an r-weighted gradient callback and calls
    * experts_[k]->RefitLeavesByGradients. For the gate: builds the soft-CE
@@ -294,6 +295,20 @@ class MixtureGBDT : public GBDTBase {
    * "none" since those do not own a refittable gate GBDT.
    */
   void RefitExpertsAndGate();
+
+  /*!
+   * \brief v0.7 leaf-refit trigger gate. Decides whether the current EM
+   *        round should run RefitExpertsAndGate. Always returns false
+   *        when `mixture_refit_leaves` is off; otherwise dispatches on
+   *        `mixture_refit_trigger`:
+   *
+   *   - "always": fires every post-warmup iter (highest cost, most faithful EM)
+   *   - "elbo":   fires when the most recent ELBO log showed a >5% drop —
+   *               cheap because ELBO is only computed every 10 iters and
+   *               this reads `last_elbo_drop_ratio_` set by that block
+   *   - "every_n": fires every `mixture_refit_every_n` post-warmup iters
+   */
+  bool ShouldRefit() const;
 
   /*!
    * \brief M-step for gate using leaf-reuse routing.
@@ -384,6 +399,14 @@ class MixtureGBDT : public GBDTBase {
    *  re-introduced math bug). Negative-infinity sentinel for "not yet seen".
    */
   double prev_marginal_log_lik_ = -1e300;
+
+  /*! \brief Last seen ELBO drop ratio (positive = drop, negative = improvement),
+   *  normalized by `max(|prev_marginal_log_lik_|, 1.0)`. Updated by the
+   *  every-10-iter ELBO log block in TrainOneIter. Read by ShouldRefit() in
+   *  "elbo" trigger mode — refit fires when this exceeds 0.05.
+   *  Stays at 0.0 when `mixture_estimate_variance=false` (no ELBO computed).
+   */
+  double last_elbo_drop_ratio_ = 0.0;
 
   /*! \brief Gradients for mixture (N) */
   std::vector<score_t> gradients_;

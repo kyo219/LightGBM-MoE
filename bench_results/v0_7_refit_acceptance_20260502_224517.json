@@ -1,0 +1,102 @@
+{
+  "timestamp": "20260502_224517",
+  "num_boost_round": 60,
+  "datasets": {
+    "synthetic": {
+      "name": "synthetic",
+      "n_train": 1600,
+      "n_valid": 400,
+      "n_features": 5,
+      "baseline": {
+        "train_rmse": 3.487696131014759,
+        "valid_rmse": 4.97458440128384,
+        "train_s": 0.0664390530437231,
+        "num_trees": 360,
+        "predictions_hash": 7272480344352154870
+      },
+      "refit_off": {
+        "train_rmse": 3.487696131014759,
+        "valid_rmse": 4.97458440128384,
+        "train_s": 0.06504715420305729,
+        "num_trees": 360,
+        "predictions_hash": 7272480344352154870
+      },
+      "refit_decay1": {
+        "train_rmse": 3.487696131014759,
+        "valid_rmse": 4.97458440128384,
+        "train_s": 0.07002442143857479,
+        "num_trees": 360,
+        "predictions_hash": 7272480344352154870
+      },
+      "refit_decay05": {
+        "train_rmse": 3.660875395920703,
+        "valid_rmse": 4.761947241989498,
+        "train_s": 0.9301852062344551,
+        "num_trees": 360,
+        "predictions_hash": 8914096087674732277
+      },
+      "refit_decay0": {
+        "train_rmse": 3.6815047923317556,
+        "valid_rmse": 4.736251400594297,
+        "train_s": 0.9189656749367714,
+        "num_trees": 360,
+        "predictions_hash": -2168151832683675041
+      },
+      "refit_elbo": {
+        "train_rmse": 3.487696131014759,
+        "valid_rmse": 4.97458440128384,
+        "train_s": 0.06471743807196617,
+        "num_trees": 360,
+        "predictions_hash": 7272480344352154870
+      }
+    },
+    "hmm": {
+      "name": "hmm",
+      "n_train": 1600,
+      "n_valid": 400,
+      "n_features": 5,
+      "baseline": {
+        "train_rmse": 1.5621277827172642,
+        "valid_rmse": 2.03443195890938,
+        "train_s": 0.06349971890449524,
+        "num_trees": 360,
+        "predictions_hash": 9000424955541467827
+      },
+      "refit_off": {
+        "train_rmse": 1.5621277827172642,
+        "valid_rmse": 2.03443195890938,
+        "train_s": 0.06339947879314423,
+        "num_trees": 360,
+        "predictions_hash": 9000424955541467827
+      },
+      "refit_decay1": {
+        "train_rmse": 1.5621277827172642,
+        "valid_rmse": 2.03443195890938,
+        "train_s": 0.06906420364975929,
+        "num_trees": 360,
+        "predictions_hash": 9000424955541467827
+      },
+      "refit_decay05": {
+        "train_rmse": 1.9289643787659656,
+        "valid_rmse": 1.9236684519322909,
+        "train_s": 0.878859369084239,
+        "num_trees": 360,
+        "predictions_hash": 7094296236170242019
+      },
+      "refit_decay0": {
+        "train_rmse": 1.9252918653909121,
+        "valid_rmse": 1.9416412464545603,
+        "train_s": 0.8750407360494137,
+        "num_trees": 360,
+        "predictions_hash": -7451980631599282562
+      },
+      "refit_elbo": {
+        "train_rmse": 1.5621277827172642,
+        "valid_rmse": 2.03443195890938,
+        "train_s": 0.06374670751392841,
+        "num_trees": 360,
+        "predictions_hash": 9000424955541467827
+      }
+    }
+  }
+}

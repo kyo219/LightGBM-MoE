@@ -344,6 +344,8 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_refit_leaves",
   "mixture_refit_decay_rate",
   "mixture_refit_l2_reg",
+  "mixture_refit_trigger",
+  "mixture_refit_every_n",
   "mixture_predict_output",
   "mixture_gate_max_depth",
   "mixture_gate_num_leaves",
@@ -767,6 +769,11 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetDouble(params, "mixture_refit_l2_reg", &mixture_refit_l2_reg);
   CHECK_GE(mixture_refit_l2_reg, 0.0);
 
+  GetString(params, "mixture_refit_trigger", &mixture_refit_trigger);
+
+  GetInt(params, "mixture_refit_every_n", &mixture_refit_every_n);
+  CHECK_GT(mixture_refit_every_n, 0);
+
   GetString(params, "mixture_predict_output", &mixture_predict_output);
 
   GetInt(params, "mixture_gate_max_depth", &mixture_gate_max_depth);
@@ -1003,6 +1010,8 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_refit_leaves: " << mixture_refit_leaves << "]\n";
   str_buf << "[mixture_refit_decay_rate: " << mixture_refit_decay_rate << "]\n";
   str_buf << "[mixture_refit_l2_reg: " << mixture_refit_l2_reg << "]\n";
+  str_buf << "[mixture_refit_trigger: " << mixture_refit_trigger << "]\n";
+  str_buf << "[mixture_refit_every_n: " << mixture_refit_every_n << "]\n";
   str_buf << "[mixture_predict_output: " << mixture_predict_output << "]\n";
   str_buf << "[mixture_gate_max_depth: " << mixture_gate_max_depth << "]\n";
   str_buf << "[mixture_gate_num_leaves: " << mixture_gate_num_leaves << "]\n";
@@ -1196,6 +1205,8 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_refit_leaves", {}},
     {"mixture_refit_decay_rate", {}},
     {"mixture_refit_l2_reg", {}},
+    {"mixture_refit_trigger", {}},
+    {"mixture_refit_every_n", {}},
     {"mixture_predict_output", {}},
     {"mixture_gate_max_depth", {}},
     {"mixture_gate_num_leaves", {}},
@@ -1389,6 +1400,8 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_refit_leaves", "bool"},
     {"mixture_refit_decay_rate", "double"},
     {"mixture_refit_l2_reg", "double"},
+    {"mixture_refit_trigger", "string"},
+    {"mixture_refit_every_n", "int"},
     {"mixture_predict_output", "string"},
     {"mixture_gate_max_depth", "int"},
     {"mixture_gate_num_leaves", "int"},

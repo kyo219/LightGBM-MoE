@@ -1268,6 +1268,24 @@ struct Config {
   // check = >=0.0
   double mixture_refit_l2_reg = 1e-3;
 
+  // [doc-only] v0.7 leaf-refit
+  // type = enum
+  // options = always, elbo, every_n
+  // desc = which iterations should fire the leaf-refit pass when
+  //        ``mixture_refit_leaves=true``
+  // desc = ``always``: refit every post-warmup iter (highest cost, most faithful EM)
+  // desc = ``elbo``: only refit when the most recent ELBO log showed a >5% drop —
+  //        cheap because ELBO is logged once every 10 iters and the trigger reuses
+  //        that pre-computed value (requires ``mixture_estimate_variance=true``)
+  // desc = ``every_n``: refit every ``mixture_refit_every_n`` iters past warmup
+  std::string mixture_refit_trigger = "always";
+
+  // [doc-only] v0.7 leaf-refit
+  // desc = period (in EM iterations) for the ``every_n`` refit trigger
+  // desc = ignored when ``mixture_refit_trigger != "every_n"``
+  // check = >0
+  int mixture_refit_every_n = 10;
+
   // type = enum
   // options = value, value_and_regime, all
   // desc = output mode for mixture prediction

@@ -2519,6 +2519,34 @@ void MixtureGBDT::MStepExperts() {
   }
 }
 
+bool MixtureGBDT::ShouldRefit() const {
+  if (!config_->mixture_refit_leaves) return false;
+  // Refit is only meaningful past warmup — before warmup, the E-step has not
+  // run yet (responsibilities are still r_init), so refit would just rewrite
+  // leaves to the same fixed point they were just trained against.
+  const int moe_iter = use_progressive_ ? (iter_ - seed_iterations_) : iter_;
+  if (moe_iter < config_->mixture_warmup_iters) return false;
+
+  const std::string& trigger = config_->mixture_refit_trigger;
+  if (trigger == "always") {
+    return true;
+  } else if (trigger == "elbo") {
+    // Fires when the most-recent ELBO log block (every 10 iters past warmup,
+    // and the first 5 iters) saw a >5% drop. Stays at 0 when
+    // mixture_estimate_variance=false (the log block computes nothing then),
+    // so users who turn off variance estimation effectively get no-refit.
+    return last_elbo_drop_ratio_ > 0.05;
+  } else if (trigger == "every_n") {
+    const int n = std::max(1, config_->mixture_refit_every_n);
+    return (moe_iter % n) == 0;
+  } else {
+    Log::Warning("MixtureGBDT: unknown mixture_refit_trigger '%s' — "
+                 "treating as 'always'. Valid: always, elbo, every_n.",
+                 trigger.c_str());
+    return true;
+  }
+}
+
 void MixtureGBDT::RefitExpertsAndGate() {
   // v0.7 leaf-refit (issue #37). For each expert and the gate, rewrite leaf
   // values of every existing tree against the current responsibilities r_ik,
@@ -3106,11 +3134,11 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     // expert + gate trees against the freshly-updated r_ik before the next
     // tree is appended — restores the closed-form M-step on each tree's
     // existing partition structure, the actual EM-faithful update for
-    // boosted-tree experts. Only runs past warmup (E-step ran above) and
-    // only when the user opts in via the v0.7 flag. Re-runs Forward() to
-    // refresh expert_pred_ / gate_proba_ from the post-refit score updaters
-    // so MStepExperts / MStepGate below see the new state.
-    if (config_->mixture_refit_leaves) {
+    // boosted-tree experts. ShouldRefit() encapsulates the warmup guard
+    // and the trigger-mode dispatch (always / elbo / every_n). When refit
+    // fires, Forward() is re-run so MStepExperts / MStepGate below see
+    // the post-refit expert_pred_ / gate_proba_.
+    if (ShouldRefit()) {
       RefitExpertsAndGate();
       Forward();
     }
@@ -3169,6 +3197,12 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     if (prev_finite && std::isfinite(ll)) {
       const double drop = prev_marginal_log_lik_ - ll;
       const double rel_scale = std::max(std::fabs(prev_marginal_log_lik_), 1.0);
+      // Cache the ratio for ShouldRefit's "elbo" trigger. Stays stale between
+      // log blocks (every 10 iters past warmup, plus the first 5) — the
+      // trigger reads the most recent value, so refit fires on the next iter
+      // after a logged drop. Negative values (= improvements) leave the
+      // trigger off.
+      last_elbo_drop_ratio_ = drop / rel_scale;
       if (drop > 0.05 * rel_scale) {
         Log::Warning(
             "MixtureGBDT: marginal_log_lik dropped %.6f → %.6f "

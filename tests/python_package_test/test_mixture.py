@@ -446,6 +446,93 @@ class TestMixtureRefitLeaves:
         # Sanity: still produces valid output.
         assert not np.any(np.isnan(refit_full.predict(X)))
 
+    def test_refit_trigger_every_n(self):
+        """`every_n` trigger fires every N iters past warmup, not every iter.
+
+        every_n=1 ⇔ always (fires every post-warmup iter).
+        every_n=5 fires at iters 5, 10, 15, … past warmup → strictly fewer
+        refits than always, so predictions differ from BOTH always and
+        no-refit.
+        every_n=10000 (no fire within the run length) ⇔ no_refit.
+        """
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+
+        always = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True,
+                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="always"),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        every1 = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True,
+                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="every_n",
+                 mixture_refit_every_n=1),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        every5 = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True,
+                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="every_n",
+                 mixture_refit_every_n=5),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        every_huge = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True,
+                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="every_n",
+                 mixture_refit_every_n=10000),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        no_refit = lgb.train(self._base_params(), lgb.Dataset(X, label=y),
+                             num_boost_round=20)
+
+        # every_n=1 should be bit-identical to always — both fire on every
+        # post-warmup iter, identical decay/l2_reg, identical seed.
+        np.testing.assert_array_equal(
+            always.predict(X), every1.predict(X),
+            err_msg="every_n=1 should match always",
+        )
+        # every_n=5: fires at iters 5/10/15 within the 20-iter run → strict
+        # subset of always's iters, so different state at the end.
+        assert np.abs(always.predict(X) - every5.predict(X)).max() > 1e-6, \
+            "every_n=5 fires fewer times than always — predictions should differ"
+        assert np.abs(no_refit.predict(X) - every5.predict(X)).max() > 1e-6, \
+            "every_n=5 fires at least once past warmup — should differ from off"
+        # every_n=10000: never fires within 20 iters → bit-identical to off.
+        np.testing.assert_array_equal(
+            no_refit.predict(X), every_huge.predict(X),
+            err_msg="every_n=10000 never triggers within 20 iters → matches refit-off",
+        )
+
+    def test_refit_trigger_elbo_quiet_when_no_drop(self):
+        """`elbo` trigger doesn't fire when ELBO improves monotonically.
+
+        On a clean synthetic regression where EM converges smoothly, ELBO
+        should NOT drop by >5% — so the elbo trigger never fires, and
+        predictions match refit-off.
+        """
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+
+        elbo_trigger = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True,
+                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="elbo"),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        no_refit = lgb.train(self._base_params(), lgb.Dataset(X, label=y),
+                             num_boost_round=20)
+        # If the elbo trigger never fires (clean monotone EM), predictions
+        # are bit-identical to refit-off.
+        np.testing.assert_array_equal(
+            elbo_trigger.predict(X), no_refit.predict(X),
+            err_msg=(
+                "elbo trigger should be quiet on a well-behaved synthetic "
+                "where ELBO improves monotonically — predictions should match "
+                "refit-off baseline"
+            ),
+        )
+
     def test_refit_with_validation_does_not_diverge(self):
         """Validation-time predictions stay consistent with the model after refit.
 
