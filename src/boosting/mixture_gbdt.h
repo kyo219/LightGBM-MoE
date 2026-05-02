@@ -276,6 +276,26 @@ class MixtureGBDT : public GBDTBase {
   void MStepGate();
 
   /*!
+   * \brief v0.7 leaf-refit pass: rewrite leaf values of all existing expert
+   *        trees AND gate trees against the current responsibilities, before
+   *        appending the next tree. Restores classical-EM "free-parameter"
+   *        behavior on the closed-form M-step over each tree's existing
+   *        partition structure (issue #37).
+   *
+   * Called from TrainOneIter between the E-step and MStepExperts when
+   * `mixture_refit_leaves=true`. After refit, Forward() is re-run so
+   * MStepExperts / MStepGate see the post-refit expert_pred_ / gate_proba_.
+   *
+   * For each expert k: builds an r-weighted gradient callback and calls
+   * experts_[k]->RefitLeavesByGradients. For the gate: builds the soft-CE
+   * gradient callback (mirroring MStepGate's gradient form including Friedman
+   * K/(K-1), temperature chain rule, and Dirichlet shrinkage) and calls
+   * gate_->RefitLeavesByGradients. No-op when gate_type is "leaf_reuse" or
+   * "none" since those do not own a refittable gate GBDT.
+   */
+  void RefitExpertsAndGate();
+
+  /*!
    * \brief M-step for gate using leaf-reuse routing.
    * Derives gate probabilities from expert tree leaf statistics
    * and periodically retrains gate GBDT for inference.

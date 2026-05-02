@@ -351,3 +351,136 @@ class TestMixtureWithDifferentObjectives:
 
         assert not np.any(np.isnan(pred))
         assert bst.is_mixture()
+
+
+class TestMixtureRefitLeaves:
+    """Test v0.7 leaf-value refit on each E-step (issue #37).
+
+    The refit pass rewrites every existing expert and gate tree's leaf values
+    against the current responsibilities r_ik before the next tree is appended.
+    These tests verify three properties:
+
+    1. Default-off is bit-identical to v0.6.0 behavior (no regression on the
+       existing append-only path).
+    2. ``mixture_refit_decay_rate=1.0`` is a true no-op (leaves are kept at
+       their old values; refit becomes a structural pass-through).
+    3. ``mixture_refit_decay_rate=0.0`` (full refit) actually moves predictions
+       — proves the refit is wired in and reaches all trees, not silently
+       skipped.
+    """
+
+    @staticmethod
+    def _base_params():
+        """Deterministic base config for refit tests."""
+        return {
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 2,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
+            "mixture_warmup_iters": 3,
+            "seed": 42,
+            "deterministic": True,
+            "force_col_wise": True,
+        }
+
+    def test_refit_default_off_bit_identical(self):
+        """Refit flag defaults to False; predictions identical to baseline."""
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+
+        # Baseline (no refit-related params at all).
+        baseline = lgb.train(self._base_params(), lgb.Dataset(X, label=y), num_boost_round=20)
+        # Same training but with refit_leaves explicitly False.
+        explicit_off = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=False),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        np.testing.assert_array_equal(
+            baseline.predict(X),
+            explicit_off.predict(X),
+            err_msg="mixture_refit_leaves=False should be bit-identical to omitting the flag",
+        )
+
+    def test_refit_decay_one_is_no_op(self):
+        """decay=1.0 keeps all old leaves; predictions identical to refit=False."""
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+
+        baseline = lgb.train(self._base_params(), lgb.Dataset(X, label=y), num_boost_round=20)
+        no_op = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=1.0),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        # decay=1.0 means new_v = 1.0 * old_v + 0.0 * fit_v, an exact pass-through.
+        # Refit machinery still runs (score reset + replay) but every leaf ends
+        # up at its original value, so AddScore restores the exact same scores.
+        np.testing.assert_array_equal(
+            baseline.predict(X),
+            no_op.predict(X),
+            err_msg="decay=1.0 should be bit-identical to refit=False",
+        )
+
+    def test_refit_decay_zero_changes_predictions(self):
+        """Full refit (decay=0.0) is wired in and actually mutates leaves."""
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+
+        baseline = lgb.train(self._base_params(), lgb.Dataset(X, label=y), num_boost_round=20)
+        refit_full = lgb.train(
+            dict(self._base_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.0),
+            lgb.Dataset(X, label=y),
+            num_boost_round=20,
+        )
+        diff = np.abs(baseline.predict(X) - refit_full.predict(X)).max()
+        # The two should differ — if they don't, refit is silently a no-op
+        # (e.g. wired but never reached past warmup, or the replay landed at
+        # the same fixed point as append-only — neither is the intended v0.7
+        # behavior). A loose threshold (1e-3) is intentional: it tolerates
+        # tiny numerical noise on small datasets but catches "refit didn't fire".
+        assert diff > 1e-3, (
+            f"refit_leaves=True with decay=0.0 should change predictions, "
+            f"got max abs diff = {diff:.2e}"
+        )
+        # Sanity: still produces valid output.
+        assert not np.any(np.isnan(refit_full.predict(X)))
+
+    def test_refit_with_validation_does_not_diverge(self):
+        """Validation-time predictions stay consistent with the model after refit.
+
+        Refit's score-updater reconciliation must update both train_score_updater_
+        and every valid_score_updater_; if it skipped valid, evaluation metrics
+        would silently drift from what predict() returns.
+        """
+        X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
+        # Held-out set
+        rng = np.random.RandomState(13)
+        X_valid = rng.randn(100, X.shape[1])
+        y_valid = np.where(X_valid[:, 0] > 0, 2 * X_valid[:, 1], -3 * X_valid[:, 2] + 5) \
+            + rng.randn(100) * 0.5
+
+        train_data = lgb.Dataset(X, label=y)
+        valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
+
+        params = dict(self._base_params(), mixture_refit_leaves=True,
+                      mixture_refit_decay_rate=0.0, metric="rmse")
+        evals_result = {}
+        bst = lgb.train(
+            params, train_data,
+            num_boost_round=20,
+            valid_sets=[valid_data], valid_names=["valid"],
+            callbacks=[lgb.record_evaluation(evals_result)],
+        )
+
+        # Cross-check: the metric the engine reported must match a fresh predict().
+        last_iter_metric = evals_result["valid"]["rmse"][-1]
+        recomputed = float(np.sqrt(np.mean((bst.predict(X_valid) - y_valid) ** 2)))
+        np.testing.assert_allclose(
+            last_iter_metric, recomputed, rtol=1e-5,
+            err_msg=(
+                "Validation RMSE reported during training does not match a "
+                "fresh predict() — valid_score_updater_ likely fell out of "
+                "sync with the refitted leaf values"
+            ),
+        )

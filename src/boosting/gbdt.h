@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -173,6 +174,43 @@ class GBDT : public GBDTBase {
   void Train(int snapshot_freq, const std::string& model_output_path) override;
 
   void RefitTree(const int* tree_leaf_prediction, const size_t nrow, const size_t ncol) override;
+
+  /*!
+  * \brief Refit leaf values of every existing tree against caller-supplied
+  *        gradients / Hessians, without changing tree structure. Used by the
+  *        LightGBM-MoE v0.7 leaf-refit path so the M-step can rewrite all
+  *        accumulated trees' leaves to reflect the current responsibilities,
+  *        instead of being stuck at the leaf values determined when each tree
+  *        was first added.
+  *
+  * Differs from RefitTree in three ways:
+  *   1. The caller supplies gradients/Hessians via a callback rather than
+  *      relying on the stored objective_function_, so the mixture path can
+  *      inject r-weighted gradients (or for the gate, the soft-CE form).
+  *   2. The callback fires once per "iteration" (which produces
+  *      num_tree_per_iteration_ trees — i.e. K trees for a multiclass gate),
+  *      mirroring RefitTree's per-iter Boosting() cadence so per-iter softmax
+  *      coupling stays correct.
+  *   3. Leaf values are mutated in place via Tree::SetLeafOutput; the per-tree
+  *      score-updater reconciliation uses a mutate-AddScore-restore pattern
+  *      (matching RollbackOneIter) so train_score_updater_ and all
+  *      valid_score_updater_ stay consistent.
+  *
+  * \param recompute_grad_hess Callback invoked once per outer iteration,
+  *        receives (grad_buf, hess_buf) of size num_tree_per_iteration_*num_data_
+  *        in class-major layout (grad[tree_id*num_data + i]). The callback may
+  *        read GetTrainingScore() to compute gradients against the current
+  *        cumulative score (which is updated as earlier iters' refitted trees
+  *        are written back).
+  * \param l2_reg Additional L2 in the leaf Newton denominator (typically the
+  *        config's mixture_refit_l2_reg).
+  * \param refit_decay Blend factor in [0, 1]. final_v = decay * old_v + (1-decay) * fit_v.
+  *        0.0 (full replace) is the default; raising stabilizes when E/M are out of sync.
+  */
+  virtual void RefitLeavesByGradients(
+      std::function<void(score_t* grad_buf, score_t* hess_buf)> recompute_grad_hess,
+      double l2_reg,
+      double refit_decay);
 
   /*!
   * \brief Training logic

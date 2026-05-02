@@ -2519,6 +2519,121 @@ void MixtureGBDT::MStepExperts() {
   }
 }
 
+void MixtureGBDT::RefitExpertsAndGate() {
+  // v0.7 leaf-refit (issue #37). For each expert and the gate, rewrite leaf
+  // values of every existing tree against the current responsibilities r_ik,
+  // BEFORE the next tree is appended. The append-only gradient-boosting
+  // structure froze each tree's leaves at the r of the round it was built —
+  // this method makes the M-step's leaf optimization closed-form over the
+  // accumulated partition structure, restoring "EM can flip components"
+  // behavior. See README "Limitations" and docs/moe/architecture.md for the
+  // formal derivation.
+  if (num_data_ <= 0) return;
+
+  const double l2_reg = config_->mixture_refit_l2_reg;
+  const double decay  = config_->mixture_refit_decay_rate;
+
+  // === Expert refit ===
+  // Per expert k: refit each of its trees against r_ik-weighted gradients of
+  // the configured objective (e.g. L2 regression for the default mixture).
+  // The callback fires once per expert iter inside RefitLeavesByGradients;
+  // it reads f_k from train_score_updater_ via GetPredictAt, so iter t's
+  // gradients reflect iter (t-1)'s refitted leaves. Same per-iter cadence as
+  // GBDT::RefitTree.
+  for (int k = 0; k < num_experts_; ++k) {
+    if (experts_[k]->NumberOfTotalModel() == 0) continue;  // no trees yet
+    if (objective_function_ == nullptr) {
+      // L2 fallback: gradients computed inline from labels.
+      auto labels = train_data_->metadata().label();
+      auto cb = [this, k, labels](score_t* g, score_t* h) {
+        std::vector<double> f_k_pred(num_data_);
+        int64_t out_len;
+        experts_[k]->GetPredictAt(0, f_k_pred.data(), &out_len);
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          const double r_ik = responsibilities_[i * num_experts_ + k];
+          const double diff = f_k_pred[i] - static_cast<double>(labels[i]);
+          g[i] = static_cast<score_t>(r_ik * 2.0 * diff);
+          h[i] = static_cast<score_t>(std::max(r_ik * 2.0, kMixtureEpsilon));
+        }
+      };
+      experts_[k]->RefitLeavesByGradients(cb, l2_reg, decay);
+    } else {
+      auto cb = [this, k](score_t* g, score_t* h) {
+        std::vector<double> f_k_pred(num_data_);
+        int64_t out_len;
+        experts_[k]->GetPredictAt(0, f_k_pred.data(), &out_len);
+        std::vector<score_t> obj_grad(num_data_);
+        std::vector<score_t> obj_hess(num_data_);
+        objective_function_->GetGradients(f_k_pred.data(), obj_grad.data(), obj_hess.data());
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          const double r_ik = responsibilities_[i * num_experts_ + k];
+          g[i] = static_cast<score_t>(r_ik * static_cast<double>(obj_grad[i]));
+          const double hv = r_ik * static_cast<double>(obj_hess[i]);
+          h[i] = static_cast<score_t>(std::max(hv, kMixtureEpsilon));
+        }
+      };
+      experts_[k]->RefitLeavesByGradients(cb, l2_reg, decay);
+    }
+  }
+
+  // === Gate refit ===
+  // Only the GBDT-backed gate has trees to refit. "leaf_reuse" derives gate
+  // probabilities from expert leaf statistics so its gate trees are
+  // structurally tied to the experts; refitting them here would undo Step 4
+  // of MStepGateLeafReuse on the next round. "none" trains no gate at all.
+  if (config_->mixture_gate_type == "gbdt" && gate_->NumberOfTotalModel() > 0) {
+    const double dirichlet_lambda = config_->mixture_gate_entropy_lambda;
+    const double uniform_prob = 1.0 / num_experts_;
+    const double T_local = std::max(gate_temperature_, kMixtureEpsilon);
+    const double inv_T = 1.0 / T_local;
+    const double inv_T2 = inv_T * inv_T;
+    const double friedman_factor = (num_experts_ > 1)
+        ? static_cast<double>(num_experts_) / (num_experts_ - 1.0)
+        : 1.0;
+
+    auto cb = [this, dirichlet_lambda, uniform_prob, inv_T, inv_T2, friedman_factor]
+              (score_t* g, score_t* h) {
+      // Refresh raw logits from the gate's current train_score_updater_ state.
+      // Layout: gate_raw[k * num_data_ + i] (class-major) — same as
+      // gate_->GetPredictAt's output convention.
+      std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
+      int64_t out_len;
+      gate_->GetPredictAt(0, gate_raw.data(), &out_len);
+
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        // Same body as MStepGate (mixture_gbdt.cpp:2589-2627). Bias-free
+        // softmax target: the gate's trees fit logits; bias is a routing-
+        // only nudge applied at inference, not at training (DeepSeek LB).
+        double scores_buf[64];
+        double p_buf[64];
+        double* scores = (num_experts_ <= 64) ? scores_buf
+                                              : new double[num_experts_];
+        double* p = (num_experts_ <= 64) ? p_buf : new double[num_experts_];
+        for (int k = 0; k < num_experts_; ++k) {
+          scores[k] = gate_raw[k * num_data_ + i] * inv_T;
+        }
+        Softmax(scores, num_experts_, p);
+        for (int k = 0; k < num_experts_; ++k) {
+          const size_t idx = static_cast<size_t>(i) + static_cast<size_t>(k) * num_data_;
+          const double r = responsibilities_[i * num_experts_ + k];
+          const double base_grad = (p[k] - r) * inv_T;
+          const double reg_grad = dirichlet_lambda * (p[k] - uniform_prob) * inv_T;
+          g[idx] = static_cast<score_t>(base_grad + reg_grad);
+          h[idx] = static_cast<score_t>(
+              std::max((friedman_factor * p[k] * (1.0 - p[k]) + dirichlet_lambda) * inv_T2,
+                       kMixtureEpsilon));
+        }
+        if (num_experts_ > 64) {
+          delete[] scores;
+          delete[] p;
+        }
+      }
+    };
+    gate_->RefitLeavesByGradients(cb, l2_reg, decay);
+  }
+}
+
 void MixtureGBDT::MStepGate() {
   // Soft cross-entropy against the full responsibility distribution r_ik.
   //
@@ -2986,6 +3101,19 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     // proper Bayesian posterior of the mixture model rather than a hand-
     // tuned reweighting of expert losses.
     UpdateExpertVariances();
+
+    // v0.7 leaf-refit (issue #37). Rewrites leaf values of all existing
+    // expert + gate trees against the freshly-updated r_ik before the next
+    // tree is appended — restores the closed-form M-step on each tree's
+    // existing partition structure, the actual EM-faithful update for
+    // boosted-tree experts. Only runs past warmup (E-step ran above) and
+    // only when the user opts in via the v0.7 flag. Re-runs Forward() to
+    // refresh expert_pred_ / gate_proba_ from the post-refit score updaters
+    // so MStepExperts / MStepGate below see the new state.
+    if (config_->mixture_refit_leaves) {
+      RefitExpertsAndGate();
+      Forward();
+    }
   }
 
   // M-step: update experts

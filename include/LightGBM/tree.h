@@ -117,6 +117,28 @@ class Tree {
                             data_size_t num_data, double* score) const;
 
   /*!
+  * \brief Compute the leaf index that each training sample falls into for this tree.
+  *        Used by leaf-value refit (LightGBM-MoE v0.7) — writing the index per sample
+  *        avoids re-walking the tree on every E-step's gradient aggregation.
+  *
+  * Mirrors AddPredictionToScore's bin-walk; the only difference is the inner-loop
+  * body writes `out_leaf[i] = ~node` (the leaf id) instead of accumulating
+  * `leaf_value_[~node]` into `score[i]`.
+  *
+  * Linear trees (`is_linear_ == true`) are not supported in this entry point — the
+  * leaf-coefficient prediction does not reduce to a single leaf index. Caller
+  * should guard accordingly.
+  *
+  * \param data Bin-coded dataset (the same `Dataset*` AddPredictionToScore expects)
+  * \param num_data Number of samples in `data`
+  * \param out_leaf Output buffer of length `num_data`; `out_leaf[i]` receives the
+  *                 leaf index sample i falls into
+  */
+  void PredictLeafIndices(const Dataset* data,
+                          data_size_t num_data,
+                          int* out_leaf) const;
+
+  /*!
   * \brief Get upper bound leaf value of this tree model
   */
   double GetUpperBoundValue() const;
