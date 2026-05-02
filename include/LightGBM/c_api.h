@@ -1716,6 +1716,34 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterPredictExpertPred(BoosterHandle handle,
                                                      int64_t* out_len,
                                                      double* out_result);
 
+/*!
+ * \brief Snapshot the current training-time responsibilities r_ik of an MoE
+ * booster. Intended for diagnostic visualization (e.g. tracking how the
+ * regime assignment evolves from the GMM/kmeans init through EM iterations).
+ *
+ * Returns sample-major data: ``out_result[i * num_experts + k] = r_ik``.
+ *
+ * Two-call protocol:
+ *   1. Call with ``buffer_len=0`` and ``out_result=nullptr`` to read the
+ *      required size into ``*out_len`` (= num_train_data * num_experts).
+ *   2. Allocate a buffer of that size and call again with ``buffer_len``
+ *      set to the allocation.
+ *
+ * Outside training (e.g. on a freshly loaded model) ``*out_len`` is 0 since
+ * responsibilities_ are not serialized. Returns -1 if the booster is not an
+ * MoE model.
+ *
+ * \param handle Handle of booster
+ * \param buffer_len Capacity of ``out_result`` (in number of doubles).
+ * \param[out] out_len Required size = num_train_data * num_experts.
+ * \param[out] out_result Output buffer (may be nullptr on size query).
+ * \return 0 on success, -1 on failure.
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterGetMixtureResponsibilities(BoosterHandle handle,
+                                                              int64_t buffer_len,
+                                                              int64_t* out_len,
+                                                              double* out_result);
+
 #if !defined(__cplusplus) && (!defined(__STDC__) || (__STDC_VERSION__ < 199901L))
 /*! \brief Inline specifier no-op in C using standards before C99. */
 #define INLINE_FUNCTION

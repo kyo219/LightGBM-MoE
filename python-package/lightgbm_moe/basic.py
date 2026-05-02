@@ -4991,6 +4991,88 @@ class Booster:
 
         return out_result
 
+    def get_responsibilities(self) -> np.ndarray:
+        """Snapshot the current training-time responsibilities r_ik for an MoE model.
+
+        Returns the EM-step posterior probabilities as a ``(num_train_data,
+        num_experts)`` array, with row-major / sample-contiguous layout
+        (``r[i, k]`` = probability that sample ``i`` belongs to expert ``k``).
+
+        Intended for diagnostic visualization — typically called from a
+        ``lgb.train(callbacks=[...])`` callback that snapshots the matrix at
+        each iteration to track how regime assignment evolves.
+
+        Behavior across the training timeline:
+
+        - **Iter 0..warmup_iters-1**: returns the ``InitResponsibilities`` output
+          (e.g. GMM / kmeans / quantile init), unchanged. The E-step does not
+          run during warmup, so this is the "before EM" baseline.
+        - **Iter >= warmup_iters**: returns the latest E-step posterior,
+          recomputed each iteration from the current expert predictions and
+          gate prior.
+
+        Returns
+        -------
+        result : numpy array of shape ``(num_train_data, num_experts)``
+            Current responsibilities. **Returns an empty array** if the booster
+            is not currently attached to training data — for example, on a
+            model loaded via ``Booster(model_file=...)``, since
+            ``responsibilities_`` is not serialized.
+
+        Raises
+        ------
+        LightGBMError
+            If this booster is not an MoE (mixture) model.
+
+        Notes
+        -----
+        The underlying buffer is owned by the C++ booster and overwritten at
+        each EM step. Snapshot via ``r.copy()`` if you need to retain the
+        value past the next training iteration.
+
+        Examples
+        --------
+        >>> rec = []
+        >>> def cb(env):
+        ...     rec.append((env.iteration, env.model.get_responsibilities().copy()))
+        >>> model = lgb.train(params, dset, num_boost_round=100, callbacks=[cb])
+        >>> # rec is now a timeline of regime assignments per iteration.
+        """
+        if not self.is_mixture():
+            raise LightGBMError("get_responsibilities can only be used with MoE models")
+
+        num_experts = self.num_experts()
+        # Two-call protocol: first query the size, then allocate + fetch.
+        # We do not assume access to the training Dataset, since the booster
+        # may have been moved between processes.
+        out_len = ctypes.c_int64(0)
+        _safe_call(
+            _LIB.LGBM_BoosterGetMixtureResponsibilities(
+                self._handle,
+                ctypes.c_int64(0),
+                ctypes.byref(out_len),
+                ctypes.POINTER(ctypes.c_double)(),
+            )
+        )
+        if out_len.value == 0:
+            return np.empty((0, num_experts), dtype=np.float64)
+        # out_len is num_data * num_experts; rebuild the 2D shape.
+        if out_len.value % num_experts != 0:
+            raise LightGBMError(
+                f"get_responsibilities: returned size {out_len.value} is not "
+                f"a multiple of num_experts={num_experts}; this is a bug."
+            )
+        flat = np.empty(out_len.value, dtype=np.float64)
+        _safe_call(
+            _LIB.LGBM_BoosterGetMixtureResponsibilities(
+                self._handle,
+                ctypes.c_int64(out_len.value),
+                ctypes.byref(out_len),
+                flat.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            )
+        )
+        return flat.reshape(-1, num_experts)
+
     def predict_regime_proba_markov(
         self,
         data: _LGBM_PredictDataType,
