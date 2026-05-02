@@ -96,7 +96,7 @@ def main():
     for ds in common_datasets:
         a = get_moe(v06, ds)
         b = get_moe(v08, ds)
-        ra, rb = a.get("best_rmse"), b.get("best_rmse")
+        ra, rb = a.get("rmse_best", a.get("best_rmse")), b.get("rmse_best", b.get("best_rmse"))
         sa = a.get("rmse_std", a.get("std"))
         sb = b.get("rmse_std", b.get("std"))
         if ra is None or rb is None:
