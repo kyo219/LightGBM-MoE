@@ -365,6 +365,8 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_spawn_perturbation",
   "mixture_gate_temperature_init",
   "mixture_gate_temperature_final",
+  "mixture_e_step_temperature_init",
+  "mixture_e_step_temperature_final",
   "mixture_gate_type",
   "mixture_gate_retrain_interval",
   "mixture_dropout_schedule",
@@ -832,6 +834,12 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetDouble(params, "mixture_gate_temperature_final", &mixture_gate_temperature_final);
   CHECK_GT(mixture_gate_temperature_final, 0.0);
 
+  GetDouble(params, "mixture_e_step_temperature_init", &mixture_e_step_temperature_init);
+  CHECK_GT(mixture_e_step_temperature_init, 0.0);
+
+  GetDouble(params, "mixture_e_step_temperature_final", &mixture_e_step_temperature_final);
+  CHECK_GT(mixture_e_step_temperature_final, 0.0);
+
   GetString(params, "mixture_gate_type", &mixture_gate_type);
 
   GetInt(params, "mixture_gate_retrain_interval", &mixture_gate_retrain_interval);
@@ -1012,6 +1020,8 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_spawn_perturbation: " << mixture_spawn_perturbation << "]\n";
   str_buf << "[mixture_gate_temperature_init: " << mixture_gate_temperature_init << "]\n";
   str_buf << "[mixture_gate_temperature_final: " << mixture_gate_temperature_final << "]\n";
+  str_buf << "[mixture_e_step_temperature_init: " << mixture_e_step_temperature_init << "]\n";
+  str_buf << "[mixture_e_step_temperature_final: " << mixture_e_step_temperature_final << "]\n";
   str_buf << "[mixture_gate_type: " << mixture_gate_type << "]\n";
   str_buf << "[mixture_gate_retrain_interval: " << mixture_gate_retrain_interval << "]\n";
   str_buf << "[mixture_dropout_schedule: " << mixture_dropout_schedule << "]\n";
@@ -1202,6 +1212,8 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_spawn_perturbation", {}},
     {"mixture_gate_temperature_init", {}},
     {"mixture_gate_temperature_final", {}},
+    {"mixture_e_step_temperature_init", {}},
+    {"mixture_e_step_temperature_final", {}},
     {"mixture_gate_type", {}},
     {"mixture_gate_retrain_interval", {}},
     {"mixture_dropout_schedule", {}},
@@ -1392,6 +1404,8 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_spawn_perturbation", "double"},
     {"mixture_gate_temperature_init", "double"},
     {"mixture_gate_temperature_final", "double"},
+    {"mixture_e_step_temperature_init", "double"},
+    {"mixture_e_step_temperature_final", "double"},
     {"mixture_gate_type", "string"},
     {"mixture_gate_retrain_interval", "int"},
     {"mixture_dropout_schedule", "string"},

@@ -47,6 +47,7 @@ MixtureGBDT::MixtureGBDT()
       seed_iterations_(0),
       seed_phase_complete_(false),
       gate_temperature_(1.0),
+      em_temperature_(1.0),
       early_stopping_round_(0),
       early_stopping_min_delta_(0.0),
       es_first_metric_only_(false) {
@@ -564,6 +565,13 @@ void MixtureGBDT::InitResponsibilities() {
       }
     }
   }
+
+  // After whichever scheme just ran, ensure r is not pathologically uniform
+  // — that's the EM fixed-point trap that empirically left the model frozen
+  // for `mixture_init=uniform` even with hard_M_step / variance estimation /
+  // diversity_lambda turned up (verified in examples/em_init_sensitivity.py).
+  // The breaker is a no-op when r is already non-uniform.
+  BreakUniformSymmetryIfNeeded();
 }
 
 void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
@@ -1336,6 +1344,63 @@ double MixtureGBDT::ComputeTemperature(int moe_iter, int total_moe_iters) const 
   return t_init * std::pow(t_final / t_init, progress);
 }
 
+double MixtureGBDT::ComputeEmTemperature(int moe_iter, int total_moe_iters) const {
+  // Same exponential schedule as the gate temperature, but on the
+  // responsibility softmax (DA-EM, Ueda & Nakano 1998). See config.h for the
+  // pedagogical comment on what T_em controls.
+  const double t_init = config_->mixture_e_step_temperature_init;
+  const double t_final = config_->mixture_e_step_temperature_final;
+  if (t_init == t_final) return t_init;  // No annealing — standard EM.
+  const double progress = std::min(
+      1.0, static_cast<double>(moe_iter) / std::max(1, total_moe_iters));
+  return t_init * std::pow(t_final / t_init, progress);
+}
+
+void MixtureGBDT::BreakUniformSymmetryIfNeeded() {
+  // Detect: every responsibility row is essentially uniform (within tol).
+  // This catches both `mixture_init=uniform` and any pathological init that
+  // happens to land near uniform (rare but possible with degenerate features).
+  const double uniform = 1.0 / num_experts_;
+  const double tol = 1e-6;
+  bool is_uniform = true;
+  for (data_size_t i = 0; i < num_data_ && is_uniform; ++i) {
+    for (int k = 0; k < num_experts_; ++k) {
+      if (std::abs(responsibilities_[i * num_experts_ + k] - uniform) > tol) {
+        is_uniform = false;
+        break;
+      }
+    }
+  }
+  if (!is_uniform) return;
+
+  // Inject a deterministic, expert-distinct, sample-varying perturbation.
+  // Sinusoidal because it's bounded, smooth, and gives every (i, k) pair a
+  // different displacement (no two experts collide on any sample). Magnitude
+  // ε=0.05 is small enough to remain a valid stochastic distribution after
+  // renormalization but large enough that downstream gradients see different
+  // weights per expert — the only thing the EM fixed-point loop required.
+  const double epsilon = 0.05;
+  const double n_inv = 2.0 * M_PI / std::max<data_size_t>(num_data_, 1);
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    double sum = 0.0;
+    for (int k = 0; k < num_experts_; ++k) {
+      const double phase = n_inv * static_cast<double>(i) * (k + 1);
+      const double v = std::max(0.0, uniform + epsilon * std::sin(phase));
+      responsibilities_[i * num_experts_ + k] = v;
+      sum += v;
+    }
+    const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
+    for (int k = 0; k < num_experts_; ++k) {
+      responsibilities_[i * num_experts_ + k] *= inv_sum;
+    }
+  }
+  Log::Info("MixtureGBDT: detected uniform r_init; applied deterministic "
+            "symmetry-breaking perturbation (eps=%.2f). Without this, EM is "
+            "stuck at the uniform fixed point — verified empirically in "
+            "examples/em_init_sensitivity.py.",
+            epsilon);
+}
+
 void MixtureGBDT::SpawnExpertsFromSeed() {
   const double perturbation = config_->mixture_spawn_perturbation;
   Log::Info("MixtureGBDT: Spawning %d experts from seed "
@@ -1654,6 +1719,13 @@ void MixtureGBDT::EStep() {
     }
   }
 
+  // Deterministic Annealing EM: divide every (i, k) score by T_em before the
+  // softmax. T_em > 1 → softer r (more exploration); T_em < 1 → sharper r
+  // (winner-take-all). T_em == 1 reproduces the standard E-step (default).
+  // See config.h for the schedule and the Ueda & Nakano 1998 reference.
+  const double T_em = std::max(em_temperature_, kMixtureEpsilon);
+  const double inv_T_em = 1.0 / T_em;
+
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     std::vector<double> scores(num_experts_);
@@ -1690,7 +1762,10 @@ void MixtureGBDT::EStep() {
         }
       }
 
-      scores[k] = score - load_penalty[k];
+      // Apply load penalty BEFORE T_em scaling — the load balance is a
+      // probabilistic adjustment to the score, on the same scale as the
+      // log-prior and log-likelihood. Then anneal everything together.
+      scores[k] = (score - load_penalty[k]) * inv_T_em;
     }
 
     Softmax(scores.data(), num_experts_, responsibilities_.data() + i * num_experts_);
@@ -2892,11 +2967,18 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
         ? (config_->num_iterations - seed_iterations_)
         : config_->num_iterations;
     gate_temperature_ = ComputeTemperature(moe_iter, total_moe_iters);
+    em_temperature_ = ComputeEmTemperature(moe_iter, total_moe_iters);
 
     if (moe_iter % 10 == 0 &&
         config_->mixture_gate_temperature_init != config_->mixture_gate_temperature_final) {
       Log::Info("MixtureGBDT: Gate temperature = %.4f (moe_iter=%d/%d)",
                 gate_temperature_, moe_iter, total_moe_iters);
+    }
+    if (moe_iter % 10 == 0 &&
+        config_->mixture_e_step_temperature_init != config_->mixture_e_step_temperature_final) {
+      Log::Info("MixtureGBDT: DA-EM responsibility temperature = %.4f "
+                "(moe_iter=%d/%d)",
+                em_temperature_, moe_iter, total_moe_iters);
     }
   }
 

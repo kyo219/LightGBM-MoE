@@ -1456,6 +1456,37 @@ struct Config {
   // desc = recommended: 0.3-1.0 for exploitation in late training
   double mixture_gate_temperature_final = 1.0;
 
+  // Deterministic Annealing EM (Ueda & Nakano 1998) — temperature on the
+  // responsibility softmax itself, not on the gate routing.
+  //
+  //   r_ik = softmax([log π_k(x) + log p(y|f_k, σ²) − load_penalty_k] / T_em)
+  //
+  // T_em large  → r near uniform → every expert gets a soft slice of every
+  //               sample → exploration; experts can build skill on samples
+  //               they haven't yet "won".
+  // T_em ≈ 1.0  → standard EM (default).
+  // T_em small  → r near one-hot → winner-take-all → exploitation.
+  //
+  // The schedule (T_init → T_final, exponential) creates a homotopy from a
+  // smoothed objective with one global optimum to the original sharp one,
+  // letting EM walk past local optima the standard E-step would lock into.
+  // See "Deterministic Annealing EM Algorithm" (Ueda & Nakano, Neural
+  // Networks 1998, 11(2):271–282).
+  //
+  // check = >0.0
+  // desc = initial DA-EM responsibility-softmax temperature (high = soft r,
+  //        more exploration)
+  // desc = 1.0 = no annealing (standard EM, default)
+  // desc = recommended: 3.0-8.0 for exploration in early training
+  double mixture_e_step_temperature_init = 1.0;
+
+  // check = >0.0
+  // desc = final DA-EM responsibility-softmax temperature (low = sharp r,
+  //        winner-take-all)
+  // desc = decays exponentially from init to final over training
+  // desc = recommended: 0.3-1.0 for exploitation in late training
+  double mixture_e_step_temperature_final = 1.0;
+
   #ifndef __NVCC__
   #pragma endregion
 

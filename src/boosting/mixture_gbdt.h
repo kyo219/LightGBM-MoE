@@ -525,6 +525,22 @@ class MixtureGBDT : public GBDTBase {
   double ComputeTemperature(int moe_iter, int total_moe_iters) const;
 
   /*!
+   * \brief Compute current DA-EM responsibility-softmax temperature.
+   * Same exponential schedule as ComputeTemperature but reads
+   * mixture_e_step_temperature_init / final.
+   */
+  double ComputeEmTemperature(int moe_iter, int total_moe_iters) const;
+
+  /*!
+   * \brief If `responsibilities_` is essentially uniform after Init, inject a
+   * deterministic per-expert perturbation so EM has something to grip on.
+   * Without this, uniform r → identical gradients across experts → identical
+   * trees → r stays uniform forever (the fixed-point trap empirically
+   * confirmed by examples/em_init_sensitivity.py).
+   */
+  void BreakUniformSymmetryIfNeeded();
+
+  /*!
    * \brief Forward pass for validation data: compute expert predictions and gate probabilities
    * \param valid_idx Index of validation dataset
    */
@@ -579,6 +595,13 @@ class MixtureGBDT : public GBDTBase {
   // ===== Gate temperature annealing =====
   /*! \brief Current gate temperature */
   double gate_temperature_;
+
+  // ===== Deterministic Annealing EM (DA-EM) =====
+  /*! \brief Current responsibility-softmax temperature; annealed from
+   *  `mixture_e_step_temperature_init` to `mixture_e_step_temperature_final`
+   *  over the MoE phase. 1.0 reproduces standard EM. See EStep() and
+   *  ComputeEmTemperature(). */
+  double em_temperature_;
 
   // ===== Early stopping =====
   /*! \brief Number of rounds for early stopping (0 = disabled) */
