@@ -294,11 +294,35 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Expert predictions in sample-major layout (N x K): expert_pred_sm_[i*K + k] */
   std::vector<double> expert_pred_sm_;
 
-  /*! \brief Gate probabilities (N x K) */
+  /*! \brief Gate probabilities (N x K). For "gbdt" gate type this is
+   *  softmax((z + expert_bias_) / T) — i.e. the bias-included routing used
+   *  for forward yhat, validation metrics, and inference. */
   std::vector<double> gate_proba_;
+
+  /*! \brief Bias-free gate probabilities (N x K): softmax(z / T) without
+   *  expert_bias_ added. Read by the E-step prior, ELBO, and
+   *  ComputeAffinityScores so that the load-balancing bias acts only on the
+   *  routing decision (forward pass + inference), not on the probabilistic
+   *  model that defines responsibilities. Without this split, the soft-CE
+   *  target r in MStepGate would be computed from a bias-included prior, so
+   *  the gate would still have to learn to undo the bias each iter — partly
+   *  defeating the DeepSeek "Auxiliary-Loss-Free Load Balancing" design that
+   *  PR #25 aimed to implement on the gradient side.
+   *
+   *  For "none" / "leaf_reuse" gate types (no bias is ever applied to
+   *  gate_proba_ in those modes) this buffer is just a copy of gate_proba_. */
+  std::vector<double> gate_proba_no_bias_;
 
   /*! \brief Combined prediction yhat (N) */
   std::vector<double> yhat_;
+
+  /*! \brief Last computed marginal log-likelihood, for monotonicity diagnostic.
+   *  EM with an exact M-step is non-decreasing here; the GBDT M-step is only
+   *  approximate so small drops are normal, but persistent / large drops
+   *  indicate misalignment (dropout, adaptive_lr, aggressive annealing, or a
+   *  re-introduced math bug). Negative-infinity sentinel for "not yet seen".
+   */
+  double prev_marginal_log_lik_ = -1e300;
 
   /*! \brief Gradients for mixture (N) */
   std::vector<score_t> gradients_;

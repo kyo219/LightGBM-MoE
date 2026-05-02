@@ -272,11 +272,38 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   Log::Debug("MixtureGBDT::Init - initializing gate");
 
   if (use_markov_) {
-    Log::Info("MixtureGBDT: Markov mode enabled (lambda=%.2f)",
+    Log::Info("MixtureGBDT: Markov mode enabled (lambda=%.2f). "
+              "INFERENCE CONTRACT: standard Predict()/predict() returns "
+              "un-smoothed routing — to match the routing used at training "
+              "and validation, call Booster.predict_markov() / "
+              "predict_regime_proba_markov() (Python) which sweep the "
+              "Markov prior across the rows of the input. Without that, "
+              "test-set metrics will silently disagree with val metrics "
+              "selected during tuning.",
               config_->mixture_smoothing_lambda);
   } else if (use_momentum_) {
     Log::Info("MixtureGBDT: Momentum mode enabled (lambda=%.2f)",
               config_->mixture_smoothing_lambda);
+  }
+
+  // Warn when the legacy fixed-alpha E-step is enabled. With per-expert
+  // variance estimation off, `score = log(π_k) − alpha·loss` makes alpha a
+  // hyperparameter whose right value scales with the y-magnitude (Var(y)
+  // for L2, |y| for L1), so the same alpha on (say) sp500 returns and a
+  // synthetic-magnitude regression target produces wildly different
+  // routing temperatures. Default behavior since PR #24 is variance
+  // estimation on; users who explicitly turn it off should know the
+  // alpha-tuning contract changes.
+  if (!config_->mixture_estimate_variance) {
+    Log::Warning(
+        "MixtureGBDT: mixture_estimate_variance=false — falling back to the "
+        "legacy `log(gate) − alpha * loss` E-step heuristic with fixed "
+        "alpha=%g. alpha is a temperature on |residual|^p that depends on "
+        "the y scale (alpha * loss = O(y_magnitude^p)), so the same alpha "
+        "behaves very differently across datasets. Either keep the default "
+        "(true) or tune mixture_e_step_alpha relative to Var(y) for L2 / "
+        "E[|y − ymean|] for L1. ELBO logging is also disabled in this mode.",
+        config_->mixture_e_step_alpha);
   }
 
   // Time-order guard for any mode whose responsibility / gate-proba update
@@ -307,6 +334,10 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   expert_pred_.resize(nk);
   expert_pred_sm_.resize(nk);
   gate_proba_.resize(nk);
+  // Bias-free routing prior used by E-step / ELBO / affinity. Initialized to
+  // uniform 1/K so the very first EStep (if any happens before Forward) sees
+  // a well-defined prior rather than zeros that would produce -inf log priors.
+  gate_proba_no_bias_.assign(nk, 1.0 / num_experts_);
   yhat_.resize(num_data_);
   gradients_.resize(num_data_);
   hessians_.resize(num_data_);
@@ -1373,28 +1404,47 @@ void MixtureGBDT::Forward() {
     if (config_->mixture_gate_type == "none") {
       std::copy(responsibilities_.begin(), responsibilities_.end(), gate_proba_.begin());
     }
-    // For leaf_reuse, gate_proba_ is already set from previous MStepGate call
+    // For leaf_reuse, gate_proba_ is already set from previous MStepGate call.
+    // Neither mode applies expert_bias_ to its routing — the bias-free view
+    // therefore equals the routing distribution exactly.
+    std::copy(gate_proba_.begin(), gate_proba_.end(), gate_proba_no_bias_.begin());
   } else {
-    // GBDT gate: softmax of gate raw predictions
+    // GBDT gate: softmax of gate raw predictions.
+    //
+    // Compute TWO views of the routing distribution per sample:
+    //   gate_proba_no_bias_ = softmax(z / T)           ← prior for E-step / ELBO
+    //   gate_proba_         = softmax((z + b) / T)     ← actual routing for yhat
+    //
+    // Splitting these matters for DeepSeek "Auxiliary-Loss-Free Load
+    // Balancing" semantics: the bias is a routing-decision nudge; it must
+    // NOT enter the probabilistic prior that defines responsibilities, or
+    // the gate would have to spend each iter undoing the bias the load
+    // balancer just added (PR #25 fixed this on the gradient side via
+    // bias-free p; the prior side stayed bias-tainted until this fix).
     std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
     int64_t out_len;
     gate_->GetPredictAt(0, gate_raw.data(), &out_len);
 
-    // Apply softmax per sample with expert bias for load balancing
+    const double inv_T = 1.0 / std::max(gate_temperature_, kMixtureEpsilon);
     // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
-    // gate_proba_ is in sample-major order: gate_proba_[i * num_experts_ + k]
+    // gate_proba_ / gate_proba_no_bias_ are in sample-major order
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
-      std::vector<double> scores(num_experts_);
+      std::vector<double> scores_no_bias(num_experts_);
+      std::vector<double> scores_with_bias(num_experts_);
       for (int k = 0; k < num_experts_; ++k) {
-        scores[k] = (gate_raw[k * num_data_ + i] + expert_bias_[k]) / gate_temperature_;
+        const double z_over_T = gate_raw[k * num_data_ + i] * inv_T;
+        scores_no_bias[k]   = z_over_T;
+        scores_with_bias[k] = z_over_T + expert_bias_[k] * inv_T;
       }
-      Softmax(scores.data(), num_experts_,
+      Softmax(scores_no_bias.data(), num_experts_,
+              gate_proba_no_bias_.data() + i * num_experts_);
+      Softmax(scores_with_bias.data(), num_experts_,
               gate_proba_.data() + i * num_experts_);
     }
   }
 
-  // Markov mode: temporal smoothing of gate_proba_ along the row (time) axis.
+  // Markov mode: temporal smoothing of routing along the row (time) axis.
   //
   // Audit fix: previously this used a class-member `prev_gate_proba_` that
   // got overwritten with gate_proba_[i-1] after each iteration's blend, then
@@ -1406,41 +1456,45 @@ void MixtureGBDT::Forward() {
   // The corrected smoothing is a single-pass forward sweep using only the
   // unsmoothed value of row i-1 from THIS iteration as sample i's prior. No
   // state survives across training iterations.
+  //
+  // We sweep BOTH gate_proba_ and gate_proba_no_bias_: Markov smoothing is a
+  // probabilistic model assumption about the time evolution of routing, not
+  // a routing-decision nudge — so it applies symmetrically to the routing
+  // (used by yhat) and to the prior (used by E-step / ELBO).
   if (use_markov_) {
     const double lambda = config_->mixture_smoothing_lambda;
     if (lambda > 0.0 && num_data_ > 1) {
-      // prev_row_unsmoothed: row (i-1)'s value BEFORE this iter's blend.
-      // We must save it before overwriting gate_proba_[i-1] when smoothing
-      // moves on to row i — but the sweep is sequential and only reads
-      // already-smoothed gate_proba_[i-1] otherwise. Use a thread-local
-      // 1-row buffer to keep the unsmoothed source.
-      std::vector<double> prev_row(num_experts_);
-      // Row 0 is never blended (no prior available).
-      for (int k = 0; k < num_experts_; ++k) {
-        prev_row[k] = gate_proba_[k];
-      }
-      for (data_size_t i = 1; i < num_data_; ++i) {
-        // Snapshot row i's unsmoothed value before the blend.
-        std::vector<double> cur_row(num_experts_);
+      auto markov_sweep = [&](double* buf) {
+        std::vector<double> prev_row(num_experts_);
+        // Row 0 is never blended (no prior available).
         for (int k = 0; k < num_experts_; ++k) {
-          cur_row[k] = gate_proba_[i * num_experts_ + k];
+          prev_row[k] = buf[k];
         }
-        double sum = 0.0;
-        for (int k = 0; k < num_experts_; ++k) {
-          gate_proba_[i * num_experts_ + k] =
-              (1.0 - lambda) * cur_row[k] + lambda * prev_row[k];
-          sum += gate_proba_[i * num_experts_ + k];
+        for (data_size_t i = 1; i < num_data_; ++i) {
+          // Snapshot row i's unsmoothed value before the blend.
+          std::vector<double> cur_row(num_experts_);
+          for (int k = 0; k < num_experts_; ++k) {
+            cur_row[k] = buf[i * num_experts_ + k];
+          }
+          double sum = 0.0;
+          for (int k = 0; k < num_experts_; ++k) {
+            buf[i * num_experts_ + k] =
+                (1.0 - lambda) * cur_row[k] + lambda * prev_row[k];
+            sum += buf[i * num_experts_ + k];
+          }
+          // Renormalize (numerical drift only; both inputs were already
+          // probability vectors).
+          const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
+          for (int k = 0; k < num_experts_; ++k) {
+            buf[i * num_experts_ + k] *= inv_sum;
+          }
+          // Advance prev_row to row i's UNSMOOTHED value (so row i+1 gets a
+          // clean Markov prior, not a doubly-smoothed one).
+          prev_row.swap(cur_row);
         }
-        // Renormalize (numerical drift only; both inputs were already
-        // probability vectors).
-        const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
-        for (int k = 0; k < num_experts_; ++k) {
-          gate_proba_[i * num_experts_ + k] *= inv_sum;
-        }
-        // Advance prev_row to row i's UNSMOOTHED value (so row i+1 gets a
-        // clean Markov prior, not a doubly-smoothed one).
-        prev_row.swap(cur_row);
-      }
+      };
+      markov_sweep(gate_proba_.data());
+      markov_sweep(gate_proba_no_bias_.data());
     }
     // prev_gate_proba_ is no longer carried across iterations; it remains
     // sized for back-compat with the predict-time PredictWithPrevProba path
@@ -1608,7 +1662,11 @@ void MixtureGBDT::EStep() {
       double score = 0.0;
 
       if (mode == "gate_only") {
-        const double gate_prob = gate_proba_[i * num_experts_ + k];
+        // Prior π_k(x) = bias-free softmax of gate logits. The load-balance
+        // bias is a routing nudge (DeepSeek), not a probabilistic prior;
+        // mixing it into the responsibility softmax forces the gate to
+        // learn to undo bias each iter — defeats the point.
+        const double gate_prob = gate_proba_no_bias_[i * num_experts_ + k];
         score = std::log(gate_prob + kMixtureEpsilon);
       } else if (mode == "loss_only") {
         const double expert_p = expert_pred_sm_[i * num_experts_ + k];
@@ -1619,8 +1677,9 @@ void MixtureGBDT::EStep() {
           score = -alpha * loss;
         }
       } else {
-        // em mode: log π_k(x) + log p(y | x, f_k, scale_k)
-        const double gate_prob = gate_proba_[i * num_experts_ + k];
+        // em mode: log π_k(x) + log p(y | x, f_k, scale_k); π_k is bias-free
+        // (see gate_only branch above for rationale).
+        const double gate_prob = gate_proba_no_bias_[i * num_experts_ + k];
         const double expert_p = expert_pred_sm_[i * num_experts_ + k];
         const double loss = ComputePointwiseLoss(labels[i], expert_p);
         if (estimate_var) {
@@ -1656,8 +1715,23 @@ void MixtureGBDT::UpdateExpertVariances() {
       const double r = responsibilities_[i * num_experts_ + k];
       const double f = expert_pred_sm_[i * num_experts_ + k];
       const double diff = y - f;
-      const double residual_term =
-          (e_step_loss_type_ == "l1") ? std::fabs(diff) : (diff * diff);
+      // Per loss type, accumulate the residual term whose units match the
+      // "scale" the E-step then divides by — i.e. the unitless ratio
+      //   loss / scale  must equal the log-density exponent.
+      //   l2:        scale = σ² = E[diff²],            E-step uses diff²/(2σ²)
+      //   l1:        scale = b  = E[|diff|],           E-step uses |diff|/b
+      //   quantile:  scale = E[pinball],               E-step uses pinball/scale
+      // The earlier code fell into (diff*diff) for *anything other than l1*,
+      // so quantile users got `pinball / E[diff²]` — dimensionally O(1/diff)
+      // and silently temperature-coupled to the y-scale.
+      double residual_term;
+      if (e_step_loss_type_ == "l1") {
+        residual_term = std::fabs(diff);
+      } else if (e_step_loss_type_ == "quantile") {
+        residual_term = ComputePointwiseLoss(y, f);  // pinball loss
+      } else {
+        residual_term = diff * diff;
+      }
       num_acc[k] += r * residual_term;
       den_acc[k] += r;
     }
@@ -1712,11 +1786,24 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
     double max_term = -std::numeric_limits<double>::infinity();
     std::vector<double> terms(num_experts_);
     for (int k = 0; k < num_experts_; ++k) {
-      const double pi  = gate_proba_[i * num_experts_ + k];
+      // Prior π_k(x) is bias-free, matching the E-step. ELBO is the model
+      // log-likelihood; the routing-side bias is not part of the model.
+      const double pi  = gate_proba_no_bias_[i * num_experts_ + k];
       const double f   = expert_pred_sm_[i * num_experts_ + k];
       const double y   = static_cast<double>(labels[i]);
-      const double loss =
-          (e_step_loss_type_ == "l1") ? std::fabs(y - f) : (y - f) * (y - f);
+      double loss;
+      if (e_step_loss_type_ == "l1") {
+        loss = std::fabs(y - f);
+      } else if (e_step_loss_type_ == "quantile") {
+        // Quantile has no proper density. We treat the asymmetric pinball
+        // loss as a Laplace-style log-density exponent (matches the E-step
+        // and UpdateExpertVariances). Without this branch the ELBO used
+        // squared residuals while EStep used pinball — different "models"
+        // in two diagnostics meant the logged number was uninterpretable.
+        loss = ComputePointwiseLoss(y, f);
+      } else {
+        loss = (y - f) * (y - f);
+      }
       const double t = std::log(pi + kMixtureEpsilon)
                      + log_norm[k] - inv_scale[k] * loss;
       terms[k] = t;
@@ -1777,7 +1864,10 @@ void MixtureGBDT::ComputeAffinityScores() {
       double score = 0.0;
 
       if (score_type == "gate" || score_type == "combined") {
-        double gate_prob = gate_proba_[i * num_experts_ + k];
+        // Affinity = log π_k − α·loss is the same "score" form as the E-step:
+        // bias does not enter the prior, only routing. Reading the bias-free
+        // prior keeps Expert-Choice's affinity consistent with Token-Choice.
+        double gate_prob = gate_proba_no_bias_[i * num_experts_ + k];
         score += std::log(gate_prob + kMixtureEpsilon);
       }
 
@@ -2848,6 +2938,34 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     Log::Info("MixtureGBDT: iter=%d  marginal_log_lik=%.6f  (per_sample=%.6f)",
               iter_, ll,
               num_data_ > 0 ? ll / num_data_ : 0.0);
+
+    // Monotonicity check. Approximate M-step → small dips are normal, but a
+    // drop bigger than 5% of |prev| is symptomatic of misalignment between
+    // E-step and M-step — historically this has been a sign of:
+    //   • bias-side regularizer fighting gate (pre PR #25)
+    //   • diversity sign flip (pre PR #26)
+    //   • dimension mismatch in scale estimation (pre this commit's quantile fix)
+    //   • aggressive expert dropout / adaptive_lr decoupling experts from EM
+    // The user can mute by quietening Log::Warning if expected (e.g. when
+    // deliberately running with high dropout for ablation).
+    const bool prev_finite = std::isfinite(prev_marginal_log_lik_) &&
+                             prev_marginal_log_lik_ > -1e299;
+    if (prev_finite && std::isfinite(ll)) {
+      const double drop = prev_marginal_log_lik_ - ll;
+      const double rel_scale = std::max(std::fabs(prev_marginal_log_lik_), 1.0);
+      if (drop > 0.05 * rel_scale) {
+        Log::Warning(
+            "MixtureGBDT: marginal_log_lik dropped %.6f → %.6f "
+            "(Δ=%.6f, %.1f%% of |prev|). Approximate M-step allows small "
+            "dips; persistent / large drops mean E-step and M-step are "
+            "optimizing inconsistent objectives. Suspect: high expert "
+            "dropout, mixture_adaptive_lr, aggressive temperature "
+            "annealing, or a recent code change to gradient/Hessian.",
+            prev_marginal_log_lik_, ll, -drop,
+            100.0 * drop / rel_scale);
+      }
+    }
+    prev_marginal_log_lik_ = ll;
   }
 
   ++iter_;
@@ -3291,12 +3409,16 @@ void MixtureGBDT::ResetTrainingData(const Dataset* train_data,
   expert_pred_.resize(nk);
   expert_pred_sm_.resize(nk);
   gate_proba_.resize(nk);
+  gate_proba_no_bias_.assign(nk, 1.0 / num_experts_);
   yhat_.resize(num_data_);
   gradients_.resize(num_data_);
   hessians_.resize(num_data_);
 
   // Reset expert bias for loss-free load balancing
   std::fill(expert_bias_.begin(), expert_bias_.end(), 0.0);
+
+  // Monotonicity baseline is invalidated when retraining on new data.
+  prev_marginal_log_lik_ = -1e300;
 
   InitResponsibilities();
 }
