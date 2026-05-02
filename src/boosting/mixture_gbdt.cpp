@@ -564,6 +564,13 @@ void MixtureGBDT::InitResponsibilities() {
       }
     }
   }
+
+  // After whichever scheme just ran, ensure r is not pathologically uniform
+  // — that's an EM fixed point that empirically left the model frozen for
+  // `mixture_init=uniform` even with hard_m_step / variance estimation /
+  // diversity_lambda turned up (verified in examples/em_init_sensitivity.py).
+  // The breaker is a no-op when r is already non-uniform.
+  BreakUniformSymmetryIfNeeded();
 }
 
 void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
@@ -1334,6 +1341,51 @@ double MixtureGBDT::ComputeTemperature(int moe_iter, int total_moe_iters) const 
   // Exponential decay: T(t) = T_init * (T_final/T_init)^(t/T_total)
   double progress = std::min(1.0, static_cast<double>(moe_iter) / std::max(1, total_moe_iters));
   return t_init * std::pow(t_final / t_init, progress);
+}
+
+void MixtureGBDT::BreakUniformSymmetryIfNeeded() {
+  // Detect: every responsibility row is essentially uniform (within tol).
+  // Catches `mixture_init=uniform` and any pathological init that happens to
+  // land near uniform (rare but possible with degenerate features).
+  const double uniform = 1.0 / num_experts_;
+  const double tol = 1e-6;
+  bool is_uniform = true;
+  for (data_size_t i = 0; i < num_data_ && is_uniform; ++i) {
+    for (int k = 0; k < num_experts_; ++k) {
+      if (std::abs(responsibilities_[i * num_experts_ + k] - uniform) > tol) {
+        is_uniform = false;
+        break;
+      }
+    }
+  }
+  if (!is_uniform) return;
+
+  // Inject a deterministic, expert-distinct, sample-varying perturbation.
+  // Sinusoidal because it's bounded, smooth, and gives every (i, k) pair a
+  // different displacement (no two experts collide on any sample). Magnitude
+  // ε=0.05 is small enough to remain a valid stochastic distribution after
+  // renormalization but large enough that downstream gradients see different
+  // weights per expert — the only thing the EM fixed-point loop required.
+  const double epsilon = 0.05;
+  const double n_inv = 2.0 * M_PI / std::max<data_size_t>(num_data_, 1);
+  for (data_size_t i = 0; i < num_data_; ++i) {
+    double sum = 0.0;
+    for (int k = 0; k < num_experts_; ++k) {
+      const double phase = n_inv * static_cast<double>(i) * (k + 1);
+      const double v = std::max(0.0, uniform + epsilon * std::sin(phase));
+      responsibilities_[i * num_experts_ + k] = v;
+      sum += v;
+    }
+    const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
+    for (int k = 0; k < num_experts_; ++k) {
+      responsibilities_[i * num_experts_ + k] *= inv_sum;
+    }
+  }
+  Log::Info("MixtureGBDT: detected uniform r_init; applied deterministic "
+            "symmetry-breaking perturbation (eps=%.2f). Without this, EM is "
+            "stuck at the uniform fixed point — verified empirically in "
+            "examples/em_init_sensitivity.py.",
+            epsilon);
 }
 
 void MixtureGBDT::SpawnExpertsFromSeed() {

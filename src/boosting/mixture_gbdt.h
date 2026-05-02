@@ -525,6 +525,20 @@ class MixtureGBDT : public GBDTBase {
   double ComputeTemperature(int moe_iter, int total_moe_iters) const;
 
   /*!
+   * \brief If `responsibilities_` is essentially uniform after Init, inject a
+   * deterministic per-(sample, expert) perturbation so EM has something to grip
+   * on. Without this, uniform r is a fixed point of the EM iteration: every
+   * expert sees the same gradient → every expert builds the same tree → r
+   * stays uniform forever. The trap was empirically confirmed in
+   * `examples/em_init_sensitivity.py` (uniform-init final entropy stayed
+   * pinned at log(K), and no combination of `hard_m_step` /
+   * `mixture_estimate_variance` / `mixture_diversity_lambda` could break it).
+   * No-op when r is already non-uniform — non-uniform inits (gmm, kmeans,
+   * tree_hierarchical, etc.) reach the early-return without modification.
+   */
+  void BreakUniformSymmetryIfNeeded();
+
+  /*!
    * \brief Forward pass for validation data: compute expert predictions and gate probabilities
    * \param valid_idx Index of validation dataset
    */
