@@ -220,6 +220,8 @@ via logsumexp. Logged every 10 iters (and the first 5). Exact-M-step EM is monot
 
 If you tune aggressively (high dropout, custom schedules) and see warnings, the ELBO loss is the single best signal that something is fundamentally inconsistent between E and M.
 
+**v0.8 change**: ELBO is now *computed* every post-warmup iter (was every 10 in v0.7) — required so the sliding-window refit trigger in §2.8 can detect both drops and plateaus. The *logging* cadence is unchanged (still every 10 iters + first 5), so console output is identical to v0.7 for users who don't enable the trigger. The 5% drop warning above is independent of the trigger and stays tied to the log cadence.
+
 ### 2.7 Leaf-value refit on each E-step (v0.7, opt-in)
 
 The "additive-only EM" limitation — boosted-tree experts can only inch their predictions per round, so `r_ik` can only inch in response, so EM is stuck near `r_init` — has its root cause not in "we only append trees" but in "leaf values are write-once at the `r` of the round each tree was built in". The tree partitions form a useful data-dependent feature representation `Φ_k(x) ∈ {0,1}^{num_leaves}`; the leaf values are linear coefficients on top of `Φ_k`. Classical EM rewrites those coefficients each round in closed form. v0.6 leaves them frozen.
@@ -256,6 +258,75 @@ After all iters are replayed, the score updaters reflect the post-refit cumulati
 **Subsumed pathology guards**: with refit-on, the symmetry breaker (PR #36), the diversity-reg Huber clip (PR #26), and parts of the variance-estimator anti-collapse (PR #24) become structurally redundant — they exist to compensate for the same root cause refit fixes (frozen leaves can't track changing `r`). For now the guards remain (default-off refit is a strict superset of v0.6 behavior), but a future cleanup PR could simplify them.
 
 **Incompatibility — `gate_type='leaf_reuse'`**: refit only rewrites expert leaves and (in `gbdt` gate mode) the gate's GBDT leaves. `leaf_reuse` derives gate routing from expert-tree leaf statistics and trains a separate gate GBDT for out-of-sample inference; refit would touch the experts but leave that gate GBDT frozen, producing an asymmetric update that empirically degrades performance (verified at +7% RMSE on `vix` under uniform init in `bench_results/bench_v07_per_config_uniform.md`). The Init guard auto-disables `mixture_refit_leaves` when `mixture_gate_type='leaf_reuse'` is set, with a one-time warning. Use `gate_type='gbdt'` if you want refit semantics.
+
+### 2.8 Partition re-grow + sliding-window ELBO trigger (v0.8, opt-in)
+
+§2.7's leaf refit only rewrites leaf *values* `v_k^(s)`; the split *structures* `S_k^(s)` chosen against `r_init` stay frozen. v0.8 ([#41](https://github.com/kyo219/LightGBM-MoE/issues/41) / [PR #42](https://github.com/kyo219/LightGBM-MoE/pull/42) ELBO trigger fix, [PR #43](https://github.com/kyo219/LightGBM-MoE/pull/43) partition re-grow) extends the M-step to the **(split, leaf) pair** — block coordinate ascent on the full tree parameter rather than just its linear-coefficient slice. Together with §2.7, this is the closest GBDT-MoE gets to a free-parameter EM M-step within each tree slot. Full derivation: [`docs/v0.8/partition_regrow_design.md`](../v0.8/partition_regrow_design.md).
+
+`MixtureGBDT::RefitExpertsAndGate` is now a two-phase pipeline (Phase 1 conditional on `mixture_regrow_oldest_trees=true`; Phase 2 = §2.7 leaf refit, runs whenever `mixture_refit_leaves=true`):
+
+```
+Phase 1 (v0.8): per expert k (and gate when gate_type=gbdt):
+  for s in [0..M-1]                          # M = mixture_regrow_per_fire,
+                                              # capped by mixture_regrow_min_remaining
+    if mode == "replace":
+        experts_[k]->RegrowTreeAt(s, cb)     # rebuild splits + leaves
+    else:  # mode == "delete"
+        experts_[k]->DeleteTreeAt(s)          # ablation: ensemble shrinks
+
+Phase 2 (v0.7): existing leaf refit on all surviving trees, retrofitting
+  leaf values of [M..T-1] to the new state Phase 1 produced.
+```
+
+**Single-tree subproblem** (the math `RegrowTreeAt` solves):
+
+```
+backbone_i = f_k(x_i) − v_k^{(s)}[S_k^{(s)}(x_i)]      // f_k minus tree s's contribution
+g_i        = r_ik · ∂loss(y_i, backbone_i) / ∂backbone_i
+h_i        = r_ik · ∂²loss / ∂backbone_i²
+(S*, v*)   = tree_learner_->Train(g, h)                 // LightGBM picks fresh splits
+```
+
+LightGBM's greedy split selector can always fall back to a constant tree (= weighted mean), so `Q(θ_new; r) ≥ Q(θ_old; r)` — each partition swap is **monotone non-decreasing in Q**. By the EM inequality `L(θ_{t+1}) − L(θ_t) ≥ Q(θ_{t+1}; r_t) − Q(θ_t; r_t)`, ELBO is non-decreasing in expectation.
+
+**Implementation in `GBDT::RegrowTreeAt`** (`gbdt.cpp` near `RefitLeavesByGradients`): same zero-and-replay score-updater idiom as §2.7, with one tree-build inserted at slot `s_iter`:
+
+1. Zero `train_score_updater_` and all `valid_score_updater_`, replay iters `[0, s_iter)` → score = `f^{(s_iter-1)}` (the backbone).
+2. Invoke `recompute_grad_hess(g_buf, h_buf)` once. The callback reads `GetPredictAt(0, ...)`, which now returns the backbone — same callback shape as Phase 2 leaf refit, so v0.7 and v0.8 share gradient code.
+3. For each `tree_id ∈ [0, num_tree_per_iteration_)`: `tree_learner_->Train(g, h, is_first_tree=false)` → fresh `Tree*`. Apply `Tree::Shrinkage(shrinkage_rate_)` (same as gbdt.cpp:581 in normal training). Swap into `models_[s_iter * K + tree_id]` in place. `AddScore(tree, tree_id)` on all updaters.
+4. Replay iters `(s_iter, T)` so the score reflects the post-swap full ensemble.
+
+**Bagging during regrow**: deliberately *not* overridden. An attempt to force full-data via `SetBaggingData(nullptr, all_idx, num_data_)` segfaulted the next M-step's `serial_tree_learner` state at iter 7 in the smoke test. The regrown tree therefore sees the previous M-step's hard partition rather than the full sample set; the gradients themselves are still r-weighted via the callback, so the structure is r-aware in spirit, just restricted to the active partition.
+
+**Sliding-window ELBO trigger** (B, the trigger that gates Phase 1 + Phase 2 when `mixture_refit_trigger='elbo'`): the v0.7 trigger ("relative drop > 5% in the most recent log block") fired 0/6 datasets in the v0.7 acceptance bench because Optuna-tuned configs don't *drop* ELBO — they *plateau* at a sub-optimal local fixed point (E-step output stops moving → M-step contributions vanish → ELBO flatlines without dropping). v0.8 maintains a per-iter sliding window `elbo_history_` of size `mixture_elbo_window` (default 10) and fires on EITHER:
+
+```
+drop signal    = (elbo_t - elbo_{t-W}) / max(|elbo_{t-W}|, 1)
+                                                < -mixture_elbo_drop_threshold     (default 0.01)
+plateau signal = (max(window) - min(window)) / max(|max(window)|, 1)
+                                                < mixture_elbo_plateau_threshold   (default 0.001)
+                  AND moe_iter > warmup_iters + mixture_elbo_min_iter_for_plateau  (default 20)
+```
+
+Drop detection retains the v0.7 catch for gross E/M misalignment; plateau detection adds the basin-lock-in catch the v0.7 trigger missed. Cost: one O(N·K) logsumexp per post-warmup iter (~5–10% wall time). Setting `plateau_threshold=0` disables plateau detection (recovers a tightened version of v0.7 behavior).
+
+**Trigger modes** (extended from §2.7's table):
+
+| Mode | When it fires (v0.8) | Cost |
+|---|---|---|
+| `always` | Every post-warmup iter | Highest |
+| `elbo` (default safest) | drop OR plateau on the sliding window (above). v0.7's 5%-drop check is recoverable via `mixture_elbo_drop_threshold=0.05, mixture_elbo_plateau_threshold=0` | Cheap (per-iter ELBO + window math) |
+| `every_n` | Every `mixture_refit_every_n` post-warmup iters | Tunable |
+
+**Empirical effect** ([`bench_results/v0_8_acceptance_FINAL.md`](../../bench_results/v0_8_acceptance_FINAL.md), [`bench_results/v0_8_search_FINAL.md`](../../bench_results/v0_8_search_FINAL.md)):
+
+- **Bad-init recovery (the design target)**: synthetic + `mixture_init=random`, regrow with `per_fire=3` reaches RMSE 5.11, **−13.0% vs the off baseline** (5.87) — beating §2.7 leaf-refit-alone (5.53, −5.8%) by ~7 percentage points. Partition re-build does what leaf refit can't when the early-iter splits encode the wrong partition.
+- **Tuned configs (v0.6 winning configs held fixed)**: regrow at the safe `elbo` trigger fires 0/6 (correctly inert — these trajectories don't plateau). At forced `always` trigger, regrow degrades 4/6 by +0.2-7.1% — same shape as §2.7's "refit-always-degrades-tuned-configs" finding. The mechanism is sound; the regime is wrong.
+- **500-trial Optuna search with v0.8 features in scope** (`mixture_refit_leaves` and `mixture_regrow_oldest_trees` as search variables, `uniform` added to `mixture_init`): Optuna picked `refit_leaves=False` on 5/6 datasets and `regrow=False` on 6/6 winning configs; fANOVA importance of `refit_leaves` is 0.000-0.008 across all datasets. Optuna with budget independently agrees with the design intent: refit/regrow are bad-init safety nets, not free improvements for tuned configs.
+
+**Subsumed pathology guards**: same point as §2.7. With Phase 1 + Phase 2 on, the symmetry breaker (PR #36), diversity-reg Huber clip (PR #26), and parts of the variance-estimator anti-collapse (PR #24) become structurally more redundant — they exist to compensate for the same root cause re-grow + refit fix (frozen splits + frozen leaves can't track changing `r`). Default-off keeps the v0.6 / v0.7 behavior bit-identical, so the guards remain as defense in depth.
+
+**Incompatibility — `gate_type='leaf_reuse'`**: same root cause as §2.7's leaf-refit incompat. `leaf_reuse` derives gate routing from expert-tree leaf statistics and trains a separate gate GBDT for out-of-sample inference; partition re-grow rewrites expert tree splits but leaves that gate GBDT structurally frozen, producing an asymmetric update. The Init guard auto-disables `mixture_regrow_oldest_trees` when `mixture_gate_type='leaf_reuse'` is set, with a one-time warning at Init *and* at `ResetConfig` (mirrors the §2.7 guard pair).
 
 ## 3. Initializing `r_ik`
 
@@ -361,7 +432,11 @@ Quick file:line index for everything referenced above. All paths are `src/boosti
 | Pointwise loss (E-step) | `ComputePointwiseLoss` | mixture_gbdt.cpp:1314 |
 | Gate config setup | `Init` | mixture_gbdt.cpp:134 |
 | Two-view gate state | `gate_proba_*` doc | mixture_gbdt.h:338–355 |
-| Leaf-refit dispatch (v0.7) | `RefitExpertsAndGate` | mixture_gbdt.cpp:2550 |
-| Leaf-refit trigger gate | `ShouldRefit` | mixture_gbdt.cpp:2522 |
-| Leaf-refit core (LightGBM) | `GBDT::RefitLeavesByGradients` | gbdt.cpp:266 |
+| Refit + regrow dispatch (v0.7 + v0.8) | `RefitExpertsAndGate` | mixture_gbdt.cpp:2605 |
+| Refit/regrow trigger gate (incl. v0.8 sliding window) | `ShouldRefit` | mixture_gbdt.cpp:2540 |
+| ELBO sliding window state (v0.8) | `elbo_history_` | mixture_gbdt.h |
+| Leaf-refit core (LightGBM, v0.7) | `GBDT::RefitLeavesByGradients` | gbdt.cpp:268 |
+| Partition re-grow core (LightGBM, v0.8) | `GBDT::RegrowTreeAt` | gbdt.cpp |
+| Partition delete (v0.8 ablation) | `GBDT::DeleteTreeAt` | gbdt.cpp |
 | Leaf-index lookup (LightGBM) | `Tree::PredictLeafIndices` | src/io/tree.cpp |
+| v0.8 Init guards (leaf_reuse incompat, regrow + refit) | `MixtureGBDT::Init` / `ResetConfig` | mixture_gbdt.cpp:84, 3841 |
