@@ -346,6 +346,14 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_refit_l2_reg",
   "mixture_refit_trigger",
   "mixture_refit_every_n",
+  "mixture_elbo_drop_threshold",
+  "mixture_elbo_plateau_threshold",
+  "mixture_elbo_window",
+  "mixture_elbo_min_iter_for_plateau",
+  "mixture_regrow_oldest_trees",
+  "mixture_regrow_per_fire",
+  "mixture_regrow_min_remaining",
+  "mixture_regrow_mode",
   "mixture_predict_output",
   "mixture_gate_max_depth",
   "mixture_gate_num_leaves",
@@ -774,6 +782,28 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetInt(params, "mixture_refit_every_n", &mixture_refit_every_n);
   CHECK_GT(mixture_refit_every_n, 0);
 
+  GetDouble(params, "mixture_elbo_drop_threshold", &mixture_elbo_drop_threshold);
+  CHECK_GE(mixture_elbo_drop_threshold, 0.0);
+
+  GetDouble(params, "mixture_elbo_plateau_threshold", &mixture_elbo_plateau_threshold);
+  CHECK_GE(mixture_elbo_plateau_threshold, 0.0);
+
+  GetInt(params, "mixture_elbo_window", &mixture_elbo_window);
+  CHECK_GE(mixture_elbo_window, 2);
+
+  GetInt(params, "mixture_elbo_min_iter_for_plateau", &mixture_elbo_min_iter_for_plateau);
+  CHECK_GE(mixture_elbo_min_iter_for_plateau, 0);
+
+  GetBool(params, "mixture_regrow_oldest_trees", &mixture_regrow_oldest_trees);
+
+  GetInt(params, "mixture_regrow_per_fire", &mixture_regrow_per_fire);
+  CHECK_GT(mixture_regrow_per_fire, 0);
+
+  GetInt(params, "mixture_regrow_min_remaining", &mixture_regrow_min_remaining);
+  CHECK_GE(mixture_regrow_min_remaining, 0);
+
+  GetString(params, "mixture_regrow_mode", &mixture_regrow_mode);
+
   GetString(params, "mixture_predict_output", &mixture_predict_output);
 
   GetInt(params, "mixture_gate_max_depth", &mixture_gate_max_depth);
@@ -1012,6 +1042,14 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_refit_l2_reg: " << mixture_refit_l2_reg << "]\n";
   str_buf << "[mixture_refit_trigger: " << mixture_refit_trigger << "]\n";
   str_buf << "[mixture_refit_every_n: " << mixture_refit_every_n << "]\n";
+  str_buf << "[mixture_elbo_drop_threshold: " << mixture_elbo_drop_threshold << "]\n";
+  str_buf << "[mixture_elbo_plateau_threshold: " << mixture_elbo_plateau_threshold << "]\n";
+  str_buf << "[mixture_elbo_window: " << mixture_elbo_window << "]\n";
+  str_buf << "[mixture_elbo_min_iter_for_plateau: " << mixture_elbo_min_iter_for_plateau << "]\n";
+  str_buf << "[mixture_regrow_oldest_trees: " << mixture_regrow_oldest_trees << "]\n";
+  str_buf << "[mixture_regrow_per_fire: " << mixture_regrow_per_fire << "]\n";
+  str_buf << "[mixture_regrow_min_remaining: " << mixture_regrow_min_remaining << "]\n";
+  str_buf << "[mixture_regrow_mode: " << mixture_regrow_mode << "]\n";
   str_buf << "[mixture_predict_output: " << mixture_predict_output << "]\n";
   str_buf << "[mixture_gate_max_depth: " << mixture_gate_max_depth << "]\n";
   str_buf << "[mixture_gate_num_leaves: " << mixture_gate_num_leaves << "]\n";
@@ -1207,6 +1245,14 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_refit_l2_reg", {}},
     {"mixture_refit_trigger", {}},
     {"mixture_refit_every_n", {}},
+    {"mixture_elbo_drop_threshold", {}},
+    {"mixture_elbo_plateau_threshold", {}},
+    {"mixture_elbo_window", {}},
+    {"mixture_elbo_min_iter_for_plateau", {}},
+    {"mixture_regrow_oldest_trees", {}},
+    {"mixture_regrow_per_fire", {}},
+    {"mixture_regrow_min_remaining", {}},
+    {"mixture_regrow_mode", {}},
     {"mixture_predict_output", {}},
     {"mixture_gate_max_depth", {}},
     {"mixture_gate_num_leaves", {}},
@@ -1402,6 +1448,14 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_refit_l2_reg", "double"},
     {"mixture_refit_trigger", "string"},
     {"mixture_refit_every_n", "int"},
+    {"mixture_elbo_drop_threshold", "double"},
+    {"mixture_elbo_plateau_threshold", "double"},
+    {"mixture_elbo_window", "int"},
+    {"mixture_elbo_min_iter_for_plateau", "int"},
+    {"mixture_regrow_oldest_trees", "bool"},
+    {"mixture_regrow_per_fire", "int"},
+    {"mixture_regrow_min_remaining", "int"},
+    {"mixture_regrow_mode", "string"},
     {"mixture_predict_output", "string"},
     {"mixture_gate_max_depth", "int"},
     {"mixture_gate_num_leaves", "int"},

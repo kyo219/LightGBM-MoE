@@ -1286,6 +1286,104 @@ struct Config {
   // check = >0
   int mixture_refit_every_n = 10;
 
+  // [doc-only] v0.8 elbo-trigger
+  // desc = drop threshold for the ``elbo`` refit trigger. Fires refit when the
+  //        sliding-window relative drop ``(elbo_t - elbo_{t-W}) / max(|elbo_{t-W}|, 1)``
+  //        falls below ``-mixture_elbo_drop_threshold``
+  // desc = lowered from the v0.7 hard-coded 0.05 because the cost asymmetry favors
+  //        sensitivity: false fire = one extra refit, missed fire = permanent basin
+  //        lock-in. Set to 0.05 to recover v0.7 drop sensitivity
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=0.0
+  double mixture_elbo_drop_threshold = 0.01;
+
+  // [doc-only] v0.8 elbo-trigger
+  // desc = plateau threshold for the ``elbo`` refit trigger. Fires refit when
+  //        ``(max(window) - min(window)) / max(|max(window)|, 1) < mixture_elbo_plateau_threshold``
+  //        AND ``moe_iter > mixture_warmup_iters + mixture_elbo_min_iter_for_plateau``
+  // desc = healthy Optuna-tuned configs do not drop ELBO; they plateau at sub-optimal
+  //        local fixed points where E-step output stops changing and M-step
+  //        contributions vanish. Plateau detection catches this where drop detection
+  //        cannot — empirically the v0.7 ``elbo`` trigger fired 0/6 datasets in the
+  //        v0.7 acceptance bench precisely because tuned configs do not drop
+  // desc = set to ``0`` to disable plateau detection (drop-only behavior, v0.7-like)
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=0.0
+  double mixture_elbo_plateau_threshold = 0.001;
+
+  // [doc-only] v0.8 elbo-trigger
+  // desc = sliding-window size (in iterations) for the ELBO history used by the
+  //        ``elbo`` trigger
+  // desc = larger window → more stable plateau detection, slower to react;
+  //        smaller window → faster, more false fires from natural ELBO noise
+  //        (one tree per iter ⇒ small per-iter ELBO jitter is normal)
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=2
+  int mixture_elbo_window = 10;
+
+  // [doc-only] v0.8 elbo-trigger
+  // desc = minimum number of post-warmup iterations before plateau detection can
+  //        fire. Effective floor is ``mixture_warmup_iters + mixture_elbo_min_iter_for_plateau``
+  // desc = warmup-adjacent ELBO is noisy (gate logits are still equilibrating to
+  //        ``log(r_init)``); firing too early would mistake the warmup transient
+  //        for a converged plateau
+  // desc = drop detection is unaffected by this — it can fire as soon as the
+  //        sliding window contains at least 2 ELBO samples
+  // desc = ignored when ``mixture_refit_trigger != "elbo"``
+  // check = >=0
+  int mixture_elbo_min_iter_for_plateau = 20;
+
+  // [doc-only] v0.8 partition re-grow
+  // desc = enable partition re-grow during refit fires (LightGBM-MoE v0.8)
+  // desc = when ``true`` AND ``mixture_refit_leaves=true``, each refit fire
+  //        first regrows the oldest ``mixture_regrow_per_fire`` trees per
+  //        expert (and gate, if ``mixture_gate_type='gbdt'``) by discarding
+  //        their split structures and rebuilding via the tree learner against
+  //        current r-weighted gradients, BEFORE running the standard v0.7
+  //        leaf-value refit
+  // desc = leaf refit (v0.7) only updates ``v_k^{(s)}`` (leaf values) with
+  //        ``S_k^{(s)}`` (split structure) frozen at construction-round r;
+  //        partition re-grow rewrites the (S, v) pair so split selection sees
+  //        current r — block coordinate ascent on the (split, leaf) pair
+  // desc = default ``false`` keeps v0.7 behavior bit-identical
+  // desc = auto-disabled at Init when ``mixture_gate_type='leaf_reuse'``
+  //        (refit/regrow rewrite expert leaves but leaf_reuse's gate GBDT
+  //        stays frozen, producing an asymmetric update)
+  // desc = see issue #41 / docs/v0.8/partition_regrow_design.md
+  bool mixture_regrow_oldest_trees = false;
+
+  // [doc-only] v0.8 partition re-grow
+  // desc = number of oldest trees to regrow per refit fire (per expert and,
+  //        when applicable, per gate). Larger = more aggressive basin escape,
+  //        higher per-fire wall cost (each regrow ≈ one tree-build)
+  // desc = ignored when ``mixture_regrow_oldest_trees=false``
+  // check = >0
+  int mixture_regrow_per_fire = 1;
+
+  // [doc-only] v0.8 partition re-grow
+  // desc = floor on the number of trees that must remain after regrow.
+  //        regrow stops when ``num_trees - regrow_per_fire < min_remaining``.
+  //        Prevents complete capacity destruction in extreme schedules where
+  //        the trigger fires many times early in training
+  // desc = ignored when ``mixture_regrow_oldest_trees=false``
+  // check = >=0
+  int mixture_regrow_min_remaining = 5;
+
+  // [doc-only] v0.8 partition re-grow
+  // type = enum
+  // options = replace, delete
+  // desc = how to handle the regrown slot:
+  // desc = ``replace`` (default): rebuild a new tree at the same slot via
+  //        ``tree_learner_->Train()``; ensemble size unchanged. Practical
+  //        choice — preserves capacity AND updates structure
+  // desc = ``delete``: remove the tree entirely; ensemble shrinks by
+  //        ``num_tree_per_iteration_`` per regrow. Subsequent training rounds
+  //        refill via normal MStepExperts. Included primarily as ablation to
+  //        isolate "partition update" effect from "capacity preservation"
+  //        effect — should not generally beat ``replace`` on tuned configs
+  // desc = ignored when ``mixture_regrow_oldest_trees=false``
+  std::string mixture_regrow_mode = "replace";
+
   // type = enum
   // options = value, value_and_regime, all
   // desc = output mode for mixture prediction
