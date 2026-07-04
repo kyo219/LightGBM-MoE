@@ -468,6 +468,50 @@ class Booster {
     *out_len = single_row_predictor->num_pred_in_one_row;
   }
 
+  /*!
+   * \brief Shared driver for the MoE predict entry points
+   *        (PredictRegime / PredictRegimeProba / PredictExpertPred).
+   *
+   * Centralizes three things the original free-function loops skipped:
+   *  - feature-count validation (every standard predict path errors on
+   *    ncol mismatch; these paths used to read past the row buffer),
+   *  - booster locking (MixtureGBDT::InitPredict mutates prediction state
+   *    on the gate and every expert, so this takes the same UNIQUE_LOCK
+   *    the rest of the mutating API uses),
+   *  - parameter parsing (start_iteration_predict / num_iteration_predict
+   *    were accepted and silently ignored before).
+   * The per-row callback runs under an OMP exception guard so a throw
+   * becomes a clean error return instead of std::terminate.
+   */
+  template <typename PerRowFn>
+  void PredictMoERows(int32_t nrow, int ncol, const char* parameter,
+                      const char* caller_name, PerRowFn per_row_fn) {
+    auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(boosting_.get());
+    if (mixture == nullptr) {
+      Log::Fatal("%s can only be used with MoE models", caller_name);
+    }
+    auto param = Config::Str2Map(parameter);
+    Config config;
+    config.Set(param);
+    OMP_SET_NUM_THREADS(config.num_threads);
+    if (!config.predict_disable_shape_check && ncol != boosting_->MaxFeatureIdx() + 1) {
+      Log::Fatal("The number of features in data (%d) is not the same as it was in training data (%d).\n"
+                 "You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.",
+                 ncol, boosting_->MaxFeatureIdx() + 1);
+    }
+    UNIQUE_LOCK(mutex_)
+    mixture->InitPredict(config.start_iteration_predict,
+                         config.num_iteration_predict, false);
+    OMP_INIT_EX();
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (int32_t i = 0; i < nrow; ++i) {
+      OMP_LOOP_EX_BEGIN();
+      per_row_fn(mixture, i);
+      OMP_LOOP_EX_END();
+    }
+    OMP_THROW_EX();
+  }
+
   std::shared_ptr<Predictor> CreatePredictor(int start_iteration, int num_iteration, int predict_type, int ncol, const Config& config) const {
     if (!config.predict_disable_shape_check && ncol != boosting_->MaxFeatureIdx() + 1) {
       Log::Fatal("The number of features in data (%d) is not the same as it was in training data (%d).\n" \
@@ -2861,25 +2905,15 @@ int LGBM_BoosterPredictRegime(BoosterHandle handle,
                                int32_t* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(ref_booster->GetMutableBoosting());
-  if (mixture == nullptr) {
-    Log::Fatal("LGBM_BoosterPredictRegime can only be used with MoE models");
-  }
-
-  // Initialize for prediction (required before PredictRaw calls)
-  mixture->InitPredict(0, -1, false);
-
-  // Get row accessor based on data type
   auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
-
-  // Predict regime for each row
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (int32_t i = 0; i < nrow; ++i) {
-    auto row = get_row(i);
-    int regime;
-    mixture->PredictRegime(row.data(), &regime);
-    out_result[i] = regime;
-  }
+  ref_booster->PredictMoERows(
+      nrow, ncol, parameter, "LGBM_BoosterPredictRegime",
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i) {
+        auto row = get_row(i);
+        int regime;
+        mixture->PredictRegime(row.data(), &regime);
+        out_result[i] = regime;
+      });
   *out_len = nrow;
   API_END();
 }
@@ -2895,26 +2929,21 @@ int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
                                     double* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(ref_booster->GetMutableBoosting());
-  if (mixture == nullptr) {
-    Log::Fatal("LGBM_BoosterPredictRegimeProba can only be used with MoE models");
-  }
-
-  // Initialize for prediction (required before PredictRaw calls)
-  mixture->InitPredict(0, -1, false);
-
-  int num_experts = mixture->NumExperts();
-
-  // Get row accessor based on data type
   auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
-
-  // Predict regime probabilities for each row
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (int32_t i = 0; i < nrow; ++i) {
-    auto row = get_row(i);
-    mixture->PredictRegimeProba(row.data(), out_result + static_cast<size_t>(i) * num_experts);
+  int64_t total = 0;
+  ref_booster->PredictMoERows(
+      nrow, ncol, parameter, "LGBM_BoosterPredictRegimeProba",
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i) {
+        auto row = get_row(i);
+        mixture->PredictRegimeProba(
+            row.data(),
+            out_result + static_cast<size_t>(i) * mixture->NumExperts());
+      });
+  {
+    auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(ref_booster->GetBoosting());
+    total = static_cast<int64_t>(nrow) * (mixture != nullptr ? mixture->NumExperts() : 0);
   }
-  *out_len = static_cast<int64_t>(nrow) * num_experts;
+  *out_len = total;
   API_END();
 }
 
@@ -2929,26 +2958,21 @@ int LGBM_BoosterPredictExpertPred(BoosterHandle handle,
                                    double* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto mixture = dynamic_cast<LightGBM::MixtureGBDT*>(ref_booster->GetMutableBoosting());
-  if (mixture == nullptr) {
-    Log::Fatal("LGBM_BoosterPredictExpertPred can only be used with MoE models");
-  }
-
-  // Initialize for prediction (required before PredictRaw calls)
-  mixture->InitPredict(0, -1, false);
-
-  int num_experts = mixture->NumExperts();
-
-  // Get row accessor based on data type
   auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
-
-  // Predict expert predictions for each row
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (int32_t i = 0; i < nrow; ++i) {
-    auto row = get_row(i);
-    mixture->PredictExpertPred(row.data(), out_result + static_cast<size_t>(i) * num_experts);
+  int64_t total = 0;
+  ref_booster->PredictMoERows(
+      nrow, ncol, parameter, "LGBM_BoosterPredictExpertPred",
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i) {
+        auto row = get_row(i);
+        mixture->PredictExpertPred(
+            row.data(),
+            out_result + static_cast<size_t>(i) * mixture->NumExperts());
+      });
+  {
+    auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(ref_booster->GetBoosting());
+    total = static_cast<int64_t>(nrow) * (mixture != nullptr ? mixture->NumExperts() : 0);
   }
-  *out_len = static_cast<int64_t>(nrow) * num_experts;
+  *out_len = total;
   API_END();
 }
 
