@@ -31,7 +31,9 @@ def diagnose_moe(model, X, y, print_report=True):
     regime_proba = model.predict_regime_proba(X)
     expert_preds = model.predict_expert_pred(X)
     moe_preds = model.predict(X)
-    regime_pred = model.predict_regime(X)
+    # argmax of gate probabilities — identical to predict_regime(X),
+    # without a redundant prediction pass.
+    regime_pred = np.argmax(regime_proba, axis=1)
     K = regime_proba.shape[1]
 
     # =========================================================================

@@ -603,3 +603,201 @@ class TestMixtureRefitLeaves:
                 "sync with the refitted leaf values"
             ),
         )
+
+
+class _FakeMoEModel:
+    """Deterministic duck-typed stand-in for a trained MoE Booster.
+
+    Exposes exactly the interface prune_experts / merge_experts /
+    PrunedMoEModel consume, so merge/prune behavior can be tested without
+    relying on training to randomly produce correlated experts.
+    """
+
+    def __init__(self, expert_preds, regime_proba):
+        self._expert_preds = np.asarray(expert_preds, dtype=np.float64)
+        self._regime_proba = np.asarray(regime_proba, dtype=np.float64)
+
+    def is_mixture(self):
+        return True
+
+    def num_experts(self):
+        return self._expert_preds.shape[1]
+
+    def predict_regime_proba(self, X):
+        return self._regime_proba
+
+    def predict_regime(self, X):
+        return np.argmax(self._regime_proba, axis=1).astype(np.int32)
+
+    def predict_expert_pred(self, X):
+        return self._expert_preds
+
+    def predict(self, X):
+        return (self._regime_proba * self._expert_preds).sum(axis=1)
+
+
+class TestAutoKSelection:
+    """Test select_num_experts with IC-based criteria."""
+
+    def test_select_num_experts_bic(self):
+        """BIC criterion runs end-to-end (no dump_model dependency) and picks a candidate K."""
+        X, y, _ = make_toy_regression_data(n_samples=200)
+        train_data = lgb.Dataset(X, label=y, free_raw_data=False)
+
+        params = {
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
+        }
+
+        best_k, results = lgb.select_num_experts(
+            params,
+            train_data,
+            k_range=[2, 3],
+            criterion="bic",
+            num_boost_round=10,
+            verbose=False,
+        )
+
+        assert best_k in (2, 3)
+        assert results["k_values"] == [2, 3]
+        # Every candidate must yield a finite BIC — inf means its evaluation failed.
+        assert all(np.isfinite(v) for v in results["criterion_values"])
+        # Parameter counts come from the model string and must be positive.
+        assert all(d["n_params"] > 0 for d in results["details"])
+
+
+class TestExpertPruning:
+    """Test prune_experts / merge_experts / PrunedMoEModel merge semantics."""
+
+    @staticmethod
+    def _make_chained_fake_model(n=400, seed=0):
+        """Three mutually-correlated experts with utilizations ~20/15/65%.
+
+        Noise levels are engineered so corr(E0, E1) > corr(E0, E2) and
+        corr(E1, E2): the merge order is then E1 -> E0 followed by
+        E0 -> E2 — a chained merge where survivor E0 later becomes a victim.
+        """
+        rng = np.random.RandomState(seed)
+        t = np.linspace(0.0, 1.0, n)
+        base = np.sin(2 * np.pi * t) + t
+        expert_preds = np.column_stack(
+            [
+                base + 1e-4 * rng.randn(n),  # E0: near-identical to E1
+                base + 1e-4 * rng.randn(n),  # E1
+                base + 5e-2 * rng.randn(n),  # E2: correlated, but less tightly
+            ]
+        )
+        # Gate: E0 wins the first 20% of rows, E1 the next 15%, E2 the rest.
+        regime_proba = np.full((n, 3), 0.1)
+        cut0 = int(n * 0.20)
+        cut1 = int(n * 0.35)
+        regime_proba[:cut0, 0] = 0.8
+        regime_proba[cut0:cut1, 1] = 0.8
+        regime_proba[cut1:, 2] = 0.8
+        regime_proba /= regime_proba.sum(axis=1, keepdims=True)
+        return _FakeMoEModel(expert_preds, regime_proba)
+
+    def test_prune_experts_chained_merge(self):
+        """Chained merges (E1 -> E0, then E0 -> E2) must not drop any expert."""
+        model = self._make_chained_fake_model()
+        X = np.zeros((400, 1))  # features are unused by the fake model
+
+        pruned = lgb.prune_experts(
+            model,
+            X,
+            correlation_threshold=0.95,
+            min_utilization=0.02,
+            print_report=False,
+        )
+
+        report = pruned.pruning_report
+        active = report["active_indices"]
+        # All three experts correlate, so the chain collapses everything into E2.
+        assert active == [2]
+        # merge_weights keys must all be active experts...
+        assert set(pruned.merge_weights).issubset(set(active))
+        # ...and the surviving group must cover the survivor plus ALL victims.
+        assert set(pruned.merge_weights[2]) == {0, 1, 2}
+        for survivor, weights in pruned.merge_weights.items():
+            assert survivor in weights
+            np.testing.assert_allclose(sum(weights.values()), 1.0, rtol=1e-12)
+        # No utilization mass lost: active groups cover ~100% of samples.
+        total_util = sum(u for u, _ in report["active_utilizations"].values())
+        np.testing.assert_allclose(total_util, 1.0, atol=1e-9)
+        # The pruned model still yields valid, normalised gate probabilities.
+        proba = pruned.predict_regime_proba(X)
+        assert proba.shape == (400, 1)
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, rtol=1e-9)
+        assert not np.any(np.isnan(pruned.predict(X)))
+
+    def test_pruned_model_merge_preserves_prediction(self):
+        """Merging two identical experts must leave the mixture prediction unchanged.
+
+        The victim's gate mass is donated to its survivor (not redistributed
+        proportionally over all experts), so E0 == E1 merged into one expert
+        is prediction-preserving even with a third, different expert present.
+        """
+        rng = np.random.RandomState(1)
+        n = 300
+        p = rng.randn(n)
+        q = p + 3.0 + rng.randn(n)  # a genuinely different third expert
+        expert_preds = np.column_stack([p, p, q])  # E0 == E1 exactly
+        raw = rng.rand(n, 3) + 0.1
+        regime_proba = raw / raw.sum(axis=1, keepdims=True)
+        model = _FakeMoEModel(expert_preds, regime_proba)
+        X = np.zeros((n, 1))
+
+        merged = lgb.merge_experts(model, X, [[0, 1]], print_report=False)
+
+        np.testing.assert_allclose(
+            merged.predict(X),
+            model.predict(X),
+            rtol=1e-12,
+            err_msg="merging two identical experts changed the mixture prediction",
+        )
+
+
+class TestMixtureIterationRange:
+    """Test start_iteration / num_iteration support in MoE predict methods."""
+
+    def test_predict_regime_num_iteration(self):
+        """num_iteration truncates the ensemble used by the MoE predict methods."""
+        X, y, _ = make_toy_regression_data(n_samples=300)
+        train_data = lgb.Dataset(X, label=y)
+
+        params = {
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 3,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
+        }
+
+        bst = lgb.train(params, train_data, num_boost_round=30)
+
+        proba_early = bst.predict_regime_proba(X, num_iteration=5)
+        proba_full = bst.predict_regime_proba(X)
+
+        # Shape / validity hold regardless of the installed lib's support level.
+        assert proba_early.shape == proba_full.shape == (300, 3)
+        assert not np.any(np.isnan(proba_early))
+        np.testing.assert_allclose(proba_early.sum(axis=1), 1.0, rtol=1e-6)
+
+        # The sibling methods accept the same iteration-range arguments.
+        regimes_early = bst.predict_regime(X, num_iteration=5)
+        assert regimes_early.shape == (300,)
+        expert_early = bst.predict_expert_pred(X, num_iteration=5)
+        assert expert_early.shape == (300, 3)
+        assert not np.any(np.isnan(expert_early))
+
+        # Truncating to 5 of 30 iterations must change the gate output.
+        assert np.abs(proba_early - proba_full).max() > 1e-12, (
+            "num_iteration=5 produced gate probabilities identical to the full "
+            "model — start/num_iteration_predict appears to be ignored by the C side"
+        )

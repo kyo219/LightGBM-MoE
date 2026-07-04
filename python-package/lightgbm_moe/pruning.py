@@ -18,14 +18,17 @@ class PrunedMoEModel:
         Boolean mask of shape ``(K_orig,)`` indicating which experts are active.
     merge_weights : dict
         Mapping ``{survivor_idx: {orig_idx: weight, ...}}`` for merged experts.
+    merged_into : dict
+        Mapping ``{victim_idx: survivor_idx}`` for merged (not pruned) experts.
     pruning_report : dict
         Summary of the pruning/merging operations performed.
     """
 
-    def __init__(self, original_model, active_mask, merge_weights=None, pruning_report=None):
+    def __init__(self, original_model, active_mask, merge_weights=None, merged_into=None, pruning_report=None):
         self.original_model = original_model
         self.active_mask = np.asarray(active_mask, dtype=bool)
         self.merge_weights = merge_weights or {}
+        self.merged_into = merged_into or {}
         self.pruning_report = pruning_report or {}
 
     def num_experts(self):
@@ -39,11 +42,19 @@ class PrunedMoEModel:
     def predict_regime_proba(self, X):
         """Return gate probabilities for active experts only, renormalised.
 
+        Merge victims donate their gate mass to their survivor (so merging
+        two identical experts is prediction-preserving); mass of genuinely
+        pruned experts is redistributed proportionally via renormalisation.
+
         Returns
         -------
         np.ndarray of shape ``(N, K_active)``
         """
         full_proba = self.original_model.predict_regime_proba(X)  # (N, K_orig)
+        if self.merged_into:
+            full_proba = full_proba.copy()
+            for victim, survivor in self.merged_into.items():
+                full_proba[:, survivor] += full_proba[:, victim]
         active_proba = full_proba[:, self.active_mask]  # (N, K_active)
         row_sums = active_proba.sum(axis=1, keepdims=True)
         row_sums = np.maximum(row_sums, 1e-15)
@@ -168,24 +179,29 @@ def prune_experts(
             survivor, victim = j, i
 
         active[victim] = False
+        # Transitive remap (union-find style): experts previously merged into
+        # the new victim now belong to its survivor, so chained merges
+        # (A -> B, then B -> C) never lose A's membership.
+        for prev_victim, prev_surv in merged_into.items():
+            if prev_surv == victim:
+                merged_into[prev_victim] = survivor
         merged_into[victim] = survivor
 
-        # Build merge weight map for the survivor
-        # Collect all experts that are now merged into this survivor
-        group = [survivor]
-        for prev_victim, prev_surv in merged_into.items():
-            if prev_surv == survivor and prev_victim != victim:
-                group.append(prev_victim)
-        group.append(victim)
+        actions.append(f"  E{victim}: merged into E{survivor} (corr={corr:.2f})")
 
+    # Build merge weight maps once all merges are resolved, so every key is an
+    # active survivor and each weight dict covers the survivor plus all of its
+    # (transitively) merged victims.
+    survivor_groups = {}
+    for victim, survivor in merged_into.items():
+        survivor_groups.setdefault(survivor, [survivor]).append(victim)
+    for survivor, group in survivor_groups.items():
         total_util = sum(utilization[g] for g in group)
         if total_util > 0:
             weights = {g: float(utilization[g] / total_util) for g in group}
         else:
             weights = {g: 1.0 / len(group) for g in group}
         merge_weights[survivor] = weights
-
-        actions.append(f"  E{victim}: merged into E{survivor} (corr={corr:.2f})")
 
     # Safety: ensure at least one expert remains
     if not active.any():
@@ -221,6 +237,7 @@ def prune_experts(
         original_model=model,
         active_mask=active,
         merge_weights=merge_weights,
+        merged_into=merged_into,
         pruning_report=report,
     )
 
@@ -256,6 +273,7 @@ def merge_experts(
 
     active = np.ones(K, dtype=bool)
     merge_weights = {}
+    merged_into = {}
     actions = []
 
     for group in expert_groups:
@@ -273,6 +291,7 @@ def merge_experts(
 
         for v in victims:
             active[v] = False
+            merged_into[v] = survivor
             actions.append(f"  E{v}: merged into E{survivor}")
 
     active_indices_final = list(np.where(active)[0])
@@ -292,6 +311,7 @@ def merge_experts(
         original_model=model,
         active_mask=active,
         merge_weights=merge_weights,
+        merged_into=merged_into,
         pruning_report=report,
     )
 

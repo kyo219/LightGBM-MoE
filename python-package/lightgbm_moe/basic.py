@@ -4789,19 +4789,75 @@ class Booster:
         )
         return out.value
 
+    def _moe_data_to_array(self, data: _LGBM_PredictDataType) -> np.ndarray:
+        """Convert MoE prediction input to a contiguous 2-D numpy array.
+
+        int8 arrays are preserved; pandas DataFrames are processed with the
+        booster's stored pandas_categorical mapping — the same path
+        ``predict()`` uses — so pandas-categorical columns are encoded
+        consistently with training.
+        """
+        if isinstance(data, np.ndarray):
+            if data.dtype == np.int8:
+                return np.ascontiguousarray(data)
+            return np.ascontiguousarray(data, dtype=np.float64)
+        elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
+            df_array = _data_from_pandas(
+                data=data,
+                feature_name="auto",
+                categorical_feature="auto",
+                pandas_categorical=self.pandas_categorical,
+            )[0]
+            return np.ascontiguousarray(df_array, dtype=np.float64)
+        else:
+            raise TypeError(f"Unsupported data type: {type(data)}")
+
+    def _moe_pred_parameter_str(
+        self,
+        start_iteration: int,
+        num_iteration: Optional[int],
+        kwargs: Dict[str, Any],
+    ) -> str:
+        """Build the C API parameter string for MoE prediction methods.
+
+        Mirrors ``predict()`` semantics for ``num_iteration=None``: use the
+        best iteration when one exists and ``start_iteration <= 0``, otherwise
+        no limit (-1). Remaining kwargs are appended as extra parameters.
+        """
+        if num_iteration is None:
+            if start_iteration <= 0:
+                num_iteration = self.best_iteration
+            else:
+                num_iteration = -1
+        pred_parameter = f"start_iteration_predict={start_iteration} num_iteration_predict={num_iteration}"
+        extra = _param_dict_to_str(kwargs)
+        if extra:
+            pred_parameter += " " + extra
+        return pred_parameter
+
     def predict_regime(
         self,
         data: _LGBM_PredictDataType,
+        start_iteration: int = 0,
+        num_iteration: Optional[int] = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Predict regime (argmax of gate probabilities) for MoE model.
 
         Parameters
         ----------
-        data : numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
+        data : numpy 2-D array or pandas DataFrame
             Data source for prediction.
+        start_iteration : int, optional (default=0)
+            Start index of the iteration to predict.
+            If <= 0, starts from the first iteration.
+        num_iteration : int or None, optional (default=None)
+            Total number of iterations used in the prediction.
+            If None, if the best iteration exists and start_iteration <= 0, the best iteration is used;
+            otherwise, all iterations from ``start_iteration`` are used (no limits).
+            If <= 0, all iterations from ``start_iteration`` are used (no limits).
         **kwargs
-            Other parameters for the prediction.
+            Other parameters for the prediction, forwarded to the C API parameter string.
 
         Returns
         -------
@@ -4816,16 +4872,8 @@ class Booster:
         if not self.is_mixture():
             raise LightGBMError("predict_regime can only be used with MoE models")
 
-        # Convert data to numpy array, preserving int8
-        if isinstance(data, np.ndarray):
-            if data.dtype == np.int8:
-                data_array = np.ascontiguousarray(data)
-            else:
-                data_array = np.ascontiguousarray(data, dtype=np.float64)
-        elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
-            data_array = np.ascontiguousarray(data.values, dtype=np.float64)
-        else:
-            raise TypeError(f"Unsupported data type: {type(data)}")
+        data_array = self._moe_data_to_array(data)
+        pred_parameter = self._moe_pred_parameter_str(start_iteration, num_iteration, kwargs)
 
         nrow, ncol = data_array.shape
 
@@ -4847,7 +4895,7 @@ class Booster:
                 ctypes.c_int32(nrow),
                 ctypes.c_int32(ncol),
                 ctypes.c_int(1),  # is_row_major
-                ctypes.c_char_p(b""),
+                _c_str(pred_parameter),
                 ctypes.byref(out_len),
                 out_result.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
             )
@@ -4858,16 +4906,26 @@ class Booster:
     def predict_regime_proba(
         self,
         data: _LGBM_PredictDataType,
+        start_iteration: int = 0,
+        num_iteration: Optional[int] = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Predict regime probabilities (gate output) for MoE model.
 
         Parameters
         ----------
-        data : numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
+        data : numpy 2-D array or pandas DataFrame
             Data source for prediction.
+        start_iteration : int, optional (default=0)
+            Start index of the iteration to predict.
+            If <= 0, starts from the first iteration.
+        num_iteration : int or None, optional (default=None)
+            Total number of iterations used in the prediction.
+            If None, if the best iteration exists and start_iteration <= 0, the best iteration is used;
+            otherwise, all iterations from ``start_iteration`` are used (no limits).
+            If <= 0, all iterations from ``start_iteration`` are used (no limits).
         **kwargs
-            Other parameters for the prediction.
+            Other parameters for the prediction, forwarded to the C API parameter string.
 
         Returns
         -------
@@ -4884,16 +4942,8 @@ class Booster:
 
         num_experts = self.num_experts()
 
-        # Convert data to numpy array, preserving int8
-        if isinstance(data, np.ndarray):
-            if data.dtype == np.int8:
-                data_array = np.ascontiguousarray(data)
-            else:
-                data_array = np.ascontiguousarray(data, dtype=np.float64)
-        elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
-            data_array = np.ascontiguousarray(data.values, dtype=np.float64)
-        else:
-            raise TypeError(f"Unsupported data type: {type(data)}")
+        data_array = self._moe_data_to_array(data)
+        pred_parameter = self._moe_pred_parameter_str(start_iteration, num_iteration, kwargs)
 
         nrow, ncol = data_array.shape
 
@@ -4915,7 +4965,7 @@ class Booster:
                 ctypes.c_int32(nrow),
                 ctypes.c_int32(ncol),
                 ctypes.c_int(1),  # is_row_major
-                ctypes.c_char_p(b""),
+                _c_str(pred_parameter),
                 ctypes.byref(out_len),
                 out_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             )
@@ -4926,16 +4976,26 @@ class Booster:
     def predict_expert_pred(
         self,
         data: _LGBM_PredictDataType,
+        start_iteration: int = 0,
+        num_iteration: Optional[int] = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Predict individual expert predictions for MoE model.
 
         Parameters
         ----------
-        data : numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
+        data : numpy 2-D array or pandas DataFrame
             Data source for prediction.
+        start_iteration : int, optional (default=0)
+            Start index of the iteration to predict.
+            If <= 0, starts from the first iteration.
+        num_iteration : int or None, optional (default=None)
+            Total number of iterations used in the prediction.
+            If None, if the best iteration exists and start_iteration <= 0, the best iteration is used;
+            otherwise, all iterations from ``start_iteration`` are used (no limits).
+            If <= 0, all iterations from ``start_iteration`` are used (no limits).
         **kwargs
-            Other parameters for the prediction.
+            Other parameters for the prediction, forwarded to the C API parameter string.
 
         Returns
         -------
@@ -4952,16 +5012,8 @@ class Booster:
 
         num_experts = self.num_experts()
 
-        # Convert data to numpy array, preserving int8
-        if isinstance(data, np.ndarray):
-            if data.dtype == np.int8:
-                data_array = np.ascontiguousarray(data)
-            else:
-                data_array = np.ascontiguousarray(data, dtype=np.float64)
-        elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
-            data_array = np.ascontiguousarray(data.values, dtype=np.float64)
-        else:
-            raise TypeError(f"Unsupported data type: {type(data)}")
+        data_array = self._moe_data_to_array(data)
+        pred_parameter = self._moe_pred_parameter_str(start_iteration, num_iteration, kwargs)
 
         nrow, ncol = data_array.shape
 
@@ -4983,7 +5035,7 @@ class Booster:
                 ctypes.c_int32(nrow),
                 ctypes.c_int32(ncol),
                 ctypes.c_int(1),  # is_row_major
-                ctypes.c_char_p(b""),
+                _c_str(pred_parameter),
                 ctypes.byref(out_len),
                 out_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             )
@@ -5076,6 +5128,8 @@ class Booster:
     def predict_regime_proba_markov(
         self,
         data: _LGBM_PredictDataType,
+        start_iteration: int = 0,
+        num_iteration: Optional[int] = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Predict regime probabilities with Markov smoothing for MoE model.
@@ -5086,10 +5140,18 @@ class Booster:
 
         Parameters
         ----------
-        data : numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
+        data : numpy 2-D array or pandas DataFrame
             Data source for prediction. Should be sorted in time order.
+        start_iteration : int, optional (default=0)
+            Start index of the iteration to predict.
+            If <= 0, starts from the first iteration.
+        num_iteration : int or None, optional (default=None)
+            Total number of iterations used in the prediction.
+            If None, if the best iteration exists and start_iteration <= 0, the best iteration is used;
+            otherwise, all iterations from ``start_iteration`` are used (no limits).
+            If <= 0, all iterations from ``start_iteration`` are used (no limits).
         **kwargs
-            Other parameters for the prediction.
+            Other parameters for the prediction, forwarded to ``predict_regime_proba``.
 
         Returns
         -------
@@ -5112,18 +5174,11 @@ class Booster:
 
         num_experts = self.num_experts()
 
-        # Convert data to numpy array
-        if isinstance(data, np.ndarray):
-            data_array = np.ascontiguousarray(data, dtype=np.float64)
-        elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
-            data_array = np.ascontiguousarray(data.values, dtype=np.float64)
-        else:
-            raise TypeError(f"Unsupported data type: {type(data)}")
-
-        nrow, ncol = data_array.shape
-
-        # Get base regime probabilities
-        base_proba = self.predict_regime_proba(data)
+        # Get base regime probabilities (data conversion happens there)
+        base_proba = self.predict_regime_proba(
+            data, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
+        )
+        nrow = base_proba.shape[0]
 
         # Get lambda from model params
         params = self.params
@@ -5147,6 +5202,8 @@ class Booster:
     def predict_markov(
         self,
         data: _LGBM_PredictDataType,
+        start_iteration: int = 0,
+        num_iteration: Optional[int] = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """Make predictions with Markov-style regime switching for MoE model.
@@ -5157,10 +5214,18 @@ class Booster:
 
         Parameters
         ----------
-        data : numpy array, pandas DataFrame, scipy.sparse or pyarrow Table
+        data : numpy 2-D array or pandas DataFrame
             Data source for prediction. Should be sorted in time order.
+        start_iteration : int, optional (default=0)
+            Start index of the iteration to predict.
+            If <= 0, starts from the first iteration.
+        num_iteration : int or None, optional (default=None)
+            Total number of iterations used in the prediction.
+            If None, if the best iteration exists and start_iteration <= 0, the best iteration is used;
+            otherwise, all iterations from ``start_iteration`` are used (no limits).
+            If <= 0, all iterations from ``start_iteration`` are used (no limits).
         **kwargs
-            Other parameters for the prediction.
+            Other parameters for the prediction, forwarded to the underlying prediction calls.
 
         Returns
         -------
@@ -5176,10 +5241,14 @@ class Booster:
             raise LightGBMError("predict_markov can only be used with MoE models")
 
         # Get expert predictions
-        expert_preds = self.predict_expert_pred(data)  # (nrow, n_experts)
+        expert_preds = self.predict_expert_pred(
+            data, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
+        )  # (nrow, n_experts)
 
         # Get Markov-smoothed regime probabilities
-        regime_proba = self.predict_regime_proba_markov(data)  # (nrow, n_experts)
+        regime_proba = self.predict_regime_proba_markov(
+            data, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
+        )  # (nrow, n_experts)
 
         # Weighted sum: prediction = sum_k(proba[k] * expert[k])
         return (regime_proba * expert_preds).sum(axis=1)
