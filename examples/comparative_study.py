@@ -114,6 +114,21 @@ ROUTING_CHOICES = ["token_choice", "expert_choice"]
 E_STEP_MODES = ["em", "loss_only", "gate_only"]
 SMOOTHING_CHOICES = ["none", "ema", "markov"]
 
+# "wide" search space (--moe-space wide). Differences vs standard:
+#   - mixture_init gains gmm_features / kmeans_features — the values the
+#     README Limitations section RECOMMENDS but the study never searched
+#     (found in the methodology audit).
+#   - K widened to 2–6 (README: "search 2-6 for your data").
+#   - Previously-frozen knobs enter the space: gate temperature annealing
+#     (T_init + final/init ratio — parameterized as a ratio so the Optuna
+#     value space stays static), Dirichlet shrinkage
+#     (mixture_gate_entropy_lambda), expert dropout (constant schedule), and
+#     the auxiliary load-balance penalty (mixture_load_balance_alpha).
+# Wide mode adds ~6 dimensions, so give it proportionally more trials —
+# search-space dilution is real (measured in the v0.8 500-trial study).
+WIDE_INIT_CHOICES = ["random", "gmm", "gmm_features", "kmeans_features",
+                     "tree_hierarchical", "uniform"]
+
 
 # =============================================================================
 # CV with per-trial timing
@@ -295,7 +310,8 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
 
 
 def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
-                       refit_mode: str = "search", refit_decay: float = 0.0):
+                       refit_mode: str = "search", refit_decay: float = 0.0,
+                       space: str = "standard"):
     """Build an Optuna objective that trains MoE.
 
     `refit_mode` controls how the v0.7 / v0.8 refit + regrow machinery is
@@ -320,11 +336,15 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
     forced-on triggers; in "search" mode the decay is itself a search
     variable.
     """
+    wide = (space == "wide")
+    init_choices = WIDE_INIT_CHOICES if wide else INIT_CHOICES
+    k_max = 6 if wide else 4
+
     def objective(trial):
         smoothing = trial.suggest_categorical("mixture_r_smoothing", SMOOTHING_CHOICES)
         routing_mode = trial.suggest_categorical("mixture_routing_mode", ROUTING_CHOICES)
         gate_type = trial.suggest_categorical("mixture_gate_type", GATE_CHOICES)
-        num_experts = trial.suggest_int("mixture_num_experts", 2, 4)
+        num_experts = trial.suggest_int("mixture_num_experts", 2, k_max)
 
         params = {
             "objective": "regression",
@@ -342,7 +362,7 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
-            "mixture_init": trial.suggest_categorical("mixture_init", INIT_CHOICES),
+            "mixture_init": trial.suggest_categorical("mixture_init", init_choices),
             "mixture_num_experts": num_experts,
             # NOTE (audit fix): mixture_e_step_alpha used to be searched here
             # (0.1–3.0), but it is IGNORED whenever mixture_estimate_variance
@@ -363,12 +383,30 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             "mixture_gate_type": gate_type,
         }
 
+        if wide:
+            # Previously frozen knobs (methodology audit follow-up).
+            params["mixture_expert_dropout_rate"] = trial.suggest_float(
+                "mixture_expert_dropout_rate", 0.0, 0.3)
+            params["mixture_load_balance_alpha"] = trial.suggest_float(
+                "mixture_load_balance_alpha", 0.0, 0.5)
+
         if gate_type in ("gbdt", "leaf_reuse"):
             params["mixture_gate_max_depth"] = trial.suggest_int("mixture_gate_max_depth", 2, 10)
             params["mixture_gate_num_leaves"] = trial.suggest_int("mixture_gate_num_leaves", 4, 64)
             params["mixture_gate_learning_rate"] = trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.5, log=True)
             params["mixture_gate_lambda_l2"] = trial.suggest_float("mixture_gate_lambda_l2", 1e-3, 10.0, log=True)
             params["mixture_gate_iters_per_round"] = trial.suggest_int("mixture_gate_iters_per_round", 1, 3)
+            if wide:
+                # Dirichlet shrinkage toward uniform routing (anti-collapse).
+                params["mixture_gate_entropy_lambda"] = trial.suggest_float(
+                    "mixture_gate_entropy_lambda", 0.0, 0.3)
+                # Temperature annealing, parameterized as (T_init, final/init
+                # ratio) so the value space is static for TPE. ratio=1.0 means
+                # no annealing; T defaults to 1.0/1.0 in standard mode.
+                t_init = trial.suggest_float("mixture_gate_temperature_init", 0.5, 3.0)
+                t_ratio = trial.suggest_float("gate_temp_final_ratio", 0.2, 1.0)
+                params["mixture_gate_temperature_init"] = t_init
+                params["mixture_gate_temperature_final"] = t_init * t_ratio
         if gate_type == "leaf_reuse":
             params["mixture_gate_retrain_interval"] = trial.suggest_int("mixture_gate_retrain_interval", 5, 30)
 
@@ -894,7 +932,8 @@ def run_study(dataset_name: str, X_search, y_search, X_hold, y_hold,
         ("naive-ensemble", lambda log: make_naive_ensemble_objective(X, y, cfg, log)),
         (moe_variant_name, lambda log: make_moe_objective(X, y, cfg, log,
                                                           refit_mode=refit_mode,
-                                                          refit_decay=refit_decay)),
+                                                          refit_decay=refit_decay,
+                                                          space=getattr(cfg, "moe_space", "standard"))),
     ]
     selected_variants = getattr(cfg, "variants", None)
     if selected_variants:
@@ -1027,6 +1066,11 @@ def main():
                         "default 'search' = let Optuna pick (v0.8 study mode)")
     p.add_argument("--moe-refit-decay", type=float, default=0.0,
                    help="leaf blend factor (0=replace, 1=no-op); used when mode != off")
+    p.add_argument("--moe-space", choices=["standard", "wide"], default="standard",
+                   help="MoE search space. 'wide' adds gmm_features/kmeans_features "
+                        "inits, K up to 6, gate temperature annealing, entropy "
+                        "lambda, expert dropout, load-balance alpha (~6 extra "
+                        "dims — budget more trials)")
     p.add_argument("--variants", type=str, default=None,
                    help="comma-separated subset of {naive-lightgbm,naive-ensemble,moe}; "
                         "useful with --moe-refit-mode to skip naive baselines on ablation runs")
@@ -1046,7 +1090,7 @@ def main():
         "config": {"trials": args.trials, "n_jobs": args.n_jobs, "rounds": args.rounds,
                    "splits": args.splits, "seeds": seeds, "holdout_frac": args.holdout_frac,
                    "datasets": selected, "es_fraction": ES_FRACTION, "cv_gap": CV_GAP,
-                   "moe_refit_mode": args.moe_refit_mode},
+                   "moe_refit_mode": args.moe_refit_mode, "moe_space": args.moe_space},
         "provenance": collect_provenance(),
         "runs": {},
     }
@@ -1057,6 +1101,7 @@ def main():
                               num_boost_round=args.rounds)
         cfg.moe_refit_mode = args.moe_refit_mode
         cfg.moe_refit_decay = args.moe_refit_decay
+        cfg.moe_space = args.moe_space
         cfg.variants = [v.strip() for v in args.variants.split(",")] if args.variants else None
         for ds_name in selected:
             X, y, _ = DATASET_GENERATORS[ds_name](seed)
