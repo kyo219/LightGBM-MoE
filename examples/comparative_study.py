@@ -50,8 +50,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -63,8 +66,23 @@ from scipy import stats
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python-package"))
+# Build override for A/B comparisons: LGBM_MOE_PACKAGE_DIR points at an
+# alternate python-package directory (e.g. a worktree build of an older
+# release). An editable install registers a meta-path finder that wins over
+# sys.path, so it must be disarmed for the override to take effect. The
+# resolved package path + lib sha256 are recorded in the output provenance.
+_PKG_DIR = os.environ.get("LGBM_MOE_PACKAGE_DIR")
+if _PKG_DIR:
+    sys.meta_path = [f for f in sys.meta_path
+                     if "editable" not in type(f).__module__.lower()]
+    sys.path.insert(0, _PKG_DIR)
+else:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python-package"))
 import lightgbm_moe as lgb
+
+if _PKG_DIR and not os.path.abspath(lgb.__file__).startswith(os.path.abspath(_PKG_DIR)):
+    raise SystemExit(f"LGBM_MOE_PACKAGE_DIR={_PKG_DIR} requested but lightgbm_moe "
+                     f"resolved to {lgb.__file__}")
 
 sys.path.insert(0, os.path.dirname(__file__))
 from benchmark import (  # noqa: E402
@@ -98,57 +116,91 @@ SMOOTHING_CHOICES = ["none", "ema", "markov"]
 # =============================================================================
 # CV with per-trial timing
 # =============================================================================
+# Audit fixes baked into the evaluation protocol:
+#
+#   1. Early stopping no longer validates on the scoring fold. The old code
+#      passed the fold's validation set to `early_stopping(50)` and then
+#      scored predictions on that same set — best_iteration was tuned
+#      per-fold on the evaluation data, optimistically biasing every fold
+#      score (and differentially favoring high-capacity variants). Each
+#      fold's training window now donates its chronological tail
+#      (ES_FRACTION) as the early-stopping set; the fold's validation
+#      window is only ever predicted once.
+#   2. TimeSeriesSplit(gap=1): with next-step targets, the last training
+#      row's label is the first thing the adjacent validation rows' lag
+#      features encode. A 1-step embargo removes that boundary reuse.
+#   3. Per-fold RMSEs and fold failure counts are returned so the study can
+#      report crash rates and run paired per-fold comparisons, instead of
+#      silently folding failures into an `inf` mean.
+ES_FRACTION = 0.15
+CV_GAP = 1
+
+
+def _es_tail_split(n_rows: int):
+    """Chronological (fit, early-stop) split of a training window."""
+    n_es = max(20, int(n_rows * ES_FRACTION))
+    n_es = min(n_es, n_rows // 2)  # degenerate-window guard
+    return n_rows - n_es
+
+
+def _train_with_es(params, Xt, yt, num_boost_round):
+    """Train with the ES set carved from the tail of the training window."""
+    cut = _es_tail_split(len(Xt))
+    train = lgb.Dataset(Xt[:cut], label=yt[:cut])
+    es_set = lgb.Dataset(Xt[cut:], label=yt[cut:], reference=train)
+    return lgb.train(
+        params,
+        train,
+        num_boost_round=num_boost_round,
+        valid_sets=[es_set],
+        callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+    )
+
+
 def evaluate_cv_timed(X, y, params, n_splits: int, num_boost_round: int):
-    """5-fold time-series CV. Returns (rmse_mean, mean_train_seconds_per_fold)."""
-    tscv = TimeSeriesSplit(n_splits=n_splits)
+    """Time-series CV (gap=1, ES on train tail).
+
+    Returns (rmse_mean, mean_train_seconds_per_fold, fold_rmses, n_failed_folds).
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=CV_GAP)
     rmses = []
     times = []
+    n_failed = 0
     for tr_idx, va_idx in tscv.split(X):
-        Xt, Xv = X[tr_idx], X[va_idx]
-        yt, yv = y[tr_idx], y[va_idx]
-        train = lgb.Dataset(Xt, label=yt)
-        valid = lgb.Dataset(Xv, label=yv, reference=train)
         try:
             t0 = time.perf_counter()
-            model = lgb.train(
-                params,
-                train,
-                num_boost_round=num_boost_round,
-                valid_sets=[valid],
-                callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
-            )
+            model = _train_with_es(params, X[tr_idx], y[tr_idx], num_boost_round)
             t1 = time.perf_counter()
-            pred = model.predict(Xv)
-            rmse = float(np.sqrt(mean_squared_error(yv, pred)))
-            rmses.append(rmse)
+            pred = model.predict(X[va_idx])
+            rmses.append(float(np.sqrt(mean_squared_error(y[va_idx], pred))))
             times.append(t1 - t0)
         except Exception:
             rmses.append(float("inf"))
-            times.append(0.0)
-    return float(np.mean(rmses)), float(np.mean(times))
+            n_failed += 1
+    mean_time = float(np.mean(times)) if times else 0.0
+    return float(np.mean(rmses)), mean_time, rmses, n_failed
 
 
 def evaluate_ensemble_cv_timed(X, y, params, n_models: int, base_seed: int,
                                n_splits: int, num_boost_round: int):
-    """5-fold time-series CV with a K-way naive seed-ensemble of LightGBMs.
+    """Time-series CV with a K-way naive seed-ensemble of LightGBMs.
 
     Each ensemble member uses identical hyperparameters but a per-member seed
     offset, so bagging / feature-fraction / extra_trees randomness diverges
     across members. Predictions are averaged. Total tree budget per fold is
     `n_models * num_boost_round`, matching MoE's K * num_boost_round.
+    Same ES-tail / gap protocol as `evaluate_cv_timed`.
 
-    Returns (rmse_mean_over_folds, mean_total_train_seconds_per_fold).
+    Returns (rmse_mean, mean_total_train_seconds_per_fold, fold_rmses, n_failed_folds).
     """
-    tscv = TimeSeriesSplit(n_splits=n_splits)
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=CV_GAP)
     rmses = []
     times = []
+    n_failed = 0
     for tr_idx, va_idx in tscv.split(X):
-        Xt, Xv = X[tr_idx], X[va_idx]
-        yt, yv = y[tr_idx], y[va_idx]
         try:
             t0 = time.perf_counter()
             preds = np.zeros(len(va_idx), dtype=np.float64)
-            ok = True
             for k in range(n_models):
                 p = dict(params)
                 # `seed` is LightGBM's master seed and propagates to bagging /
@@ -156,27 +208,17 @@ def evaluate_ensemble_cv_timed(X, y, params, n_models: int, base_seed: int,
                 # per-member is the cleanest way to diverge member k from j.
                 p["seed"] = base_seed + 1009 * k  # arbitrary multiplier to
                                                   # avoid 1-step adjacency
-                train = lgb.Dataset(Xt, label=yt)
-                valid = lgb.Dataset(Xv, label=yv, reference=train)
-                model = lgb.train(
-                    p,
-                    train,
-                    num_boost_round=num_boost_round,
-                    valid_sets=[valid],
-                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
-                )
-                preds += model.predict(Xv)
+                model = _train_with_es(p, X[tr_idx], y[tr_idx], num_boost_round)
+                preds += model.predict(X[va_idx])
             t1 = time.perf_counter()
-            if not ok:
-                raise RuntimeError("ensemble member failed")
             preds /= n_models
-            rmse = float(np.sqrt(mean_squared_error(yv, preds)))
-            rmses.append(rmse)
+            rmses.append(float(np.sqrt(mean_squared_error(y[va_idx], preds))))
             times.append(t1 - t0)
         except Exception:
             rmses.append(float("inf"))
-            times.append(0.0)
-    return float(np.mean(rmses)), float(np.mean(times))
+            n_failed += 1
+    mean_time = float(np.mean(times)) if times else 0.0
+    return float(np.mean(rmses)), mean_time, rmses, n_failed
 
 
 # =============================================================================
@@ -201,8 +243,12 @@ def make_naive_lightgbm_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
         }
-        rmse, train_s = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "naive-lightgbm", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
+        rmse, train_s, fold_rmses, n_failed = evaluate_cv_timed(
+            X, y, params, cfg.n_splits, cfg.num_boost_round)
+        trial_log.append({"variant": "naive-lightgbm", "rmse": rmse, "train_s": train_s,
+                          "fold_rmses": fold_rmses, "n_failed_folds": n_failed,
+                          "params": dict(trial.params),
+                          "lgbm_params": dict(params)})
         return rmse
 
     return objective
@@ -235,9 +281,12 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
         }
-        rmse, train_s = evaluate_ensemble_cv_timed(
+        rmse, train_s, fold_rmses, n_failed = evaluate_ensemble_cv_timed(
             X, y, params, n_models, cfg.seed, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "naive-ensemble", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
+        trial_log.append({"variant": "naive-ensemble", "rmse": rmse, "train_s": train_s,
+                          "fold_rmses": fold_rmses, "n_failed_folds": n_failed,
+                          "params": dict(trial.params),
+                          "lgbm_params": dict(params), "n_models": n_models})
         return rmse
 
     return objective
@@ -293,7 +342,12 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
             "mixture_init": trial.suggest_categorical("mixture_init", INIT_CHOICES),
             "mixture_num_experts": num_experts,
-            "mixture_e_step_alpha": trial.suggest_float("mixture_e_step_alpha", 0.1, 3.0),
+            # NOTE (audit fix): mixture_e_step_alpha used to be searched here
+            # (0.1–3.0), but it is IGNORED whenever mixture_estimate_variance
+            # is true — which is the default and was never in the search
+            # space. Every trial therefore carried a dead dimension that
+            # wasted TPE budget and produced meaningless fANOVA / quartile
+            # rows for `mixture_e_step_alpha` in past reports.
             "mixture_e_step_mode": trial.suggest_categorical("mixture_e_step_mode", E_STEP_MODES),
             "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 50),
             "mixture_balance_factor": trial.suggest_int("mixture_balance_factor", 2, 10),
@@ -380,8 +434,12 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             params["mixture_refit_trigger"] = refit_mode
             params["mixture_refit_decay_rate"] = refit_decay
 
-        rmse, train_s = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "moe", "rmse": rmse, "train_s": train_s, "params": dict(trial.params)})
+        rmse, train_s, fold_rmses, n_failed = evaluate_cv_timed(
+            X, y, params, cfg.n_splits, cfg.num_boost_round)
+        trial_log.append({"variant": "moe", "rmse": rmse, "train_s": train_s,
+                          "fold_rmses": fold_rmses, "n_failed_folds": n_failed,
+                          "params": dict(trial.params),
+                          "lgbm_params": dict(params)})
         return rmse
 
     return objective
@@ -526,7 +584,7 @@ def aggregate_variant(name: str, trials: list[dict], study) -> dict:
     out["categorical_stats"] = {p: categorical_value_stats(trials, p) for p in cat_params}
 
     num_params = (
-        ["mixture_num_experts", "mixture_e_step_alpha", "mixture_diversity_lambda",
+        ["mixture_num_experts", "mixture_diversity_lambda",
          "mixture_warmup_iters", "mixture_balance_factor", "learning_rate",
          "num_leaves", "max_depth", "min_data_in_leaf"]
         if name == "moe"
@@ -545,39 +603,72 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
     lines = []
     lines.append("# Comparative Study Report — naive vs naive-ensemble vs MoE\n")
     cfg = results.get("config", {})
-    lines.append(f"- **Trials per (variant × dataset)**: {cfg.get('trials')}\n")
-    lines.append(f"- **Datasets**: {cfg.get('datasets')}\n")
-    lines.append(f"- **n_splits**: {cfg.get('splits')}, **rounds**: {cfg.get('rounds')}\n")
+    lines.append(f"- **Trials per (variant × dataset × seed)**: {cfg.get('trials')}\n")
+    lines.append(f"- **Datasets**: {cfg.get('datasets')}, **seeds**: {cfg.get('seeds')}\n")
+    lines.append(f"- **n_splits**: {cfg.get('splits')} (gap={cfg.get('cv_gap')}), "
+                 f"**rounds**: {cfg.get('rounds')}, "
+                 f"**holdout**: final {cfg.get('holdout_frac', 0):.0%} (never seen by Optuna), "
+                 f"**ES**: chronological tail {cfg.get('es_fraction', 0):.0%} of each train window\n")
+    prov = results.get("provenance", {})
+    if prov:
+        lines.append(f"- **Build**: commit `{prov.get('git_commit', '?')[:12]}`"
+                     f"{' (dirty)' if prov.get('git_dirty') else ''}, "
+                     f"lib sha256 `{prov.get('lib_sha256', '?')[:12]}…`, "
+                     f"package `{prov.get('lightgbm_moe_package', '?')}`\n")
     lines.append("\n---\n")
 
-    # Headline table
-    lines.append("## Headline: which variant wins?\n")
-    lines.append("| Dataset | Variant | best RMSE | median RMSE | median train s/fold | wall s |")
+    # Headline: holdout metric (mean ± std across seeds)
+    lines.append("## Headline: holdout RMSE (chronological tail, evaluated once per seed)\n")
+    lines.append("Selection happened on CV inside the search region; this table is the "
+                 "unbiased comparison. `cv_best` is the (optimistic) selection metric, "
+                 "shown for reference.\n")
+    lines.append("| Dataset | Variant | holdout RMSE (mean ± std) | cv_best (mean) | crash rate | retrain s |")
     lines.append("|---|---|---|---|---|---|")
-    for ds_name, ds in results.items():
-        if not isinstance(ds, dict) or "naive-lightgbm" not in ds:
-            continue
-        for v in ("naive-lightgbm", "naive-ensemble", "moe"):
+    for ds_name, variants in results.get("summary", {}).items():
+        for v, e in variants.items():
+            per_seed = e.get("per_seed", {})
+            crash = np.mean([s.get("crash_rate", 0) for s in per_seed.values()]) if per_seed else 0
+            retrain = np.mean([s.get("retrain_s") or 0 for s in per_seed.values()]) if per_seed else 0
+            hm = e.get("holdout_mean")
+            hs = e.get("holdout_std", 0)
+            hm_str = f"**{hm:.5f}** ± {hs:.5f}" if hm is not None else "—"
+            cb = e.get("cv_best_mean")
+            cb_str = f"{cb:.5f}" if cb is not None else "—"
+            lines.append(f"| {ds_name} | {v} | {hm_str} | {cb_str} | "
+                         f"{crash:.1%} | {retrain:.2f} |")
+    lines.append("\n")
+
+    # Secondary: CV selection-metric table per run
+    lines.append("## Selection metric per run (CV over the search region)\n")
+    lines.append("| Run | Variant | cv best | cv median | median train s/fold | wall s |")
+    lines.append("|---|---|---|---|---|---|")
+    for run_tag, ds in results.get("runs", {}).items():
+        for v in ds.get("_variants", []):
             r = ds.get(v, {})
             lines.append(
-                f"| {ds_name} | {v} | {r.get('rmse_best', float('nan')):.4f} "
+                f"| {run_tag} | {v} | {r.get('rmse_best', float('nan')):.4f} "
                 f"| {r.get('rmse_median', float('nan')):.4f} "
                 f"| {r.get('train_s_median', 0):.3f} | {r.get('wall_s', 0):.0f} |"
             )
     lines.append("\n")
 
-    # Per-dataset detail
-    for ds_name, ds in results.items():
-        if not isinstance(ds, dict) or "naive-lightgbm" not in ds:
-            continue
-        lines.append(f"\n---\n\n## {ds_name}  (X={ds.get('X_shape')})\n")
+    # Per-run detail
+    for run_tag, ds in results.get("runs", {}).items():
+        ds_name = run_tag
+        lines.append(f"\n---\n\n## {run_tag}  (search X={ds.get('X_search_shape')}, "
+                     f"holdout n={ds.get('n_holdout')})\n")
 
-        for v in ("naive-lightgbm", "naive-ensemble", "moe"):
+        for v in ds.get("_variants", []):
             r = ds.get(v, {})
             if not r:
                 continue
             lines.append(f"\n### {v}\n")
-            lines.append(f"- best RMSE: **{r.get('rmse_best', float('nan')):.4f}**, "
+            hold = r.get("holdout", {})
+            if hold:
+                lines.append(f"- **holdout RMSE: {hold.get('holdout_rmse', float('nan')):.5f}** "
+                             f"(winner retrained in {hold.get('retrain_s', 0):.2f}s, "
+                             f"cv score of winner: {hold.get('cv_rmse_of_winner', float('nan')):.4f})")
+            lines.append(f"- cv best RMSE: {r.get('rmse_best', float('nan')):.4f}, "
                          f"median: {r.get('rmse_median', float('nan')):.4f}, "
                          f"p10: {r.get('rmse_p10', float('nan')):.4f}")
             lines.append(f"- train: median {r.get('train_s_median', 0):.3f}s/fold, "
@@ -639,21 +730,22 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
                     lines.append(f"| `{p}` | {cells[0]} | {cells[1]} | {cells[2]} | {cells[3]} | **{best_q}** {rng_str} |")
 
             # E. Slice plot reference
-            sp = slice_paths.get(f"{ds_name}/{v}")
+            sp = slice_paths.get(f"{run_tag}/{v}")
             if sp:
                 lines.append(f"\n#### E. Slice plot\n")
-                lines.append(f"![{ds_name}/{v}]({os.path.basename(sp)})\n")
+                lines.append(f"![{run_tag}/{v}]({os.path.basename(sp)})\n")
 
     # Overall recommendations summary
     lines.append("\n---\n\n## Overall recommendations\n")
     moe_recs = []
-    for ds_name, ds in results.items():
-        if not isinstance(ds, dict) or "moe" not in ds:
-            continue
-        cat = ds["moe"].get("categorical_stats", {})
-        for p, info in cat.items():
-            if info.get("best") and info["best"].get("significant"):
-                moe_recs.append((ds_name, p, info["best"]["value"], info["best"]["delta_mean"], info["best"]["p_value"]))
+    for run_tag, ds in results.get("runs", {}).items():
+        moe_keys = [v for v in ds.get("_variants", []) if v.startswith("moe")]
+        for mk in moe_keys:
+            cat = ds.get(mk, {}).get("categorical_stats", {})
+            for p, info in cat.items():
+                if info.get("best") and info["best"].get("significant"):
+                    moe_recs.append((run_tag, p, info["best"]["value"],
+                                     info["best"]["delta_mean"], info["best"]["p_value"]))
     if moe_recs:
         lines.append("**Categorical settings that are statistically significant winners (p<0.01):**\n")
         lines.append("| dataset | param | best value | Δ vs runner-up | p |")
@@ -669,15 +761,118 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
 
 
 # =============================================================================
+# Holdout evaluation (audit fix — the selection metric is not the headline)
+# =============================================================================
+# The old protocol reported "best RMSE" = the minimum over N Optuna trials of
+# the SAME CV score the optimizer minimized. That is a selection metric, not
+# a performance estimate: comparing minima across variants with differently
+# sized / differently noisy search spaces rewards whichever space buys more
+# lottery tickets (winner's curse). The headline metric is now a
+# chronological holdout — the final `holdout_frac` of every series is never
+# seen by Optuna; after the search, the best-CV config is retrained once on
+# the search region (with the same ES-tail protocol) and scored once on the
+# holdout.
+
+
+def chronological_split(X, y, holdout_frac: float):
+    n_hold = int(len(X) * holdout_frac)
+    if n_hold < 10:
+        raise SystemExit(f"holdout too small ({n_hold} rows) — reduce --holdout-frac")
+    cut = len(X) - n_hold
+    return X[:cut], y[:cut], X[cut:], y[cut:]
+
+
+def best_finite_trial(trial_log: list) -> dict | None:
+    finite = [t for t in trial_log if np.isfinite(t["rmse"])]
+    return min(finite, key=lambda t: t["rmse"]) if finite else None
+
+
+def holdout_eval(best: dict, X_search, y_search, X_hold, y_hold, cfg) -> dict:
+    """Retrain the winning config on the full search region, score the holdout once."""
+    try:
+        t0 = time.perf_counter()
+        if best["variant"] == "naive-ensemble":
+            preds = np.zeros(len(X_hold), dtype=np.float64)
+            for k in range(best["n_models"]):
+                p = dict(best["lgbm_params"])
+                p["seed"] = cfg.seed + 1009 * k
+                model = _train_with_es(p, X_search, y_search, cfg.num_boost_round)
+                preds += model.predict(X_hold)
+            preds /= best["n_models"]
+            t1 = time.perf_counter()
+            pred_s = 0.0  # ensemble latency folded into retrain timing
+        else:
+            model = _train_with_es(dict(best["lgbm_params"]), X_search, y_search,
+                                   cfg.num_boost_round)
+            t1 = time.perf_counter()
+            preds = model.predict(X_hold)
+            pred_s = time.perf_counter() - t1
+        return {
+            "holdout_rmse": float(np.sqrt(mean_squared_error(y_hold, preds))),
+            "retrain_s": round(t1 - t0, 4),
+            "predict_s": round(pred_s, 4),
+            "cv_rmse_of_winner": best["rmse"],
+        }
+    except Exception as e:
+        return {"holdout_rmse": float("nan"), "error": str(e)[:200]}
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def collect_provenance() -> dict:
+    """Everything needed to reproduce / attribute a run: build, code, data."""
+    prov = {
+        "python": sys.version.split()[0],
+        "numpy": np.__version__,
+        "optuna": optuna.__version__,
+        "platform": platform.platform(),
+        "lightgbm_moe_package": os.path.dirname(os.path.abspath(lgb.__file__)),
+    }
+    lib_path = os.path.join(os.path.dirname(os.path.abspath(lgb.__file__)),
+                            "lib", "lib_lightgbm.so")
+    if os.path.exists(lib_path):
+        prov["lib_sha256"] = _sha256(lib_path)
+    try:
+        prov["git_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)), text=True).strip()
+        prov["git_dirty"] = bool(subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=os.path.dirname(os.path.abspath(__file__)), text=True).strip())
+    except Exception:
+        pass
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_cache")
+    if os.path.isdir(cache_dir):
+        prov["data_cache"] = {
+            f: {"sha256": _sha256(os.path.join(cache_dir, f)),
+                "bytes": os.path.getsize(os.path.join(cache_dir, f))}
+            for f in sorted(os.listdir(cache_dir)) if f.endswith(".csv")
+        }
+    return prov
+
+
+# =============================================================================
 # Driver
 # =============================================================================
-def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: BenchmarkConfig, slice_dir: str) -> tuple[dict, dict]:
+def run_study(dataset_name: str, X_search, y_search, X_hold, y_hold,
+              n_trials: int, n_jobs: int, cfg: BenchmarkConfig, slice_dir: str,
+              run_tag: str) -> tuple[dict, dict]:
     print(f"\n{'=' * 60}")
-    print(f"  Dataset: {dataset_name}  X={X.shape}  trials={n_trials}  n_jobs={n_jobs}")
+    print(f"  Run: {run_tag}  search={X_search.shape}  holdout={len(X_hold)}  "
+          f"trials={n_trials}  n_jobs={n_jobs}")
     print(f"{'=' * 60}")
 
-    out = {"dataset": dataset_name, "X_shape": list(X.shape), "y_stats": {"mean": float(y.mean()), "std": float(y.std())}}
+    out = {"dataset": dataset_name, "seed": cfg.seed,
+           "X_search_shape": list(X_search.shape), "n_holdout": int(len(X_hold)),
+           "y_stats": {"mean": float(y_search.mean()), "std": float(y_search.std())}}
     slice_paths: dict = {}
+    X, y = X_search, y_search  # Optuna objectives close over the search region only
 
     # When refit ablation is requested, the moe variant is renamed to "moe-refit"
     # so two runs (--moe-refit-mode off vs --moe-refit-mode <other>) produce
@@ -704,6 +899,7 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
         # Match by prefix so "moe" selects "moe-refit-elbo" too.
         all_variants = [v for v in all_variants
                          if any(v[0] == s or v[0].startswith(s + "-") for s in selected_variants)]
+    out["_variants"] = [v[0] for v in all_variants]
     for variant, make_obj in all_variants:
         print(f"\n  → {variant} ({n_trials} trials)...")
         trial_log: list = []
@@ -715,16 +911,23 @@ def run_study(dataset_name: str, X, y, n_trials: int, n_jobs: int, cfg: Benchmar
 
         agg = aggregate_variant(variant, trial_log, study)
         agg["wall_s"] = round(wall, 1)
+
+        # Holdout: retrain the CV winner once, score the untouched tail once.
+        best = best_finite_trial(trial_log)
+        if best is not None:
+            agg["holdout"] = holdout_eval(best, X_search, y_search, X_hold, y_hold, cfg)
         out[variant] = agg
         out[f"{variant}_trials"] = trial_log
 
         # Slice plot
-        sp_path = os.path.join(slice_dir, f"slice_{dataset_name}_{variant}.png")
-        if make_slice_plot(study, sp_path, f"{dataset_name} / {variant}"):
-            slice_paths[f"{dataset_name}/{variant}"] = sp_path
+        sp_path = os.path.join(slice_dir, f"slice_{run_tag}_{variant}.png")
+        if make_slice_plot(study, sp_path, f"{run_tag} / {variant}"):
+            slice_paths[f"{run_tag}/{variant}"] = sp_path
 
-        print(f"    best RMSE = {agg.get('rmse_best', float('nan')):.4f}, "
-              f"median train = {agg.get('train_s_median', 0):.3f}s/fold, "
+        hold = agg.get("holdout", {})
+        print(f"    cv-best RMSE = {agg.get('rmse_best', float('nan')):.4f}, "
+              f"holdout RMSE = {hold.get('holdout_rmse', float('nan')):.4f}, "
+              f"crash rate = {1 - agg.get('n_finite', 0) / max(1, agg.get('n_trials', 1)):.1%}, "
               f"wall = {wall:.0f}s")
 
     return out, slice_paths
@@ -740,6 +943,39 @@ DATASET_GENERATORS = {
 }
 
 
+def summarize_across_seeds(results: dict) -> dict:
+    """Cross-seed summary: per (dataset, variant), holdout RMSE mean ± std.
+
+    The holdout number is the headline; cv_best is retained as the selection
+    metric for reference. With a single seed the std fields are 0 and should
+    be read as "no variance estimate", not "no variance".
+    """
+    summary: dict = {}
+    for run_tag, run in results.get("runs", {}).items():
+        ds = run["dataset"]
+        for v in run.get("_variants", []):
+            agg = run.get(v, {})
+            hold = agg.get("holdout", {})
+            entry = summary.setdefault(ds, {}).setdefault(v, {"per_seed": {}})
+            entry["per_seed"][str(run["seed"])] = {
+                "holdout_rmse": hold.get("holdout_rmse"),
+                "cv_best": agg.get("rmse_best"),
+                "crash_rate": round(1 - agg.get("n_finite", 0) / max(1, agg.get("n_trials", 1)), 4),
+                "retrain_s": hold.get("retrain_s"),
+            }
+    for ds, variants in summary.items():
+        for v, entry in variants.items():
+            hs = [s["holdout_rmse"] for s in entry["per_seed"].values()
+                  if s["holdout_rmse"] is not None and np.isfinite(s["holdout_rmse"])]
+            cs = [s["cv_best"] for s in entry["per_seed"].values() if s["cv_best"] is not None]
+            if hs:
+                entry["holdout_mean"] = round(float(np.mean(hs)), 6)
+                entry["holdout_std"] = round(float(np.std(hs)), 6)
+            if cs:
+                entry["cv_best_mean"] = round(float(np.mean(cs)), 6)
+    return summary
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--trials", type=int, default=500)
@@ -751,7 +987,14 @@ def main():
     p.add_argument("--n-jobs", type=int, default=1)
     p.add_argument("--rounds", type=int, default=100)
     p.add_argument("--splits", type=int, default=5)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seeds", type=str, default="42",
+                   help="comma-separated seeds; each seed redraws synthetic/hmm "
+                        "data AND reseeds the TPE sampler + models. Multi-seed "
+                        "runs report holdout mean±std — single-seed numbers "
+                        "have no variance estimate.")
+    p.add_argument("--holdout-frac", type=float, default=0.2,
+                   help="chronological tail fraction never seen by Optuna; the "
+                        "CV winner is retrained on the rest and scored on it once")
     p.add_argument(
         "--datasets",
         type=str,
@@ -782,10 +1025,7 @@ def main():
                         "useful with --moe-refit-mode to skip naive baselines on ablation runs")
     args = p.parse_args()
 
-    cfg = BenchmarkConfig(n_trials=args.trials, seed=args.seed, n_splits=args.splits, num_boost_round=args.rounds)
-    cfg.moe_refit_mode = args.moe_refit_mode
-    cfg.moe_refit_decay = args.moe_refit_decay
-    cfg.variants = [v.strip() for v in args.variants.split(",")] if args.variants else None
+    seeds = [int(s.strip()) for s in args.seeds.split(",")]
     selected = [s.strip() for s in args.datasets.split(",")]
     unknown = [s for s in selected if s not in DATASET_GENERATORS]
     if unknown:
@@ -795,15 +1035,32 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     slice_dir = out_dir
 
-    results = {"config": {"trials": args.trials, "n_jobs": args.n_jobs, "rounds": args.rounds,
-                          "splits": args.splits, "seed": args.seed, "datasets": selected}}
+    results = {
+        "config": {"trials": args.trials, "n_jobs": args.n_jobs, "rounds": args.rounds,
+                   "splits": args.splits, "seeds": seeds, "holdout_frac": args.holdout_frac,
+                   "datasets": selected, "es_fraction": ES_FRACTION, "cv_gap": CV_GAP,
+                   "moe_refit_mode": args.moe_refit_mode},
+        "provenance": collect_provenance(),
+        "runs": {},
+    }
     all_slice_paths: dict = {}
 
-    for ds_name in selected:
-        X, y, _ = DATASET_GENERATORS[ds_name](cfg.seed)
-        ds_out, sp = run_study(ds_name, X, y, args.trials, args.n_jobs, cfg, slice_dir)
-        results[ds_name] = ds_out
-        all_slice_paths.update(sp)
+    for seed in seeds:
+        cfg = BenchmarkConfig(n_trials=args.trials, seed=seed, n_splits=args.splits,
+                              num_boost_round=args.rounds)
+        cfg.moe_refit_mode = args.moe_refit_mode
+        cfg.moe_refit_decay = args.moe_refit_decay
+        cfg.variants = [v.strip() for v in args.variants.split(",")] if args.variants else None
+        for ds_name in selected:
+            X, y, _ = DATASET_GENERATORS[ds_name](seed)
+            X_search, y_search, X_hold, y_hold = chronological_split(X, y, args.holdout_frac)
+            run_tag = f"{ds_name}@s{seed}"
+            ds_out, sp = run_study(ds_name, X_search, y_search, X_hold, y_hold,
+                                   args.trials, args.n_jobs, cfg, slice_dir, run_tag)
+            results["runs"][run_tag] = ds_out
+            all_slice_paths.update(sp)
+
+    results["summary"] = summarize_across_seeds(results)
 
     with open(args.out, "w") as f:
         json.dump(results, f, indent=2, default=str)

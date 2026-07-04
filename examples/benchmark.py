@@ -263,9 +263,11 @@ def generate_synthetic_data(n_samples: int = 2000, noise_level: float = 0.5, see
     Synthetic regime-switching data (regime determinable from X).
     MoEが得意とするケース：特徴量からregimeが決まる。
     """
-    np.random.seed(seed)
+    # Local generator: np.random.seed() mutated GLOBAL numpy state, silently
+    # coupling any downstream code that relies on the global RNG to this call.
+    rng = np.random.default_rng(seed)
     n_features = 5
-    X = np.random.randn(n_samples, n_features)
+    X = rng.standard_normal((n_samples, n_features))
 
     regime_score = 0.5 * X[:, 1] + 0.3 * X[:, 2] - 0.2 * X[:, 3]
     regime_true = (regime_score > 0).astype(int)
@@ -278,7 +280,7 @@ def generate_synthetic_data(n_samples: int = 2000, noise_level: float = 0.5, see
     mask1 = regime_true == 1
     y[mask1] = -5.0 * X[mask1, 0] - 2.0 * X[mask1, 1] ** 2 + 3.0 * np.cos(2 * X[mask1, 4]) - 10.0
 
-    y += np.random.randn(n_samples) * noise_level
+    y += rng.standard_normal(n_samples) * noise_level
 
     return X, y, regime_true
 
@@ -290,13 +292,13 @@ def generate_hamilton_gnp_data(n_samples: int = 500, seed: int = 42):
     Time-series features (lag, moving average, volatility) are added
     to make the latent regime partially observable from past y values.
     """
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     n_base_features = 4
-    X_base = np.random.randn(n_samples, n_base_features)
+    X_base = rng.standard_normal((n_samples, n_base_features))
 
     t = np.arange(n_samples)
     regime_prob = 0.5 + 0.3 * np.sin(2 * np.pi * t / 100)
-    regime_true = (np.random.rand(n_samples) < regime_prob).astype(int)
+    regime_true = (rng.random(n_samples) < regime_prob).astype(int)
 
     y = np.zeros(n_samples)
 
@@ -306,7 +308,7 @@ def generate_hamilton_gnp_data(n_samples: int = 500, seed: int = 42):
     mask1 = regime_true == 1
     y[mask1] = -0.5 + 0.1 * X_base[mask1, 0] - 0.3 * X_base[mask1, 2]
 
-    y += np.random.randn(n_samples) * 0.3
+    y += rng.standard_normal(n_samples) * 0.3
 
     # Add time-series features derived from y
     # Focus on regime-indicative statistics (level, volatility),
@@ -377,7 +379,9 @@ _CACHE_DIR.mkdir(exist_ok=True)
 def _add_ts_features(y_arr: np.ndarray, windows_ma=(5, 10, 20), windows_vol=(5, 10)) -> np.ndarray:
     """Build standard time-series features from a 1D series y_arr.
 
-    Returns an (N, F) feature matrix. All features are causal (use only past values).
+    Returns an (N, F) feature matrix. Row i uses ONLY y_arr[:i] — strictly
+    past values, exclusive of the current index. Callers that want "features
+    known at time t" must therefore read row t+1 (which sees y_arr[..t]).
     """
     n = len(y_arr)
     feats = []
@@ -477,15 +481,24 @@ def generate_sp500_basic_data(seed: int = 42, start: str = "2010-01-01", end: st
     px = close.to_numpy(dtype=np.float64)
     log_ret = np.diff(np.log(px))
 
+    # Alignment convention (audit fix): row t's features may use log_ret[..t]
+    # (everything known at the close of day t); the target is log_ret[t+1].
+    # The previous construction had an off-by-one — the most recent return a
+    # feature row saw was log_ret[t-1] while the target was log_ret[t+1], so
+    # the model was effectively predicting two steps ahead with the single
+    # most informative lag silently discarded (and the README claimed
+    # "next-day"). lag-1 now means "today's return", as documented.
     lag_set = (1, 2, 3, 5, 10)
     lag_max = max(lag_set)
-    n = len(log_ret) - lag_max - 1
-    if n <= 0:
+    t_idx = np.arange(lag_max - 1, len(log_ret) - 1)  # feature time t
+    if len(t_idx) <= 0:
         raise RuntimeError("S&P series too short after lag construction")
-    lags = np.column_stack([log_ret[lag_max - k: lag_max - k + n] for k in lag_set])
-    ts_feats = _add_ts_features(log_ret)[lag_max: lag_max + n]
+    lags = np.column_stack([log_ret[t_idx - (k - 1)] for k in lag_set])
+    # _add_ts_features row j sees log_ret[:j] (strictly past), so row t+1
+    # sees log_ret[..t] — exactly the info set of feature time t.
+    ts_feats = _add_ts_features(log_ret)[t_idx + 1]
     X = np.column_stack([lags, ts_feats])
-    y = log_ret[lag_max + 1: lag_max + 1 + n]
+    y = log_ret[t_idx + 1]
     return X, y, None
 
 
@@ -510,17 +523,25 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
 
     feats: list[np.ndarray] = []
 
-    # 1) Lagged returns
+    # Alignment convention (audit fix): feature row t may use log_ret[..t]
+    # (and prices through the close of day t); the target is log_ret[t+1].
+    # Return windows/lags previously EXCLUDED log_ret[t] (arr[i-w:i],
+    # log_ret[:-lag]) while the price-level features below already used the
+    # day-t close — one day staler than the information set allows, and
+    # inconsistent within the same feature row. All return-based features
+    # now include the current index: lag-1 = today's return.
+
+    # 1) Lagged returns (lag k = k-1 steps back from today, so lag-1 = today)
     for lag in (1, 2, 3, 5, 10, 20, 60):
         f = np.zeros(n_ret)
-        f[lag:] = log_ret[:-lag]
+        f[lag - 1:] = log_ret[:n_ret - lag + 1]
         feats.append(f)
 
-    # 2) Cumulative log return over window (momentum)
+    # 2) Cumulative log return over window (momentum), inclusive of today
     def _rolling_sum(arr, w):
         out = np.zeros_like(arr)
-        for i in range(w, len(arr)):
-            out[i] = arr[i - w:i].sum()
+        for i in range(w - 1, len(arr)):
+            out[i] = arr[i - w + 1:i + 1].sum()
         return out
 
     cum5 = _rolling_sum(log_ret, 5)
@@ -545,8 +566,8 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     # 5) RSI(14) and RSI(30) — Wilder's, computed on returns
     def _rsi(arr, w):
         out = np.full(len(arr), 50.0)
-        for i in range(w, len(arr)):
-            window = arr[i - w:i]
+        for i in range(w - 1, len(arr)):
+            window = arr[i - w + 1:i + 1]
             gains = np.maximum(window, 0).sum()
             losses = -np.minimum(window, 0).sum()
             if losses == 0:
@@ -562,8 +583,8 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     # 6) Rolling skewness / kurtosis (excess) over 20 days
     skew = np.zeros(n_ret)
     kurt = np.zeros(n_ret)
-    for i in range(20, n_ret):
-        w = log_ret[i - 20:i]
+    for i in range(19, n_ret):
+        w = log_ret[i - 19:i + 1]
         m = w.mean()
         s = w.std()
         if s > 0:
@@ -573,8 +594,8 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
 
     # 7) Bollinger band position (z-score of log price vs MA(20))
     bb = np.zeros(n_ret)
-    for i in range(20, n_ret):
-        w = log_px_ret[i - 20:i]
+    for i in range(19, n_ret):
+        w = log_px_ret[i - 19:i + 1]
         sd = w.std()
         if sd > 0:
             bb[i] = (log_px_ret[i] - w.mean()) / (2.0 * sd)
@@ -583,8 +604,8 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     # 8) Drawdown from rolling high (log price)
     def _drawdown(arr, w):
         out = np.zeros_like(arr)
-        for i in range(w, len(arr)):
-            peak = arr[i - w:i].max()
+        for i in range(w - 1, len(arr)):
+            peak = arr[i - w + 1:i + 1].max()
             out[i] = arr[i] - peak  # <= 0
         return out
 
@@ -594,8 +615,8 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     # 9) Fraction of positive returns over last w days
     def _frac_pos(arr, w):
         out = np.zeros_like(arr)
-        for i in range(w, len(arr)):
-            out[i] = float((arr[i - w:i] > 0).mean())
+        for i in range(w - 1, len(arr)):
+            out[i] = float((arr[i - w + 1:i + 1] > 0).mean())
         return out
 
     feats.append(_frac_pos(log_ret, 5))
@@ -624,15 +645,28 @@ def generate_vix_data(seed: int = 42, start: str = "2010-01-01", end: str = "202
     close = _yf_download_close("^VIX", start=start, end=end, cache_name="vix_VIX")
     vix = close.to_numpy(dtype=np.float64)
 
+    # Leakage fix (audit): this used to demean with `vix - vix.mean()` — the
+    # FULL-SAMPLE mean, which includes future data. The sign(MA) and
+    # frac-positive features then encoded "is the current level above the
+    # all-time mean", i.e. genuine lookahead for a mean-reverting series.
+    # Demean causally instead: centered[i] = vix[i] - mean(vix[:i])
+    # (expanding mean of strictly past values; centered[0] uses vix[0]).
+    expanding_mean = np.cumsum(vix) / np.arange(1, len(vix) + 1)
+    centered = vix.copy()
+    centered[1:] -= expanding_mean[:-1]
+    centered[0] = 0.0
+
+    # Same alignment convention as generate_sp500_basic_data (audit fix):
+    # row t's features use vix[..t]; target is vix[t+1]. lag-1 = today.
     lag_set = (1, 2, 3, 5, 10)
     lag_max = max(lag_set)
-    n = len(vix) - lag_max - 1
-    if n <= 0:
+    t_idx = np.arange(lag_max - 1, len(vix) - 1)
+    if len(t_idx) <= 0:
         raise RuntimeError("VIX series too short after lag construction")
-    lags = np.column_stack([vix[lag_max - k: lag_max - k + n] for k in lag_set])
-    ts_feats = _add_ts_features(vix - vix.mean())[lag_max: lag_max + n]
+    lags = np.column_stack([vix[t_idx - (k - 1)] for k in lag_set])
+    ts_feats = _add_ts_features(centered)[t_idx + 1]
     X = np.column_stack([lags, ts_feats])
-    y = vix[lag_max + 1: lag_max + 1 + n]
+    y = vix[t_idx + 1]
     return X, y, None
 
 
