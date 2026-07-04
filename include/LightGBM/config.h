@@ -1143,9 +1143,8 @@ struct Config {
   #pragma region Mixture-of-Experts Parameters
   #endif  // __NVCC__
 
-  // desc = set this to ``true`` to enable Mixture-of-Experts (MoE) mode
-  // desc = when enabled, LightGBM trains K expert GBDTs and 1 gate GBDT
-  // desc = the final prediction is a weighted combination of expert predictions
+  // desc = informational flag written into saved mixture model headers; it does **not** enable MoE mode
+  // desc = MoE training is enabled by setting ``boosting=mixture`` — setting only ``mixture_enable=true`` trains a plain GBDT and a warning is emitted
   bool mixture_enable = false;
 
   // check = >=2
@@ -1166,13 +1165,15 @@ struct Config {
   int mixture_gate_iters_per_round = 1;
 
   // type = enum
-  // options = uniform, quantile, random, balanced_kmeans, gmm, tree_hierarchical
+  // options = uniform, quantile, random, balanced_kmeans, kmeans_features, gmm, gmm_features, tree_hierarchical
   // desc = initialization method for expert responsibilities
   // desc = ``uniform``: all experts start with equal responsibility (default, may cause collapse)
   // desc = ``quantile``: assign samples to experts based on label quantiles
   // desc = ``random``: randomly assign samples to experts
-  // desc = ``balanced_kmeans``: use Balanced K-Means clustering on features (recommended)
-  // desc = ``gmm``: use Gaussian Mixture Model for soft clustering (theoretical EM alignment)
+  // desc = ``balanced_kmeans``: use Balanced K-Means clustering on features + label
+  // desc = ``kmeans_features``: Balanced K-Means on raw features only (regime discovery in X-space)
+  // desc = ``gmm``: use Gaussian Mixture Model on features + label (theoretical EM alignment)
+  // desc = ``gmm_features``: GMM on raw features only (recommended when the regime is a function of X)
   // desc = ``tree_hierarchical``: train a deep tree, then hierarchically cluster leaves by mean y
   std::string mixture_init = "uniform";
 
@@ -1246,6 +1247,9 @@ struct Config {
   //        ``r_ik`` *before* appending the next tree, restoring the closed-form
   //        M-step on each tree's existing partition structure
   // desc = default ``false`` keeps the v0.6.0 append-only behavior bit-identical
+  // desc = **early stopping caveat**: refit mutates past trees in place, so the model
+  //        restored/saved at the best iteration includes refit passes that fired after
+  //        that iteration — close to, but not identical to, the exact best-iteration model
   // desc = see issue #37 for the design rationale
   bool mixture_refit_leaves = false;
 
@@ -1384,14 +1388,6 @@ struct Config {
   // desc = ignored when ``mixture_regrow_oldest_trees=false``
   std::string mixture_regrow_mode = "replace";
 
-  // type = enum
-  // options = value, value_and_regime, all
-  // desc = output mode for mixture prediction
-  // desc = ``value``: only output predicted value (yhat)
-  // desc = ``value_and_regime``: output value and argmax regime
-  // desc = ``all``: output value, regime probabilities, and expert predictions
-  std::string mixture_predict_output = "value";
-
   // desc = max depth for gate GBDT (shallower than experts for regularization)
   // check = >0
   int mixture_gate_max_depth = 3;
@@ -1474,15 +1470,6 @@ struct Config {
   // desc = recommended range: 0.1-0.5
   double mixture_diversity_lambda = 0.0;
 
-  // check = >=0.0
-  // check = <1.0
-  // desc = dropout rate for experts during training
-  // desc = at each iteration, experts are randomly dropped with this probability
-  // desc = dropped experts receive zero gradients (not updated) for that iteration
-  // desc = helps prevent expert collapse by forcing all experts to be useful
-  // desc = 0.0 means no dropout (default)
-  // desc = recommended range: 0.1-0.3
-  // desc = note: at least one expert is always kept (never drops all experts)
   // type = enum
   // options = gbdt, none, leaf_reuse
   // desc = gate model type for Mixture-of-Experts routing
@@ -1498,6 +1485,15 @@ struct Config {
   // desc = higher = faster training, lower = better inference routing
   int mixture_gate_retrain_interval = 10;
 
+  // check = >=0.0
+  // check = <1.0
+  // desc = dropout rate for experts during training
+  // desc = at each iteration, experts are randomly dropped with this probability
+  // desc = dropped experts receive zero gradients (not updated) for that iteration
+  // desc = helps prevent expert collapse by forcing all experts to be useful
+  // desc = 0.0 means no dropout (default)
+  // desc = recommended range: 0.1-0.3
+  // desc = note: at least one expert is always kept (never drops all experts)
   double mixture_expert_dropout_rate = 0.0;
 
   // type = enum

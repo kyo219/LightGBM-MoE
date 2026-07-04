@@ -172,41 +172,88 @@ Bottom line: v0.7 and v0.8 features are **opt-in safety nets for bad-init recove
 
 ## When to use MoE
 
-MoE's gating mechanism wins on regime-structured data — but the **honest baseline is not single-model naive LightGBM, it's a K-way ensemble of LightGBMs** with the same total tree budget. Simply averaging K independent models with different seeds gives variance reduction "for free"; the question is whether MoE's learned routing beats that. The 6-row study below answers it: **MoE clearly wins on `synthetic` (−24.8 %), `vix` (−6.9 %), `hmm` (−1.6 %) — datasets where the regime is observable from `X` —, ties on the `sp500` rows, and *loses to the K-way ensemble on `fred_gdp`* (+3.2 %)**. On `fred_gdp` (~310 quarterly samples) the K-way capacity helps but gating does not — the regime is too noisy or the dataset too small for the gate to learn it, and uniform averaging extracts the available capacity better than learned routing. Compute trade-off: MoE costs **1.3–8.4 ×** naive single-model time, and **0.5–2.8 ×** naive-ensemble time. Net rule: try MoE when (a) you believe the regime is observable from your features and (b) your wall time has 5–10 × headroom over single-model LightGBM.
+MoE's gating mechanism wins on regime-structured data — but the **honest baseline is not single-model naive LightGBM, it's a K-way ensemble of LightGBMs** with the same total tree budget. Simply averaging K independent models with different seeds gives variance reduction "for free"; the question is whether MoE's learned routing beats that. The holdout-first study below answers it: **MoE clearly wins on `synthetic` (−18.4 % vs the ensemble) — the case where the regime is a deterministic function of `X` — and on `fred_gdp` (−3.5 %), where the holdout window contains a genuine regime shock (COVID quarters). It ties on `hmm` and the `sp500` rows, and loses on `vix` (+5.8 %).** Compute trade-off: MoE costs **3–10 ×** naive single-model time and **0.8–4 ×** naive-ensemble time per trial. Net rule: try MoE when (a) you believe the regime is observable from your features or your evaluation window contains regime shifts, and (b) your wall time has 5–10 × headroom over single-model LightGBM.
 
-## Benchmark — 500-trial study (naive vs naive-ensemble vs MoE, 5 datasets)
+## Benchmark — holdout-first study (naive vs naive-ensemble vs MoE)
 
-5-fold time-series CV, 500 Optuna trials per (variant × dataset), 5 datasets spanning synthetic-ideal → real macro/financial → controlled-latent (sp500 is included in two parallel feature configurations, so 6 rows). Numbers are **deterministic** — `--n-jobs 1` (the default since [PR #30](https://github.com/kyo219/LightGBM-MoE/pull/30)) makes Optuna's TPE sampler reproducible across runs and builds with the same seed, so build-to-build comparisons are not contaminated by parallel-worker scheduling noise (which historically had ±0.3 RMSE-std on synthetic). Full report: [`bench_results/study_500_report.md`](bench_results/study_500_report.md). Methodology and dataset-specific recommendations: [docs/moe/benchmark.md](docs/moe/benchmark.md).
+> **Methodology note (v0.8.1).** This table supersedes the pre-v0.8.1 benchmark, which had
+> four defects found in a methodology audit: (1) the headline was the *minimum CV score over
+> 500 Optuna trials* — the selection metric itself, a winner's-curse-biased estimate that
+> rewards larger search spaces; (2) early stopping validated on the scoring fold; (3) the
+> `vix` features leaked the full-sample mean (lookahead for a mean-reverting series — and a
+> regime proxy, precisely the signal a gate exploits); (4) `sp500`/`vix` targets were
+> misaligned by one step. All four are fixed; the old report remains at
+> [`bench_results/study_500_report.md`](bench_results/study_500_report.md) for archaeology.
+> Two headline results changed: **the old `vix` win (−6.9 %) is retracted** (it was an
+> artifact of the leak + selection bias), and **`fred_gdp` flipped from a loss to a win**
+> (the old protocol never evaluated the COVID-containing tail).
 
-The third variant — **`naive-ensemble`** — is a K-way (K ∈ {2, 3, 4}) seed-ensemble of standard LightGBMs that share hyperparameters but diverge per-member via the `seed` master-seed override. Same total tree budget as MoE (K × `num_boost_round`), same Optuna search space as `naive-lightgbm` plus K. It is the fair ablation for "is gating doing real work, or would any K-way ensemble suffice?" — see [PR #33](https://github.com/kyo219/LightGBM-MoE/pull/33).
+Protocol: the final 20 % of every series is a **chronological holdout never seen by Optuna**.
+Hyperparameters are selected by expanding-window time-series CV (5 folds, 1-step embargo,
+early stopping on the chronological tail of each training window — never on the scoring
+fold) over the first 80 %; the CV winner is retrained once and scored once on the holdout.
+300 Optuna trials per (variant × dataset × seed), 3 seeds (synthetic/hmm redraw data,
+TPE + models reseed), reported as holdout RMSE mean ± std. Deterministic per seed
+(`--n-jobs 1`); build provenance (git commit, lib sha256, dataset sha256s) is recorded in
+the output JSON. Full report: [`bench_results/meth2_v081/`](bench_results/meth2_v081/).
 
-| Dataset | Shape | naive best | ensemble best | MoE best | MoE vs naive | **MoE vs ensemble** *(the fair test)* |
+The third variant — **`naive-ensemble`** — is a K-way (K ∈ {2, 3, 4}) seed-ensemble of
+standard LightGBMs that share hyperparameters but diverge per-member via the `seed`
+master-seed override. Same total tree budget as MoE (K × `num_boost_round`), same Optuna
+search space as `naive-lightgbm` plus K. It is the fair ablation for "is gating doing real
+work, or would any K-way ensemble suffice?" — see [PR #33](https://github.com/kyo219/LightGBM-MoE/pull/33).
+
+### Regime datasets (holdout RMSE, mean ± std over 3 seeds)
+
+| Dataset | Shape | naive | ensemble | MoE | MoE vs naive | **MoE vs ensemble** *(the fair test)* |
 |---|---|---|---|---|---|---|
-| `synthetic` | 2000 × 5 | 5.0233 | 4.8899 | **3.6779** | −26.8 % | **−24.8 %** 🎯 |
-| `fred_gdp` | 311 × 12 | 0.9311 | **0.9094** | 0.9381 | +0.75 % | +3.2 % *(ensemble wins)* |
-| `sp500_basic` (13 feat) | 3761 × 13 | 0.01003 | 0.01002 | **0.01001** | −0.24 % | −0.12 % |
-| `sp500` (28 feat, enriched) | 3711 × 28 | 0.01002 | 0.01003 | 0.01002 | ±0.00 % | −0.06 % |
-| `vix` | 3762 × 13 | 2.8869 | 2.8724 | **2.6745** | −7.4 % | **−6.9 %** 🎯 |
-| `hmm` | 2000 × 5 | 2.1913 | 2.1818 | **2.1465** | −2.1 % | **−1.6 %** |
+| `synthetic` | 2000 × 5 | 4.812 ± 0.340 | 4.706 ± 0.372 | **3.842 ± 0.290** | −20.2 % | **−18.4 %** 🎯 |
+| `fred_gdp` | 311 × 12 | 1.528 ± 0.020 | 1.543 ± 0.007 | **1.489 ± 0.014** | −2.6 % | **−3.5 %** 🎯 |
+| `hmm` | 2000 × 5 | 2.218 ± 0.244 | 2.206 ± 0.242 | 2.210 ± 0.243 | −0.3 % | +0.2 % *(tie)* |
+| `vix` | 3762 × 13 | 1.794 ± 0.063 | **1.752 ± 0.044** | 1.854 ± 0.173 | +3.3 % | +5.8 % *(ensemble wins)* |
+| `sp500_basic` (13 feat) | 3761 × 13 | 0.01104 | 0.01104 | 0.01102 | −0.2 % | −0.1 % *(noise floor)* |
+| `sp500` (28 feat) | 3711 × 28 | 0.01105 | 0.01105 | 0.01108 | +0.3 % | +0.3 % *(noise floor)* |
 
-**Read the "MoE vs ensemble" column** — that's where the gating hypothesis is actually tested. MoE clearly beats the K-way average on the three datasets where the regime is structurally observable from features (synthetic, vix, hmm), is a wash on the irreducibly hard sp500 rows, and *loses* on the smallest-data fred_gdp where the gate cannot learn the regime reliably enough to beat uniform averaging.
+The pattern is sharper than the old report's: MoE wins where regime structure is
+**strong and observable** (`synthetic` — regime is a deterministic function of X) or where
+the **evaluation window itself contains a regime break** (`fred_gdp` holdout spans COVID).
+It ties where the regime is weakly observable (`hmm` — two noisy proxy columns) or the
+target is at the noise floor (`sp500`), and it loses on `vix` now that the
+regime-proxy leak is gone — the gate has nothing real to route on there.
 
-| Dataset | naive (s/fold) | ensemble (s/fold) | MoE (s/fold) | ensemble / naive | MoE / naive | MoE / ensemble |
-|---|---|---|---|---|---|---|
-| `synthetic` | 0.033 | 0.083 | 0.044 | 2.5 × | 1.3 × | **0.53 ×** |
-| `fred_gdp` | 0.003 | 0.017 | 0.020 | 5.5 × | 6.5 × | 1.2 × |
-| `sp500_basic` | 0.012 | 0.029 | 0.081 | 2.4 × | 6.7 × | 2.8 × |
-| `sp500` | 0.009 | 0.037 | 0.055 | 4.2 × | 6.2 × | 1.5 × |
-| `vix` | 0.010 | 0.035 | 0.062 | 3.4 × | 6.0 × | 1.8 × |
-| `hmm` | 0.005 | 0.023 | 0.045 | 4.3 × | 8.4 × | 2.0 × |
+### Non-regime control datasets (Grinsztajn et al. 2022 regression track)
 
-On `synthetic` MoE is actually **faster** than the naive-ensemble (0.53 ×) — when the regime is clearly identifiable, sparse routing means each expert sees only its share of samples and converges quickly; the ensemble has to fit all K members on full data. On harder datasets the ratio flips back.
+Four standard i.i.d. tabular regression datasets (OpenML: `houses` 537, `cpu_act` 197,
+`elevators` 216, `wine_quality` 287; numeric features, seeded shuffle, 10k-row cap). These
+have **no regime structure** — the control group: MoE should at best tie naive here, and a
+win would mean the "regime" story is confounded with generic extra capacity.
 
-> **The sp500 pair is a controlled feature-engineering ablation on the same raw series**: only the feature set changes between rows, identical CV / Optuna budget / seed. All three variants are essentially tied at ~0.01001 across both feature sets — the next-day-log-return objective appears to hit the irreducible noise floor under any architecture and any feature set we've tried.
+*(Control-group numbers are being generated by the in-flight study and land here in a
+follow-up commit; the regime-dataset conclusions above are final.)*
+
+### Compute cost (median train s/fold across trials, v0.8.1)
+
+| Dataset | naive | ensemble | MoE | MoE / naive | MoE / ensemble |
+|---|---|---|---|---|---|
+| `synthetic` | 0.110 | 0.321 | 0.327 | 3.0 × | 1.0 × |
+| `fred_gdp` | 0.014 | 0.031 | 0.133 | 9.5 × | 4.3 × |
+| `hmm` | 0.031 | 0.093 | 0.177 | 5.7 × | 1.9 × |
+| `vix` | 0.049 | 0.149 | 0.285 | 5.8 × | 1.9 × |
+| `sp500_basic` | 0.022 | 0.057 | 0.143 | 6.5 × | 2.5 × |
+| `sp500` | 0.023 | 0.133 | 0.103 | 4.5 × | 0.8 × |
+
+> **The sp500 pair is a controlled feature-engineering ablation on the same raw series**:
+> only the feature set changes between rows, identical CV / Optuna budget / seed. All three
+> variants are essentially tied at the noise floor under both feature sets — the
+> next-day-log-return objective appears irreducible under any architecture we've tried.
 
 ### Datasets
 
-Five datasets spanning the regime-switching applicability spectrum: one MoE-ideal synthetic, three real-world series (the canonical references in the regime-switching literature), and one HMM with known ground-truth labels for measuring regime recovery.
+Regime datasets span the regime-switching applicability spectrum: one MoE-ideal synthetic,
+three real-world series (canonical references in the regime-switching literature), and one
+HMM with known ground-truth labels. All time-series generators follow the audited
+alignment convention: **row t's features use information available at time t only; the
+target is the value at t + 1** (verified by `tests/python_package_test/test_benchmark_methodology.py`).
 
 #### `synthetic` — feature-driven regime, MoE-ideal case (2000 × 5)
 
@@ -225,14 +272,14 @@ Five datasets spanning the regime-switching applicability spectrum: one MoE-idea
 
 - **Source**: FRED series [`GDPC1`](https://fred.stlouisfed.org/series/GDPC1) — Real Gross Domestic Product, Chained 2017 Dollars, Quarterly, Seasonally Adjusted Annual Rate (BEA via FRED, no auth, CSV endpoint).
 - **Methodology cite**: Hamilton, J. D. (1989). *A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle.* **Econometrica** 57(2), 357-384. <https://www.jstor.org/stable/1912559>.
-- **Construction**: target is the quarterly growth rate `100·Δlog(GDP)`; features are 4 lags of growth (Hamilton's MS-AR(4)) plus engineered MA / volatility / regime-proxy features. The regime (expansion / recession) is genuinely latent — there is no oracle column. Generator: `generate_fred_gdp_data`.
+- **Construction**: target is the quarterly growth rate `100·Δlog(GDP)`; features are 4 lags of growth (Hamilton's MS-AR(4)) plus engineered MA / volatility / regime-proxy features. The regime (expansion / recession) is genuinely latent — there is no oracle column. The chronological holdout contains the COVID quarters, which is exactly where MoE's win comes from. Generator: `generate_fred_gdp_data`.
 
 #### `sp500_basic` & `sp500` — S&P 500 daily log returns, two feature sets
 
-The S&P 500 series is included in **two parallel configurations** to demonstrate how MoE's lift scales with how observable the regime is from features:
+The S&P 500 series is included in **two parallel configurations** to test how MoE's lift scales with feature richness:
 
-- **`sp500_basic`** (~3760 × 13): the minimal feature set — lagged returns at {1, 2, 3, 5, 10} plus the standard MA / rolling-vol / regime-proxy block (`generate_sp500_basic_data`).
-- **`sp500`** (~3710 × 28): a practitioner-grade feature set — multi-horizon lags {1, 2, 3, 5, 10, 20, 60}, cumulative momentum at {5, 20, 60}, realized volatility at {5, 20, 60} plus the short/long ratio, multi-window MAs and MA crossovers, RSI(14)/RSI(30), rolling skewness and kurtosis (20-day), Bollinger band z-score, drawdown from the 20- and 60-day rolling high, and fraction of positive returns over {5, 20} days (`generate_sp500_data`).
+- **`sp500_basic`** (~3760 × 13): minimal — lagged returns at {1, 2, 3, 5, 10} (lag-1 = today's return) plus the standard MA / rolling-vol / regime-proxy block (`generate_sp500_basic_data`).
+- **`sp500`** (~3710 × 28): practitioner-grade — multi-horizon lags, momentum, realized volatility + ratio, MA crossovers, RSI(14)/RSI(30), rolling skew/kurtosis, Bollinger z-score, drawdowns, positive-day fractions (`generate_sp500_data`).
 
 Common to both:
 
@@ -241,49 +288,57 @@ Common to both:
 - **Target**: next-day log return (deliberately hard predictive setup).
 - **Regime structure**: latent (low-vol vs high-vol periods).
 
-The empirical takeaway from the side-by-side: with the basic feature set the result is a true tie; with the enriched set MoE picks up a sub-percent edge *and* trains faster than naive. **As features make the regime more predictable, MoE's advantage grows** — consistent with the broader thesis that MoE wins scale with regime observability.
-
 #### `vix` — CBOE Volatility Index, daily level (~3760 × 13)
 
 - **Source**: Yahoo Finance, symbol [`^VIX`](https://finance.yahoo.com/quote/%5EVIX/history) (same date range as `sp500`).
 - **Index methodology**: [CBOE VIX](https://www.cboe.com/tradable_products/vix/).
-- **Construction**: target is next-day VIX level. Features: lagged VIX at lags {1, 2, 3, 5, 10} plus MA / rolling-volatility features. Same latent low-vol / high-vol regime structure as `sp500`, viewed through the implied-vol lens. Generator: `generate_vix_data`.
+- **Construction**: target is next-day VIX level. Features: lagged VIX at lags {1, 2, 3, 5, 10} plus MA / rolling-volatility features computed on a **causally demeaned** series (expanding past-only mean — the pre-v0.8.1 version demeaned with the full-sample mean, which leaked "above/below the all-time mean" into the features and inflated MoE's score; that win is retracted). Generator: `generate_vix_data`.
 
 #### `hmm` — 3-state Gaussian HMM with known regime labels (2000 × 5)
 
 - **Source**: internal generator in this repo (`generate_hmm_data`).
 - **Methodology cite**: Rabiner, L. R. (1989). *A Tutorial on Hidden Markov Models and Selected Applications in Speech Recognition.* **Proceedings of the IEEE** 77(2), 257-286. <https://www.cs.ubc.ca/~murphyk/Bayes/rabiner.pdf>.
-- **Construction**: hidden state evolves as a 3-state Markov chain with persistent (95 % diagonal) transitions; emissions are Gaussian with well-separated means `{−3, 0, +3}` and varying scales `{0.4, 0.7, 1.0}`. Two of the five feature columns carry a weak linear signal of the hidden state (so the gate has *some* observable hint, not a free lunch); the remaining three columns are pure noise. **Returns the ground-truth regime labels** — usable for measuring regime recovery, not just RMSE.
+- **Construction**: hidden state evolves as a 3-state Markov chain with persistent (95 % diagonal) transitions; emissions are Gaussian with well-separated means `{−3, 0, +3}` and varying scales `{0.4, 0.7, 1.0}`. Two of the five feature columns carry a weak linear signal of the hidden state; the rest are pure noise. **Returns ground-truth regime labels** — usable for measuring regime recovery, not just RMSE.
+
+#### Control datasets — `houses`, `cpu_act`, `elevators`, `wine_quality`
+
+- **Source**: OpenML v1 originals (data_ids 537 / 197 / 216 / 287), from the regression-on-numerical-features track of Grinsztajn, L., Oyallon, E., & Varoquaux, G. (2022). *Why do tree-based models still outperform deep learning on typical tabular data?* **NeurIPS Datasets & Benchmarks**.
+- **Preprocessing** (ours, documented): numeric columns only, NaN rows dropped, seeded shuffle, 10k-row cap (tabular-benchmark "medium-sized" convention). Rows carry no temporal meaning, so the chronological splits behave like random splits here.
 
 ### Caching
 
-Real-world fetches (FRED, yfinance) are cached under `examples/data_cache/` (gitignored). First run pulls from the network; subsequent runs are offline.
+Real-world fetches (FRED, yfinance, OpenML) are cached under `examples/data_cache/`
+(gitignored); sha256 checksums of every cache file are recorded in each study's output
+JSON, so any run can be tied to the exact bytes it saw. First run pulls from the network;
+subsequent runs are offline.
 
 ### Settings that won — search every knob
 
-In the deterministic 500-trial study, **no MoE knob was a universal winner**: the best `mixture_gate_type` is `gbdt` on 4 of 6 rows but `leaf_reuse` on `fred_gdp` and `vix`; the best `mixture_routing_mode` is split 3 / 3 between `token_choice` and `expert_choice`; the best `mixture_num_experts` is spread across {2, 3, 4}. The only knob that's **non-zero on every dataset** is `mixture_diversity_lambda` (range [0.07, 0.36] across the 6 winners), which validates that the diversity regularizer is doing real work — search it explicitly. Full per-dataset table in [docs/moe/benchmark.md](docs/moe/benchmark.md).
-
-| Parameter | Universal? | Notes |
-|---|---|---|
-| `mixture_gate_type` | **No** | `gbdt` wins on synthetic, sp500_basic, sp500, hmm; `leaf_reuse` wins on fred_gdp, vix. Search both. |
-| `mixture_routing_mode` | **No** | `token_choice` wins on synthetic, sp500, hmm; `expert_choice` wins on fred_gdp, sp500_basic, vix. Search both. |
-| `mixture_num_experts` | **No** | K=4 most common (3 / 6), but K=2 wins on synthetic and vix, K=3 on hmm. Search {2, 3, 4, 6}. |
-| `mixture_diversity_lambda` | search 0.05–0.4 | Always non-zero in the per-dataset best params after the [PR #26](https://github.com/kyo219/LightGBM-MoE/pull/26) sign / Hessian fix. Top-5 in fANOVA importance. |
-| `mixture_estimate_variance` | **leave at default `true`** | Default since [PR #24](https://github.com/kyo219/LightGBM-MoE/pull/24). Setting `false` re-enables the legacy fixed-`alpha` E-step temperature, which is y-scale dependent and emits a warning at Init. |
-
-Dataset-dependent knobs (`mixture_e_step_mode`, `mixture_init`, `mixture_r_smoothing`, `mixture_hard_m_step`, `extra_trees`, `learning_rate`) need per-problem search — see [docs/moe/benchmark.md](docs/moe/benchmark.md) for the full breakdown table.
+*(Being re-measured under the fixed protocol with the widened search space
+(`--moe-space wide`: `gmm_features`/`kmeans_features` inits, K ≤ 6, gate temperature
+annealing, entropy λ, expert dropout, load-balance α). The pre-v0.8.1 per-knob table was
+derived from the retracted methodology and is intentionally removed rather than repeated;
+results land here in a follow-up commit.)*
 
 ```bash
-# Reproduce the full headline study (~20 min on 12-core / 24-thread, 6 dataset rows;
-# default --n-jobs 1 makes the result deterministic across runs and builds — see PR #30)
-python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
+# Full headline study (holdout protocol, 3 seeds; deterministic per seed)
+python examples/comparative_study.py --trials 300 --seeds 42,43,44 \
+    --out bench_results/study_holdout.json
 
-# Smoke test (~1 min, all 6 dataset rows; --n-jobs 2 trades reproducibility for speed)
-python examples/comparative_study.py --trials 10 --n-jobs 2 --out bench_results/smoke.json
+# Wide MoE search space (adds gmm_features/kmeans_features inits, K up to 6,
+# gate temperature annealing, entropy lambda, dropout, load-balance alpha)
+python examples/comparative_study.py --trials 500 --seeds 42,43,44 \
+    --variants naive-lightgbm,moe --moe-space wide \
+    --out bench_results/study_wide.json
 
-# Subset of datasets
-python examples/comparative_study.py --trials 500 \
-    --datasets sp500_basic,sp500 --out bench_results/sp500_ablation.json
+# Smoke test (~2 min)
+python examples/comparative_study.py --trials 10 --seeds 42 \
+    --datasets synthetic,fred_gdp --out bench_results/smoke.json
+
+# A/B two builds of the C++ core with the same protocol
+LGBM_MOE_PACKAGE_DIR=/path/to/other/python-package \
+    python examples/comparative_study.py --trials 300 --seeds 42,43,44 \
+    --out bench_results/study_other_build.json
 ```
 
 ## Documentation

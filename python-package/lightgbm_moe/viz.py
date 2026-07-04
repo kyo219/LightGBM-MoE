@@ -297,10 +297,24 @@ class RegimeEvolutionRecorder:
         # --- Panel ② tape: argmax(r) over iterations -----------------------
         ax_tape = fig.add_subplot(gs[1, :])
         # imshow with sample on x, snapshot on y. extent so x lines up with
-        # whatever x_for_top uses; for tabular it's just rank.
+        # whatever x_for_top uses; for tabular it's just rank. Note that
+        # imshow assumes uniformly spaced samples, so a non-uniform
+        # time_axis is approximated by stretching it linearly over the extent.
         x_left, x_right = (0.0, float(num_data))
-        if resolved_mode == "timeseries" and np.issubdtype(time_x.dtype, np.number):
-            x_left, x_right = float(time_x[0]), float(time_x[-1])
+        datetime_axis = False
+        if resolved_mode == "timeseries":
+            if np.issubdtype(time_x.dtype, np.number):
+                x_left, x_right = float(time_x[0]), float(time_x[-1])
+            else:
+                # Datetime axes: convert to matplotlib's float date units so
+                # the tape shares x-coordinates with the top panel.
+                try:
+                    from matplotlib.dates import date2num
+
+                    x_left, x_right = float(date2num(time_x[0])), float(date2num(time_x[-1]))
+                    datetime_axis = True
+                except (TypeError, ValueError):
+                    pass  # unknown dtype — keep the (0, N) fallback
         ax_tape.imshow(
             argmax_plot,
             aspect="auto",
@@ -310,6 +324,8 @@ class RegimeEvolutionRecorder:
             extent=(x_left, x_right, num_snap - 0.5, -0.5),
             origin="upper",
         )
+        if datetime_axis:
+            ax_tape.xaxis_date()
         ax_tape.set_yticks(range(num_snap))
         ax_tape.set_yticklabels(
             [f"iter={it}" for it in self.iterations],

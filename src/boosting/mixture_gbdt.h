@@ -458,6 +458,43 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief E-step loss type (l2, l1, quantile) */
   std::string e_step_loss_type_;
 
+  /*! \brief Gate GBDT iterations per MoE round (mixture_gate_iters_per_round).
+   *
+   * The gate accumulates `gate_iters_per_round_` GBDT iterations for every
+   * single MoE iteration, so "iteration i" means different tree offsets for
+   * the gate vs the experts whenever this is > 1. Every place that maps an
+   * iteration RANGE onto the gate must scale by this factor or the gate is
+   * silently truncated to 1/g of the trees that match the experts:
+   *   - SaveModelToString (truncated save, e.g. best_iteration via Python)
+   *   - InitPredict (predict with num_iteration)
+   *   - RollbackOneIter (early stopping rollback)
+   * Serialized in the model header so a loaded model keeps the scaling. */
+  int gate_iters_per_round_ = 1;
+
+  /*! \brief MoE iteration at which RefitExpertsAndGate last fired. Used by
+   * ShouldRefit's "elbo" trigger as a cooldown: a converged run plateaus its
+   * ELBO permanently, and without a cooldown the plateau detector fires every
+   * remaining iteration — each fire is a full O(total_trees · N) replay, so
+   * the tail of training degenerates to quadratic cost for zero benefit
+   * (refitting an already-refit fixed point is a no-op). After a fire, the
+   * elbo trigger stays quiet for `mixture_elbo_window` iterations so the
+   * window refills with post-refit values before it can fire again. */
+  int last_refit_moe_iter_ = -1000000;
+
+  /*! \brief Warn-once flag for unknown mixture_refit_trigger values (the
+   * check lives in const ShouldRefit(), called every iteration). */
+  mutable bool refit_trigger_warned_ = false;
+
+  /*! \brief True when expert_pred_* / gate_proba_* / yhat_ already reflect
+   * the current model state, so the next TrainOneIter can skip its leading
+   * Forward(). Set by the end-of-iteration Forward() refresh (which exists so
+   * training metrics are computed on the post-M-step model, matching the
+   * cadence of validation metrics); only set when temperature annealing is
+   * off, because the start-of-iter Forward would otherwise use a different
+   * gate temperature. Invalidated by anything that mutates model state
+   * outside TrainOneIter (rollback, config/data reset). */
+  bool forward_fresh_ = false;
+
   /*! \brief Per-expert noise scale (size K).
    *
    * Interpretation depends on e_step_loss_type_:
@@ -466,9 +503,9 @@ class MixtureGBDT : public GBDTBase {
    *   - "quantile"→ pseudo-scale carrying the same role as σ_k² (no proper density)
    *
    * Updated each iter from responsibility-weighted residuals when
-   * mixture_estimate_variance=true. Initialized to a sensible default
-   * (overall residual scale / K) and floored with kMixtureVarianceFloor to
-   * prevent collapse.
+   * mixture_estimate_variance=true. Initialized to the marginal label
+   * variance (or Laplace scale) as a worst-case default and floored with
+   * kMixtureEpsilon to prevent collapse.
    */
   std::vector<double> expert_variance_;
 

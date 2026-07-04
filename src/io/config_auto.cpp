@@ -354,7 +354,6 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "mixture_regrow_per_fire",
   "mixture_regrow_min_remaining",
   "mixture_regrow_mode",
-  "mixture_predict_output",
   "mixture_gate_max_depth",
   "mixture_gate_num_leaves",
   "mixture_gate_learning_rate",
@@ -804,7 +803,6 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
 
   GetString(params, "mixture_regrow_mode", &mixture_regrow_mode);
 
-  GetString(params, "mixture_predict_output", &mixture_predict_output);
 
   GetInt(params, "mixture_gate_max_depth", &mixture_gate_max_depth);
   CHECK_GT(mixture_gate_max_depth, 0);
@@ -1050,7 +1048,6 @@ std::string Config::SaveMembersToString() const {
   str_buf << "[mixture_regrow_per_fire: " << mixture_regrow_per_fire << "]\n";
   str_buf << "[mixture_regrow_min_remaining: " << mixture_regrow_min_remaining << "]\n";
   str_buf << "[mixture_regrow_mode: " << mixture_regrow_mode << "]\n";
-  str_buf << "[mixture_predict_output: " << mixture_predict_output << "]\n";
   str_buf << "[mixture_gate_max_depth: " << mixture_gate_max_depth << "]\n";
   str_buf << "[mixture_gate_num_leaves: " << mixture_gate_num_leaves << "]\n";
   str_buf << "[mixture_gate_learning_rate: " << mixture_gate_learning_rate << "]\n";
@@ -1253,7 +1250,6 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"mixture_regrow_per_fire", {}},
     {"mixture_regrow_min_remaining", {}},
     {"mixture_regrow_mode", {}},
-    {"mixture_predict_output", {}},
     {"mixture_gate_max_depth", {}},
     {"mixture_gate_num_leaves", {}},
     {"mixture_gate_learning_rate", {}},
@@ -1456,7 +1452,6 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"mixture_regrow_per_fire", "int"},
     {"mixture_regrow_min_remaining", "int"},
     {"mixture_regrow_mode", "string"},
-    {"mixture_predict_output", "string"},
     {"mixture_gate_max_depth", "int"},
     {"mixture_gate_num_leaves", "int"},
     {"mixture_gate_learning_rate", "double"},

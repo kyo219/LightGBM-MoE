@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
@@ -32,6 +33,20 @@
 namespace LightGBM {
 
 constexpr double kMixtureEpsilon = 1e-12;
+
+namespace {
+
+/*! \brief Shared no-op early-stop instance for the per-row predict paths.
+ * Constructing one per Predict* call showed up as per-row overhead when the
+ * C API loops these functions over full matrices (the instance is stateless
+ * for "none", so a single shared const object is thread-safe). */
+const PredictionEarlyStopInstance& NoEarlyStopInstance() {
+  static const PredictionEarlyStopInstance kNoEarlyStop =
+      CreatePredictionEarlyStopInstance("none", PredictionEarlyStopConfig());
+  return kNoEarlyStop;
+}
+
+}  // anonymous namespace
 
 MixtureGBDT::MixtureGBDT()
     : num_experts_(4),
@@ -73,6 +88,50 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // Store original config
   config_ = std::unique_ptr<Config>(new Config(*config));
   num_experts_ = config_->mixture_num_experts;
+  gate_iters_per_round_ = std::max(1, config_->mixture_gate_iters_per_round);
+
+  // Validate enum-valued mixture params loudly. Every one of these used to
+  // fall through to a silent default on a typo (e.g. mixture_init=gmm_feature
+  // trained with uniform init and no diagnostic) — only refit_trigger warned.
+  {
+    auto check_enum = [](const char* name, const std::string& value,
+                         std::initializer_list<const char*> valid) {
+      for (const char* v : valid) {
+        if (value == v) return;
+      }
+      std::string valid_str;
+      for (const char* v : valid) {
+        if (!valid_str.empty()) valid_str += ", ";
+        valid_str += v;
+      }
+      Log::Warning("MixtureGBDT: unknown %s '%s' — falling back to default "
+                   "behavior. Valid values: %s.",
+                   name, value.c_str(), valid_str.c_str());
+    };
+    check_enum("mixture_init", config_->mixture_init,
+               {"uniform", "quantile", "random", "balanced_kmeans",
+                "kmeans_features", "gmm", "gmm_features", "tree_hierarchical"});
+    check_enum("mixture_gate_type", config_->mixture_gate_type,
+               {"gbdt", "none", "leaf_reuse"});
+    check_enum("mixture_r_smoothing", config_->mixture_r_smoothing,
+               {"none", "ema", "markov", "momentum"});
+    check_enum("mixture_e_step_mode", config_->mixture_e_step_mode,
+               {"em", "gate_only", "loss_only"});
+    check_enum("mixture_e_step_loss", config_->mixture_e_step_loss,
+               {"auto", "l2", "l1", "quantile"});
+    check_enum("mixture_routing_mode", config_->mixture_routing_mode,
+               {"token_choice", "expert_choice"});
+    check_enum("mixture_expert_choice_score", config_->mixture_expert_choice_score,
+               {"gate", "loss", "combined"});
+    check_enum("mixture_dropout_schedule", config_->mixture_dropout_schedule,
+               {"constant", "linear", "cosine"});
+    check_enum("mixture_progressive_mode", config_->mixture_progressive_mode,
+               {"none", "evomoe"});
+    check_enum("mixture_refit_trigger", config_->mixture_refit_trigger,
+               {"always", "elbo", "every_n"});
+    check_enum("mixture_regrow_mode", config_->mixture_regrow_mode,
+               {"replace", "delete"});
+  }
 
   // v0.7 leaf-refit incompatibility guard: leaf_reuse gate derives routing
   // from expert-tree leaf statistics, but RefitExpertsAndGate only refits the
@@ -108,6 +167,23 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
         "an asymmetric update. Forcing mixture_regrow_oldest_trees=false. "
         "Use gate_type='gbdt' to enable regrow.");
     config_->mixture_regrow_oldest_trees = false;
+  }
+
+  // Best-iteration semantics caveat: refit/regrow mutate PAST trees in place
+  // (leaf values and, with regrow, split structures). Early stopping can
+  // remove trees appended after the best iteration, but it cannot restore
+  // what refit rewrote — so the "best iteration" model returned after
+  // stopping is the best iteration's TREE SET with LATER refit passes baked
+  // into it, not the exact model that achieved the best validation score.
+  // The same applies to truncated saves (Python's post-train round-trip
+  // saves up to best_iteration). Warn once so the semantics are explicit.
+  if (config_->mixture_refit_leaves && config_->early_stopping_round > 0) {
+    Log::Warning(
+        "MixtureGBDT: mixture_refit_leaves=true with early stopping — refit "
+        "rewrites past trees in place, so the model restored/saved at the "
+        "best iteration includes refit passes that fired AFTER that "
+        "iteration. It is usually close to (often better than) the exact "
+        "best-iteration model, but not identical to it.");
   }
 
   // Get feature info
@@ -654,7 +730,9 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
 
   std::vector<double> X(static_cast<size_t>(N) * D);
   std::vector<double> feat_mean(D, 0.0);
-  std::vector<double> feat_std(D, 1.0);
+  // Accumulators start at 0; the old init of 1.0 leaked into the variance
+  // sum and inflated every per-dim std by sqrt(1/N) worth of bias.
+  std::vector<double> feat_std(D, 0.0);
 
   std::vector<BinIterator*> iters(num_features, nullptr);
   for (int f = 0; f < num_features; ++f) {
@@ -936,7 +1014,7 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
 
   // Compute global mean and std for normalization
   std::vector<double> global_mean(D, 0.0);
-  std::vector<double> global_std(D, 1.0);
+  std::vector<double> global_std(D, 0.0);
 
   for (data_size_t i = 0; i < N; ++i) {
     for (int d = 0; d < D; ++d) {
@@ -970,7 +1048,8 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
   std::vector<double> variances(static_cast<size_t>(K) * D);  // K x D (diagonal covariance)
   std::vector<double> weights(K, 1.0 / K);                    // Mixing coefficients
 
-  // Sort indices by last feature (label)
+  // Sort indices by the last dimension (the label when include_label=true,
+  // otherwise the last raw feature) purely for quantile seeding
   std::vector<data_size_t> sorted_idx(N);
   std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
   std::sort(sorted_idx.begin(), sorted_idx.end(),
@@ -1319,12 +1398,20 @@ void MixtureGBDT::ComputeGateProbForInference(const double* gate_raw,
   // `mixture_balance_factor` (which drives expert_bias_) or temperature
   // annealing produce a routing at inference that does not match the routing
   // used during training — silently degrading test metrics.
-  std::vector<double> scores(num_experts_);
+  double scores_buf[64];
+  std::vector<double> scores_heap;
+  double* scores;
+  if (num_experts_ <= 64) {
+    scores = scores_buf;
+  } else {
+    scores_heap.resize(num_experts_);
+    scores = scores_heap.data();
+  }
   const double inv_T = 1.0 / std::max(gate_temperature_, kMixtureEpsilon);
   for (int k = 0; k < num_experts_; ++k) {
     scores[k] = (gate_raw[k] + expert_bias_[k]) * inv_T;
   }
-  Softmax(scores.data(), num_experts_, gate_prob);
+  Softmax(scores, num_experts_, gate_prob);
 }
 
 void MixtureGBDT::Softmax(const double* scores, int n, double* probs) const {
@@ -1742,21 +1829,35 @@ void MixtureGBDT::EStep() {
     }
   }
 
+  // Integer mode dispatch hoisted out of the hot loop (string compares per
+  // (i, k) pair are measurable at N·K per iteration).
+  const int mode_kind = (mode == "gate_only") ? 1 : (mode == "loss_only") ? 2 : 0;
+
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
-    std::vector<double> scores(num_experts_);
+    // Stack buffer for K ≤ 64 — avoids a heap alloc per sample per iteration
+    // (same pattern as MStepGate).
+    double scores_buf[64];
+    std::vector<double> scores_heap;
+    double* scores;
+    if (num_experts_ <= 64) {
+      scores = scores_buf;
+    } else {
+      scores_heap.resize(num_experts_);
+      scores = scores_heap.data();
+    }
 
     for (int k = 0; k < num_experts_; ++k) {
       double score = 0.0;
 
-      if (mode == "gate_only") {
+      if (mode_kind == 1) {
         // Prior π_k(x) = bias-free softmax of gate logits. The load-balance
         // bias is a routing nudge (DeepSeek), not a probabilistic prior;
         // mixing it into the responsibility softmax forces the gate to
         // learn to undo bias each iter — defeats the point.
         const double gate_prob = gate_proba_no_bias_[i * num_experts_ + k];
         score = std::log(gate_prob + kMixtureEpsilon);
-      } else if (mode == "loss_only") {
+      } else if (mode_kind == 2) {
         const double expert_p = expert_pred_sm_[i * num_experts_ + k];
         const double loss = ComputePointwiseLoss(labels[i], expert_p);
         if (estimate_var) {
@@ -1781,7 +1882,7 @@ void MixtureGBDT::EStep() {
       scores[k] = score - load_penalty[k];
     }
 
-    Softmax(scores.data(), num_experts_, responsibilities_.data() + i * num_experts_);
+    Softmax(scores, num_experts_, responsibilities_.data() + i * num_experts_);
   }
 }
 
@@ -1792,36 +1893,58 @@ void MixtureGBDT::UpdateExpertVariances() {
   // Standard MoE M-step for the noise scale (per Jordan-Jacobs):
   //   σ_k² = Σ_i r_ik (y_i - f_k(x_i))² / Σ_i r_ik
   //   b_k  = Σ_i r_ik |y_i - f_k(x_i)| / Σ_i r_ik       (Laplace)
-  // Using a sample-major reduction with per-thread accumulators to avoid the
-  // false-sharing pitfall when num_experts_ is small.
+  // Sample-major reduction with per-thread accumulators (avoids false
+  // sharing on small num_experts_), merged serially at the end. Runs every
+  // iteration, so the O(N·K) pass is worth parallelizing.
+  const int loss_kind = (e_step_loss_type_ == "l1") ? 1
+                        : (e_step_loss_type_ == "quantile") ? 2 : 0;
+  const int num_threads = OMP_NUM_THREADS();
+  std::vector<std::vector<double>> tl_num(num_threads,
+                                          std::vector<double>(num_experts_, 0.0));
+  std::vector<std::vector<double>> tl_den(num_threads,
+                                          std::vector<double>(num_experts_, 0.0));
+
+  #pragma omp parallel num_threads(num_threads)
+  {
+    const int tid = omp_get_thread_num();
+    auto& num_acc_t = tl_num[tid];
+    auto& den_acc_t = tl_den[tid];
+    #pragma omp for schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      const double y = static_cast<double>(labels[i]);
+      for (int k = 0; k < num_experts_; ++k) {
+        const double r = responsibilities_[i * num_experts_ + k];
+        const double f = expert_pred_sm_[i * num_experts_ + k];
+        const double diff = y - f;
+        // Per loss type, accumulate the residual term whose units match the
+        // "scale" the E-step then divides by — i.e. the unitless ratio
+        //   loss / scale  must equal the log-density exponent.
+        //   l2:        scale = σ² = E[diff²],            E-step uses diff²/(2σ²)
+        //   l1:        scale = b  = E[|diff|],           E-step uses |diff|/b
+        //   quantile:  scale = E[pinball],               E-step uses pinball/scale
+        // The earlier code fell into (diff*diff) for *anything other than l1*,
+        // so quantile users got `pinball / E[diff²]` — dimensionally O(1/diff)
+        // and silently temperature-coupled to the y-scale.
+        double residual_term;
+        if (loss_kind == 1) {
+          residual_term = std::fabs(diff);
+        } else if (loss_kind == 2) {
+          residual_term = ComputePointwiseLoss(y, f);  // pinball loss
+        } else {
+          residual_term = diff * diff;
+        }
+        num_acc_t[k] += r * residual_term;
+        den_acc_t[k] += r;
+      }
+    }
+  }
+
   std::vector<double> num_acc(num_experts_, 0.0);
   std::vector<double> den_acc(num_experts_, 0.0);
-
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    const double y = static_cast<double>(labels[i]);
+  for (int t = 0; t < num_threads; ++t) {
     for (int k = 0; k < num_experts_; ++k) {
-      const double r = responsibilities_[i * num_experts_ + k];
-      const double f = expert_pred_sm_[i * num_experts_ + k];
-      const double diff = y - f;
-      // Per loss type, accumulate the residual term whose units match the
-      // "scale" the E-step then divides by — i.e. the unitless ratio
-      //   loss / scale  must equal the log-density exponent.
-      //   l2:        scale = σ² = E[diff²],            E-step uses diff²/(2σ²)
-      //   l1:        scale = b  = E[|diff|],           E-step uses |diff|/b
-      //   quantile:  scale = E[pinball],               E-step uses pinball/scale
-      // The earlier code fell into (diff*diff) for *anything other than l1*,
-      // so quantile users got `pinball / E[diff²]` — dimensionally O(1/diff)
-      // and silently temperature-coupled to the y-scale.
-      double residual_term;
-      if (e_step_loss_type_ == "l1") {
-        residual_term = std::fabs(diff);
-      } else if (e_step_loss_type_ == "quantile") {
-        residual_term = ComputePointwiseLoss(y, f);  // pinball loss
-      } else {
-        residual_term = diff * diff;
-      }
-      num_acc[k] += r * residual_term;
-      den_acc[k] += r;
+      num_acc[k] += tl_num[t][k];
+      den_acc[k] += tl_den[t][k];
     }
   }
 
@@ -1945,6 +2068,32 @@ void MixtureGBDT::ComputeAffinityScores() {
   const label_t* labels = train_data_->metadata().label();
   const double alpha = config_->mixture_e_step_alpha;
   const std::string& score_type = config_->mixture_expert_choice_score;
+  const bool estimate_var = config_->mixture_estimate_variance;
+
+  // Same per-expert log-density terms as EStep. Before this, Expert-Choice
+  // silently ignored mixture_estimate_variance (default true) and always
+  // used the legacy fixed-alpha energy — so the y-scale-dependent alpha
+  // problem PR #24 fixed for Token-Choice persisted here, and the σ_k² that
+  // UpdateExpertVariances kept estimating fed the ELBO diagnostic but not
+  // the actual routing objective. Affinity now uses
+  // log π_k + log p(y | f_k, σ_k²), consistent with the E-step posterior.
+  std::vector<double> log_norm(num_experts_, 0.0);
+  std::vector<double> inv_scale(num_experts_, alpha);
+  if (estimate_var) {
+    for (int k = 0; k < num_experts_; ++k) {
+      const double s = std::max(expert_variance_[k], kMixtureEpsilon);
+      if (e_step_loss_type_ == "l1") {
+        log_norm[k]  = -std::log(2.0 * s);
+        inv_scale[k] = 1.0 / s;
+      } else if (e_step_loss_type_ == "l2") {
+        log_norm[k]  = -0.5 * std::log(s);
+        inv_scale[k] = 1.0 / (2.0 * s);
+      } else {
+        log_norm[k]  = 0.0;
+        inv_scale[k] = 1.0 / s;
+      }
+    }
+  }
 
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
@@ -1962,7 +2111,11 @@ void MixtureGBDT::ComputeAffinityScores() {
       if (score_type == "loss" || score_type == "combined") {
         double expert_p = expert_pred_sm_[i * num_experts_ + k];
         double loss = ComputePointwiseLoss(labels[i], expert_p);
-        score -= alpha * loss;
+        if (estimate_var) {
+          score += log_norm[k] - inv_scale[k] * loss;
+        } else {
+          score -= alpha * loss;
+        }
       }
 
       // Note: expert_bias_ is already applied in Forward() via gate softmax.
@@ -2579,6 +2732,14 @@ bool MixtureGBDT::ShouldRefit() const {
     if (elbo_history_.size() < 2) return false;
     const int W = std::max(2, config_->mixture_elbo_window);
 
+    // Cooldown: after a fire, stay quiet for W iters. A normally-converged
+    // run plateaus its ELBO permanently; without this the plateau detector
+    // fires every remaining iteration and each fire replays every tree —
+    // the tail of training degenerates to O(T²) for no benefit. W iters
+    // also lets the window refill with post-refit ELBO values, so the next
+    // decision is made on data that reflects the refit's effect.
+    if (moe_iter - last_refit_moe_iter_ < W) return false;
+
     // Drop detection — usable as soon as we have ≥2 samples; references the
     // window's earliest (t-W) and latest (t) values.
     const double elbo_t = elbo_history_.back();
@@ -2613,9 +2774,12 @@ bool MixtureGBDT::ShouldRefit() const {
     const int n = std::max(1, config_->mixture_refit_every_n);
     return (moe_iter % n) == 0;
   } else {
-    Log::Warning("MixtureGBDT: unknown mixture_refit_trigger '%s' — "
-                 "treating as 'always'. Valid: always, elbo, every_n.",
-                 trigger.c_str());
+    if (!refit_trigger_warned_) {
+      Log::Warning("MixtureGBDT: unknown mixture_refit_trigger '%s' — "
+                   "treating as 'always'. Valid: always, elbo, every_n.",
+                   trigger.c_str());
+      refit_trigger_warned_ = true;
+    }
     return true;
   }
 }
@@ -2753,7 +2917,9 @@ void MixtureGBDT::RefitExpertsAndGate() {
       // The callback is stateless w.r.t. which slot is being rebuilt because
       // GetPredictAt always returns the current backbone (RegrowTreeAt
       // / DeleteTreeAt arranges for the score to be at f^{(slot-1)}).
-      auto cb = make_expert_callback(k);
+      // "delete" mode never invokes it, so skip constructing it there.
+      GradHessCb cb;
+      if (!use_delete) cb = make_expert_callback(k);
       for (int s_step = 0; s_step < M_k; ++s_step) {
         // For "delete", subsequent trees shift down so the oldest is always
         // slot 0. For "replace", we walk slot 0, 1, ..., M_k-1 in order.
@@ -2775,7 +2941,8 @@ void MixtureGBDT::RefitExpertsAndGate() {
       if (T_g > min_rem) {
         const int M_g = std::min(M_per_fire, T_g - min_rem);
         if (M_g > 0) {
-          auto cb = make_gate_callback();
+          GradHessCb cb;
+          if (!use_delete) cb = make_gate_callback();
           for (int s_step = 0; s_step < M_g; ++s_step) {
             const int target_slot = use_delete ? 0 : s_step;
             if (use_delete) {
@@ -3135,27 +3302,39 @@ void MixtureGBDT::MStepGateLeafReuse() {
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
       // Bias-free softmax q_k = softmax(z_k / T) for the gradient target.
-      std::vector<double> scores(num_experts_);
+      // Stack buffers for K ≤ 64 (same pattern as MStepGate) — this loop
+      // runs every iteration in leaf_reuse mode and was allocating three
+      // heap vectors per sample.
+      double scores_buf[64];
+      double q_buf[64];
+      std::vector<double> heap_buf;
+      double* scores;
+      double* q;
+      if (num_experts_ <= 64) {
+        scores = scores_buf;
+        q = q_buf;
+      } else {
+        heap_buf.resize(2 * num_experts_);
+        scores = heap_buf.data();
+        q = heap_buf.data() + num_experts_;
+      }
       for (int k = 0; k < num_experts_; ++k) {
         scores[k] = gate_raw_lr[k * num_data_ + i] * inv_T_lr;
       }
-      std::vector<double> q(num_experts_);
-      Softmax(scores.data(), num_experts_, q.data());
+      Softmax(scores, num_experts_, q);
 
-      // Resolve target distribution from the leaf assignment.
+      // Resolve target distribution from the leaf assignment. Out-of-range
+      // leaves (shouldn't happen) fall back to a uniform target, handled
+      // inline below via a null target pointer.
       const int leaf = sample_leaf[i];
-      const double* target;
-      std::vector<double> uniform_buf;
-      if (leaf >= 0 && leaf < num_leaves) {
-        target = leaf_expert_sum_buf_.data() + static_cast<size_t>(leaf) * num_experts_;
-      } else {
-        uniform_buf.assign(num_experts_, uniform_prob_lr);
-        target = uniform_buf.data();
-      }
+      const double* target = (leaf >= 0 && leaf < num_leaves)
+          ? leaf_expert_sum_buf_.data() + static_cast<size_t>(leaf) * num_experts_
+          : nullptr;
 
       for (int k = 0; k < num_experts_; ++k) {
         const size_t idx = i + static_cast<size_t>(k) * num_data_;
-        const double base_grad = (q[k] - target[k]) * inv_T_lr;
+        const double target_k = (target != nullptr) ? target[k] : uniform_prob_lr;
+        const double base_grad = (q[k] - target_k) * inv_T_lr;
         const double reg_grad =
             dirichlet_lambda_lr * (q[k] - uniform_prob_lr) * inv_T_lr;
         gate_grad_lr[idx] = static_cast<score_t>(base_grad + reg_grad);
@@ -3245,8 +3424,14 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     }
   }
 
-  // Forward pass - compute expert predictions and gate probabilities
-  Forward();
+  // Forward pass - compute expert predictions and gate probabilities.
+  // Skipped when the end-of-iteration refresh below already computed the
+  // identical state (forward_fresh_ is only set when temperature annealing
+  // is off, so no input to Forward changed between there and here).
+  if (!forward_fresh_) {
+    Forward();
+  }
+  forward_fresh_ = false;
 
   // E-step: update responsibilities
   // Skip E-step for first few iterations to allow experts to differentiate
@@ -3290,6 +3475,7 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     // the post-refit expert_pred_ / gate_proba_.
     if (ShouldRefit()) {
       RefitExpertsAndGate();
+      last_refit_moe_iter_ = moe_iter;  // start the elbo-trigger cooldown
       Forward();
     }
   }
@@ -3383,6 +3569,18 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     }
   }
 
+  // Refresh training-side buffers so yhat_ reflects the post-M-step model.
+  // Without this, training metrics (GetEvalAt(0) / OutputMetric) were
+  // evaluated on the START-of-iteration yhat_ while validation metrics used
+  // the fresh post-M-step ForwardValid below — train and valid logs were
+  // silently offset by one iteration. When annealing is off, the next
+  // TrainOneIter reuses this Forward via forward_fresh_ so the per-iter
+  // forward count is unchanged; with annealing on, the next iteration's
+  // temperature differs and Forward must rerun there.
+  Forward();
+  forward_fresh_ = (config_->mixture_gate_temperature_init ==
+                    config_->mixture_gate_temperature_final);
+
   ++iter_;
 
   // Update validation predictions
@@ -3434,9 +3632,18 @@ void MixtureGBDT::RollbackOneIter() {
       for (int k = 0; k < num_experts_; ++k) {
         experts_[k]->RollbackOneIter();
       }
-      gate_->RollbackOneIter();
+      // The gate accumulates gate_iters_per_round_ GBDT iterations per MoE
+      // iteration (MStepGate / MStepGateLeafReuse loop that many times), so
+      // one MoE-iteration rollback must remove that many gate iterations.
+      // Rolling back only one left the gate with g-1 extra tree blocks per
+      // rolled-back iteration — early stopping then restored a routing that
+      // never coexisted with the restored experts.
+      for (int g = 0; g < gate_iters_per_round_; ++g) {
+        gate_->RollbackOneIter();
+      }
     }
     --iter_;
+    forward_fresh_ = false;  // buffers no longer match the model
   }
 }
 
@@ -3592,25 +3799,34 @@ int MixtureGBDT::NumPredictOneRow(int start_iteration, int num_iteration,
 
 void MixtureGBDT::Predict(const double* features, double* output,
                           const PredictionEarlyStopInstance* earlyStop) const {
-  // Create a no-op early stop instance if none provided
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-  const PredictionEarlyStopInstance* early_stop_ptr = earlyStop ? earlyStop : &no_early_stop;
+  const PredictionEarlyStopInstance* early_stop_ptr =
+      earlyStop ? earlyStop : &NoEarlyStopInstance();
 
-  // Get expert predictions
-  std::vector<double> expert_preds(num_experts_);
+  // Stack buffers for K ≤ 64: this function runs once per row inside the
+  // C API's parallel predict loop, so per-call heap allocations are pure
+  // per-row overhead.
+  double stack_buf[3 * 64];
+  std::vector<double> heap_buf;
+  double* expert_preds;
+  double* gate_raw;
+  double* gate_prob;
+  if (num_experts_ <= 64) {
+    expert_preds = stack_buf;
+    gate_raw = stack_buf + num_experts_;
+    gate_prob = stack_buf + 2 * num_experts_;
+  } else {
+    heap_buf.resize(3 * static_cast<size_t>(num_experts_));
+    expert_preds = heap_buf.data();
+    gate_raw = heap_buf.data() + num_experts_;
+    gate_prob = heap_buf.data() + 2 * num_experts_;
+  }
+
   for (int k = 0; k < num_experts_; ++k) {
     experts_[k]->Predict(features, &expert_preds[k], early_stop_ptr);
   }
+  gate_->PredictRaw(features, gate_raw, early_stop_ptr);
+  ComputeGateProbForInference(gate_raw, gate_prob);
 
-  // Get gate probabilities
-  std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRaw(features, gate_raw.data(), early_stop_ptr);
-
-  std::vector<double> gate_prob(num_experts_);
-  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
-
-  // Compute weighted sum
   double sum = 0.0;
   for (int k = 0; k < num_experts_; ++k) {
     sum += gate_prob[k] * expert_preds[k];
@@ -3625,10 +3841,8 @@ void MixtureGBDT::PredictRaw(const double* features, double* output,
 
 void MixtureGBDT::PredictByMap(const std::unordered_map<int, double>& features, double* output,
                                const PredictionEarlyStopInstance* early_stop) const {
-  // Create a no-op early stop instance if none provided
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-  const PredictionEarlyStopInstance* early_stop_ptr = early_stop ? early_stop : &no_early_stop;
+  const PredictionEarlyStopInstance* early_stop_ptr =
+      early_stop ? early_stop : &NoEarlyStopInstance();
 
   std::vector<double> expert_preds(num_experts_);
   for (int k = 0; k < num_experts_; ++k) {
@@ -3654,15 +3868,21 @@ void MixtureGBDT::PredictRawByMap(const std::unordered_map<int, double>& feature
 }
 
 void MixtureGBDT::PredictRegime(const double* features, int* output) const {
-  // Create a no-op early stop instance
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-
-  std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
-
-  std::vector<double> gate_prob(num_experts_);
-  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
+  // Stack buffers for K <= 64 — called once per row from the C API loop.
+  double stack_buf[2 * 64];
+  std::vector<double> heap_buf;
+  double* gate_raw;
+  double* gate_prob;
+  if (num_experts_ <= 64) {
+    gate_raw = stack_buf;
+    gate_prob = stack_buf + num_experts_;
+  } else {
+    heap_buf.resize(2 * static_cast<size_t>(num_experts_));
+    gate_raw = heap_buf.data();
+    gate_prob = heap_buf.data() + num_experts_;
+  }
+  gate_->PredictRaw(features, gate_raw, &NoEarlyStopInstance());
+  ComputeGateProbForInference(gate_raw, gate_prob);
 
   // Find argmax
   int best_k = 0;
@@ -3677,31 +3897,28 @@ void MixtureGBDT::PredictRegime(const double* features, int* output) const {
 }
 
 void MixtureGBDT::PredictRegimeProba(const double* features, double* output) const {
-  // Create a no-op early stop instance
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-
-  std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
-  ComputeGateProbForInference(gate_raw.data(), output);
+  double gate_raw_buf[64];
+  std::vector<double> heap_buf;
+  double* gate_raw;
+  if (num_experts_ <= 64) {
+    gate_raw = gate_raw_buf;
+  } else {
+    heap_buf.resize(num_experts_);
+    gate_raw = heap_buf.data();
+  }
+  gate_->PredictRaw(features, gate_raw, &NoEarlyStopInstance());
+  ComputeGateProbForInference(gate_raw, output);
 }
 
 void MixtureGBDT::PredictExpertPred(const double* features, double* output) const {
-  // Create a no-op early stop instance
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-
   for (int k = 0; k < num_experts_; ++k) {
-    experts_[k]->Predict(features, &output[k], &no_early_stop);
+    experts_[k]->Predict(features, &output[k], &NoEarlyStopInstance());
   }
 }
 
 void MixtureGBDT::PredictWithPrevProba(const double* features, const double* prev_proba,
                                         double* output) const {
-  // Create a no-op early stop instance
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-  const PredictionEarlyStopInstance* early_stop_ptr = &no_early_stop;
+  const PredictionEarlyStopInstance* early_stop_ptr = &NoEarlyStopInstance();
 
   // Get expert predictions
   std::vector<double> expert_preds(num_experts_);
@@ -3742,13 +3959,9 @@ void MixtureGBDT::PredictWithPrevProba(const double* features, const double* pre
 
 void MixtureGBDT::PredictRegimeProbaWithPrevProba(const double* features, const double* prev_proba,
                                                    double* output) const {
-  // Create a no-op early stop instance
-  PredictionEarlyStopInstance no_early_stop = CreatePredictionEarlyStopInstance(
-      "none", PredictionEarlyStopConfig());
-
   // Get current gate probabilities
   std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRaw(features, gate_raw.data(), &no_early_stop);
+  gate_->PredictRaw(features, gate_raw.data(), &NoEarlyStopInstance());
   ComputeGateProbForInference(gate_raw.data(), output);
 
   // Blend with prev_proba if provided and in Markov mode
@@ -3848,6 +4061,9 @@ void MixtureGBDT::ResetTrainingData(const Dataset* train_data,
 
   // Monotonicity baseline is invalidated when retraining on new data.
   prev_marginal_log_lik_ = -1e300;
+  elbo_history_.clear();
+  last_refit_moe_iter_ = -1000000;
+  forward_fresh_ = false;
 
   InitResponsibilities();
 }
@@ -3867,10 +4083,68 @@ void MixtureGBDT::ResetConfig(const Config* config) {
                  "incompatible mixture_gate_type='leaf_reuse'. See Init for rationale.");
     config_->mixture_regrow_oldest_trees = false;
   }
+  gate_iters_per_round_ = std::max(1, config_->mixture_gate_iters_per_round);
+
+  // Rebuild the derived expert / gate configs with the same transformations
+  // Init applies, instead of handing experts the RAW user config. Passing
+  // `config` straight through re-enabled per-expert bagging (which Init
+  // disables deliberately — bagging_fraction<1 overwrites MStepExperts'
+  // SetBaggingData restriction and reintroduces the degenerate-histogram
+  // crash of issue #16) and wiped the per-expert symmetry-breaking seeds and
+  // per-expert hyperparameter overrides. The gate conversely received the
+  // STALE gate_config_, ignoring whatever the caller just changed.
+  expert_config_ = std::unique_ptr<Config>(new Config(*config_));
+  expert_config_->bagging_fraction = 1.0;
+  expert_config_->bagging_freq = 0;
+  expert_config_->pos_bagging_fraction = 1.0;
+  expert_config_->neg_bagging_fraction = 1.0;
+  if (expert_config_->use_quantized_grad) {
+    expert_config_->quant_train_renew_leaf = true;
+  }
+  const bool per_max_depth = !config_->mixture_expert_max_depths.empty();
+  const bool per_num_leaves = !config_->mixture_expert_num_leaves.empty();
+  const bool per_min_data = !config_->mixture_expert_min_data_in_leaf.empty();
+  const bool per_min_gain = !config_->mixture_expert_min_gain_to_split.empty();
+  const bool per_extra_trees = !config_->mixture_expert_extra_trees.empty();
   for (int k = 0; k < num_experts_; ++k) {
-    experts_[k]->ResetConfig(config);
+    expert_configs_[k] = std::unique_ptr<Config>(new Config(*expert_config_));
+    expert_configs_[k]->seed = config_->seed + k + 1;
+    if (per_max_depth && k < static_cast<int>(config_->mixture_expert_max_depths.size())) {
+      expert_configs_[k]->max_depth = config_->mixture_expert_max_depths[k];
+    }
+    if (per_num_leaves && k < static_cast<int>(config_->mixture_expert_num_leaves.size())) {
+      expert_configs_[k]->num_leaves = config_->mixture_expert_num_leaves[k];
+    }
+    if (per_min_data && k < static_cast<int>(config_->mixture_expert_min_data_in_leaf.size())) {
+      expert_configs_[k]->min_data_in_leaf = config_->mixture_expert_min_data_in_leaf[k];
+    }
+    if (per_min_gain && k < static_cast<int>(config_->mixture_expert_min_gain_to_split.size())) {
+      expert_configs_[k]->min_gain_to_split = config_->mixture_expert_min_gain_to_split[k];
+    }
+    if (per_extra_trees && k < static_cast<int>(config_->mixture_expert_extra_trees.size())) {
+      expert_configs_[k]->extra_trees = (config_->mixture_expert_extra_trees[k] != 0);
+    }
+    // In progressive mode before SpawnExpertsFromSeed, experts_ is empty —
+    // the rebuilt expert_configs_ are picked up at spawn time instead.
+    if (k < static_cast<int>(experts_.size())) {
+      experts_[k]->ResetConfig(expert_configs_[k].get());
+    }
+  }
+
+  gate_config_ = std::unique_ptr<Config>(new Config(*config_));
+  gate_config_->objective = "multiclass";
+  gate_config_->num_class = num_experts_;
+  gate_config_->max_depth = config_->mixture_gate_max_depth;
+  gate_config_->num_leaves = config_->mixture_gate_num_leaves;
+  gate_config_->learning_rate = config_->mixture_gate_learning_rate;
+  gate_config_->lambda_l2 = config_->mixture_gate_lambda_l2;
+  if (gate_config_->use_quantized_grad) {
+    gate_config_->quant_train_renew_leaf = true;
   }
   gate_->ResetConfig(gate_config_.get());
+
+  // Model state changed shape of derived params; force a fresh Forward.
+  forward_fresh_ = false;
 }
 
 void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
@@ -3978,11 +4252,20 @@ bool MixtureGBDT::SaveModelToFile(int start_iteration, int num_iterations,
 std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iterations,
                                             int feature_importance_type) const {
   std::stringstream ss;
+  // Full round-trip precision for the scalar header values. Tree blocks are
+  // serialized at full precision by GBDT::SaveModelToString, but the default
+  // stream precision here was 6 significant digits — and `lgb.train`
+  // performs a save→load round-trip on EVERY trained booster (engine.py),
+  // so bias / temperature / variance were silently truncated on every model,
+  // drifting the loaded model's routing ~1e-6-relative from the in-memory
+  // model that was validated during training.
+  ss << std::setprecision(std::numeric_limits<double>::max_digits10);
 
   // Mixture header
   ss << "mixture\n";
   ss << "mixture_enable=1\n";
   ss << "mixture_num_experts=" << num_experts_ << "\n";
+  ss << "mixture_gate_iters_per_round=" << gate_iters_per_round_ << "\n";
   ss << "mixture_e_step_alpha=" << config_->mixture_e_step_alpha << "\n";
   ss << "mixture_e_step_loss=" << e_step_loss_type_ << "\n";
   ss << "mixture_e_step_mode=" << config_->mixture_e_step_mode << "\n";
@@ -4011,9 +4294,18 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   }
   ss << "\n";
 
-  // Gate model
+  // Gate model. The gate accumulates gate_iters_per_round_ GBDT iterations
+  // per MoE iteration, so an iteration RANGE expressed in MoE units must be
+  // scaled before it is applied to the gate — otherwise a truncated save
+  // (e.g. Python's automatic best_iteration save after early stopping) cuts
+  // the gate to 1/g of the trees matching the kept experts and silently
+  // changes routing.
+  const int gate_start = (start_iteration > 0)
+      ? start_iteration * gate_iters_per_round_ : start_iteration;
+  const int gate_num = (num_iterations > 0)
+      ? num_iterations * gate_iters_per_round_ : num_iterations;
   ss << "[gate_model]\n";
-  ss << gate_->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
+  ss << gate_->SaveModelToString(gate_start, gate_num, feature_importance_type);
   ss << "\n";
 
   // Expert models
@@ -4061,9 +4353,31 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
     }
   }
 
-  // Extract parameters
+  // Extract parameters. Header numerics come from an untrusted file, so
+  // parse defensively: a corrupted / hand-edited header should fail with a
+  // clean Fatal, not throw std::invalid_argument out of the loader or (worse)
+  // accept num_experts=0 and hit UB in Softmax at predict time.
   if (params.count("mixture_num_experts")) {
-    num_experts_ = std::stoi(params["mixture_num_experts"]);
+    int parsed_k = 0;
+    if (!Common::AtoiAndCheck(params["mixture_num_experts"].c_str(), &parsed_k)) {
+      Log::Fatal("Invalid mixture model header: mixture_num_experts='%s' is not an integer",
+                 params["mixture_num_experts"].c_str());
+      return false;
+    }
+    num_experts_ = parsed_k;
+  }
+  if (num_experts_ < 1) {
+    Log::Fatal("Invalid mixture model header: mixture_num_experts=%d (must be >= 1)",
+               num_experts_);
+    return false;
+  }
+  if (params.count("mixture_gate_iters_per_round")) {
+    int parsed_g = 1;
+    if (Common::AtoiAndCheck(params["mixture_gate_iters_per_round"].c_str(), &parsed_g)) {
+      gate_iters_per_round_ = std::max(1, parsed_g);
+    }
+  } else {
+    gate_iters_per_round_ = 1;  // pre-0.8.1 models did not serialize this
   }
   if (params.count("mixture_e_step_loss")) {
     e_step_loss_type_ = params["mixture_e_step_loss"];
@@ -4075,7 +4389,9 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
   expert_variance_.assign(num_experts_, 1.0);
   gate_temperature_ = 1.0;
   if (params.count("mixture_gate_temperature")) {
-    gate_temperature_ = std::stod(params["mixture_gate_temperature"]);
+    try {
+      gate_temperature_ = std::stod(params["mixture_gate_temperature"]);
+    } catch (...) { /* keep default */ }
   }
   auto parse_csv_doubles = [&](const std::string& csv,
                                std::vector<double>* out, int expected) {
@@ -4331,7 +4647,14 @@ void MixtureGBDT::InitPredict(int start_iteration, int num_iteration, bool is_pr
   for (int k = 0; k < num_experts_; ++k) {
     experts_[k]->InitPredict(start_iteration, num_iteration, is_pred_contrib);
   }
-  gate_->InitPredict(start_iteration, num_iteration, is_pred_contrib);
+  // Iteration ranges arrive in MoE units; the gate holds gate_iters_per_round_
+  // GBDT iterations per MoE iteration (see SaveModelToString for the same
+  // scaling and the failure mode without it).
+  const int gate_start = (start_iteration > 0)
+      ? start_iteration * gate_iters_per_round_ : start_iteration;
+  const int gate_num = (num_iteration > 0)
+      ? num_iteration * gate_iters_per_round_ : num_iteration;
+  gate_->InitPredict(gate_start, gate_num, is_pred_contrib);
 }
 
 double MixtureGBDT::GetLeafValue(int tree_idx, int leaf_idx) const {
@@ -4355,7 +4678,7 @@ int MixtureGBDT::GetNumLeavesForTree(int tree_idx) const {
 }
 
 std::string MixtureGBDT::GetLoadedParam() const {
-  Log::Warning("MixtureGBDT::GetLoadedParam called, loaded_parameter_=%s", loaded_parameter_.c_str());
+  Log::Debug("MixtureGBDT::GetLoadedParam called, loaded_parameter_=%s", loaded_parameter_.c_str());
   return loaded_parameter_;
 }
 

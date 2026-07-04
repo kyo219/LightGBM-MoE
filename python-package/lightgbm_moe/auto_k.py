@@ -2,6 +2,7 @@
 """Auto-K selection for MoE models — choose the optimal number of experts via information criteria or CV."""
 
 import copy
+import re
 import warnings
 
 import numpy as np
@@ -69,10 +70,19 @@ def select_num_experts(
     if p.get("boosting") != "mixture":
         raise ValueError("select_num_experts requires boosting='mixture' in params")
 
+    # The same Dataset is trained repeatedly (once per K candidate; cv_rmse
+    # additionally subsets rows per fold), which requires the raw data to
+    # survive the first construction. With the default free_raw_data=True the
+    # second candidate fails with "Cannot call `get_data` after freed raw
+    # data" — keep the raw data alive for the duration of the search.
+    if getattr(train_set, "free_raw_data", False):
+        train_set.free_raw_data = False
+
     k_values = list(k_range)
     criterion_values = []
     models = []
     details = []
+    errors = []
 
     for k in k_values:
         p_k = copy.deepcopy(p)
@@ -90,13 +100,16 @@ def select_num_experts(
             criterion_values.append(float("inf"))
             details.append({"error": str(e)})
             models.append(None)
+            errors.append(e)
             continue
 
         criterion_values.append(crit)
         details.append(detail)
 
     if all(v == float("inf") for v in criterion_values):
-        raise ValueError("All K candidates failed during evaluation")
+        # Include the first underlying error so systematic failures
+        # (same root cause for every K) are not masked.
+        raise ValueError(f"All K candidates failed during evaluation. First error: {errors[0]}")
 
     best_idx = int(np.argmin(criterion_values))
     best_k = k_values[best_idx]
@@ -145,7 +158,7 @@ def _eval_cv_rmse(params, train_set, num_boost_round, nfold, seed, callbacks):
         raise RuntimeError(f"Could not find RMSE metric in cv results. Keys: {list(cv_result.keys())}")
 
     best_rmse = min(cv_result[rmse_key])
-    best_iter = int(np.argmin(cv_result[rmse_key]))
+    best_iter = int(np.argmin(cv_result[rmse_key])) + 1  # 1-based iteration count
 
     detail = {
         "cv_rmse": best_rmse,
@@ -179,9 +192,11 @@ def _eval_ic(params, train_set, num_boost_round, valid_sets, callbacks, criterio
     preds = model.predict(X)
     mse = float(np.mean((preds - y) ** 2))
 
-    # Effective number of parameters: total leaf count across all trees
-    model_dump = model.dump_model()
-    n_params = _count_leaves(model_dump)
+    # Effective number of parameters: total leaf count across all trees.
+    # Parsed from the model string — dump_model() is not implemented for
+    # mixture models, while model_to_string() embeds standard LightGBM tree
+    # text in the [gate_model] / [expert_model_k] sections.
+    n_params = _count_leaves_from_model_str(model.model_to_string())
 
     # Log-likelihood under Gaussian assumption
     log_lik = -N / 2.0 * np.log(2 * np.pi * max(mse, 1e-15)) - N / 2.0
@@ -214,24 +229,15 @@ def _eval_ic(params, train_set, num_boost_round, valid_sets, callbacks, criterio
     return float(crit_val), detail, model
 
 
-def _count_leaves(model_dump):
-    """Count total number of leaves across all trees in a dumped model."""
-    total = 0
-    for tree_info in model_dump.get("tree_info", []):
-        total += _count_leaves_in_tree(tree_info.get("tree_structure", {}))
-    return total
+def _count_leaves_from_model_str(model_str):
+    """Count total number of leaves across all trees in a saved model string.
 
-
-def _count_leaves_in_tree(node):
-    """Recursively count leaves in a single tree node."""
-    if "leaf_value" in node:
-        return 1
-    count = 0
-    if "left_child" in node:
-        count += _count_leaves_in_tree(node["left_child"])
-    if "right_child" in node:
-        count += _count_leaves_in_tree(node["right_child"])
-    return count
+    Each tree block in LightGBM model text contains a ``num_leaves=N`` line;
+    for mixture models these blocks appear inside every [gate_model] and
+    [expert_model_k] section, so summing N over all matches gives the total
+    leaf count of the whole ensemble.
+    """
+    return sum(int(m) for m in re.findall(r"^num_leaves=(\d+)$", model_str, flags=re.MULTILINE))
 
 
 def _print_table(k_values, criterion_values, details, best_idx, criterion):

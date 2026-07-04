@@ -320,6 +320,15 @@ bool CheckMultiClassObjective(const std::string& objective) {
 }
 
 void Config::CheckParamConflict(const std::unordered_map<std::string, std::string>& params) {
+  // mixture_enable never enabled anything — MoE is activated solely by
+  // boosting=mixture. Users following the old parameter doc trained a plain
+  // GBDT with every mixture_* param silently ignored; make that loud.
+  if (mixture_enable && boosting != std::string("mixture")) {
+    Log::Warning("mixture_enable=true has no effect: Mixture-of-Experts mode "
+                 "is enabled by setting boosting=mixture. Training will "
+                 "proceed as boosting=%s with all mixture_* parameters "
+                 "ignored.", boosting.c_str());
+  }
   // check if objective, metric, and num_class match
   int num_class_check = num_class;
   bool objective_type_multiclass = CheckMultiClassObjective(objective) || (objective == std::string("custom") && num_class_check > 1);

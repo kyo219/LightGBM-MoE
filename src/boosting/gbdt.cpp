@@ -849,6 +849,16 @@ void GBDT::UpdateScore(const Tree* tree, const int cur_tree_id) {
     train_score_updater_->AddScore(tree, cur_tree_id);
   }
 
+  // Sparse activation (MoE hard M-step): the tree-learner AddScore above only
+  // reaches samples inside the learner's partition, and with bagging disabled
+  // the out-of-bag branch is a no-op — samples excluded via SetBaggingData
+  // would keep stale training scores forever. Add the new tree's output for
+  // the recorded complement explicitly. Empty outside MoE sparse activation.
+  if (!moe_score_complement_.empty() && !data_sample_strategy_->is_use_subset()) {
+    train_score_updater_->AddScore(tree, moe_score_complement_.data(),
+                                   static_cast<data_size_t>(moe_score_complement_.size()),
+                                   cur_tree_id);
+  }
 
   // update validation score
   for (auto& score_updater : valid_score_updater_) {

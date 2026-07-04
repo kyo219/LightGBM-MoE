@@ -294,11 +294,39 @@ class GBDT : public GBDTBase {
    * before TrainOneIter makes the tree learner build histograms only for the
    * specified sample indices. Score updates still cover all samples.
    *
+   * The "score updates cover all samples" half of that contract is why
+   * moe_score_complement_ exists: UpdateScore's fast path adds the new
+   * tree's contribution via the tree learner, which only reaches samples
+   * inside the learner's data partition, and the out-of-bag branch is dead
+   * when bagging is off (bag_data_cnt == num_data). Before the v0.8.1 audit
+   * fix, every sample OUTSIDE the subset silently kept a stale training
+   * score forever — under MoE hard M-step (the default) the E-step then
+   * computed responsibilities from frozen expert predictions for every
+   * non-assigned sample, and training metrics diverged from predict().
+   * We record the complement here and UpdateScore adds each new tree's
+   * output for those rows explicitly.
+   *
    * \param used_indices Array of sample indices to train on
    * \param num_used Number of indices
    */
   void SetBaggingData(const data_size_t* used_indices, data_size_t num_used) {
     tree_learner_->SetBaggingData(nullptr, used_indices, num_used);
+    moe_score_complement_.clear();
+    if (used_indices != nullptr && num_used < num_data_) {
+      if (static_cast<data_size_t>(moe_used_mark_.size()) != num_data_) {
+        moe_used_mark_.resize(num_data_);
+      }
+      std::fill(moe_used_mark_.begin(), moe_used_mark_.end(), 0);
+      for (data_size_t i = 0; i < num_used; ++i) {
+        moe_used_mark_[used_indices[i]] = 1;
+      }
+      moe_score_complement_.reserve(num_data_ - num_used);
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        if (!moe_used_mark_[i]) {
+          moe_score_complement_.push_back(i);
+        }
+      }
+    }
   }
 
   /*!
@@ -750,6 +778,13 @@ class GBDT : public GBDTBase {
 
   /*! \brief Number of training data */
   data_size_t num_data_;
+  /*! \brief Sparse-activation (MoE hard M-step) score-complement bookkeeping:
+   *  samples excluded from the current SetBaggingData subset. UpdateScore
+   *  adds each new tree's contribution for these rows so their training
+   *  scores stay current (see SetBaggingData). Empty when no subset active. */
+  std::vector<data_size_t> moe_score_complement_;
+  /*! \brief Scratch mark buffer for building moe_score_complement_ */
+  std::vector<uint8_t> moe_used_mark_;
   /*! \brief Number of trees per iterations */
   int num_tree_per_iteration_;
   /*! \brief Number of class */

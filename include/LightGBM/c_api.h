@@ -1651,7 +1651,10 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterIsMixture(BoosterHandle handle,
  * \param nrow Number of rows
  * \param ncol Number of columns
  * \param is_row_major 1 for row-major, 0 for column-major
- * \param parameter Other parameters for prediction
+ * \param parameter Other parameters for prediction; supports
+ *                  ``start_iteration_predict`` / ``num_iteration_predict``
+ *                  (in MoE iteration units; the gate range is scaled
+ *                  internally) and ``predict_disable_shape_check``
  * \param[out] out_len Length of output result
  * \param[out] out_result Pointer to array with regime indices (int32)
  * \return 0 when succeed, -1 when failure happens
@@ -1676,7 +1679,10 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterPredictRegime(BoosterHandle handle,
  * \param nrow Number of rows
  * \param ncol Number of columns
  * \param is_row_major 1 for row-major, 0 for column-major
- * \param parameter Other parameters for prediction
+ * \param parameter Other parameters for prediction; supports
+ *                  ``start_iteration_predict`` / ``num_iteration_predict``
+ *                  (in MoE iteration units; the gate range is scaled
+ *                  internally) and ``predict_disable_shape_check``
  * \param[out] out_len Length of output result
  * \param[out] out_result Pointer to array with regime probabilities (nrow x num_experts)
  * \return 0 when succeed, -1 when failure happens
@@ -1701,7 +1707,10 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
  * \param nrow Number of rows
  * \param ncol Number of columns
  * \param is_row_major 1 for row-major, 0 for column-major
- * \param parameter Other parameters for prediction
+ * \param parameter Other parameters for prediction; supports
+ *                  ``start_iteration_predict`` / ``num_iteration_predict``
+ *                  (in MoE iteration units; the gate range is scaled
+ *                  internally) and ``predict_disable_shape_check``
  * \param[out] out_len Length of output result
  * \param[out] out_result Pointer to array with expert predictions (nrow x num_experts)
  * \return 0 when succeed, -1 when failure happens
