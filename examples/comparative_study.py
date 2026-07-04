@@ -86,9 +86,11 @@ if _PKG_DIR and not os.path.abspath(lgb.__file__).startswith(os.path.abspath(_PK
 
 sys.path.insert(0, os.path.dirname(__file__))
 from benchmark import (  # noqa: E402
+    OPENML_CONTROL_DATASETS,
     BenchmarkConfig,
     generate_fred_gdp_data,
     generate_hmm_data,
+    generate_openml_control_data,
     generate_sp500_basic_data,
     generate_sp500_data,
     generate_synthetic_data,
@@ -941,6 +943,11 @@ DATASET_GENERATORS = {
     "vix": lambda seed: generate_vix_data(seed=seed),
     "hmm": lambda seed: generate_hmm_data(seed=seed),
 }
+# Non-regime CONTROL group (Grinsztajn 2022 regression track, i.i.d. tabular).
+# MoE's honest claim requires showing it does no harm here.
+for _name, _did in OPENML_CONTROL_DATASETS.items():
+    DATASET_GENERATORS[_name] = (
+        lambda seed, _n=_name, _d=_did: generate_openml_control_data(_n, _d, seed=seed))
 
 
 def summarize_across_seeds(results: dict) -> dict:

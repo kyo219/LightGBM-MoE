@@ -670,6 +670,57 @@ def generate_vix_data(seed: int = 42, start: str = "2010-01-01", end: str = "202
     return X, y, None
 
 
+def generate_openml_control_data(name: str, data_id: int, seed: int = 42,
+                                 max_rows: int = 10000):
+    """Non-regime CONTROL dataset from the Grinsztajn et al. (2022) regression
+    track ("Why do tree-based models still outperform deep learning on typical
+    tabular data?", NeurIPS D&B). These are standard i.i.d. tabular regression
+    problems with NO regime structure — the control group for the MoE study:
+    on these, MoE should at best tie naive LightGBM ("does no harm").
+
+    - Source: OpenML, fetched by immutable `data_id` (v1 originals; the
+      Grinsztajn suite's cleaned re-uploads derive from these). Cached to
+      data_cache/openml_{name}.csv so provenance hashing covers them.
+    - Preprocessing (ours, documented rather than inherited): numeric columns
+      only, rows with NaN dropped, target = OpenML default target.
+    - Rows are SHUFFLED with `seed` and capped at `max_rows` (matching the
+      tabular-benchmark "medium-sized" 10k convention). These rows carry no
+      temporal meaning, so the study's chronological holdout / expanding CV
+      behave like random splits here — valid, just not time-ordered. The
+      per-seed shuffle also gives multi-seed runs genuine data variation.
+    """
+    import pandas as pd
+    cache = _CACHE_DIR / f"openml_{name}.csv"
+    if cache.exists():
+        df = pd.read_csv(cache)
+    else:
+        from sklearn.datasets import fetch_openml
+        bunch = fetch_openml(data_id=data_id, as_frame=True, parser="auto")
+        df = bunch.data.copy()
+        df["__target__"] = bunch.target
+        df.to_csv(cache, index=False)
+
+    target_col = "__target__"
+    y_raw = pd.to_numeric(df[target_col], errors="coerce")
+    X_df = df.drop(columns=[target_col]).select_dtypes(include=[np.number])
+    keep = (~y_raw.isna()) & (~X_df.isna().any(axis=1))
+    X_all = X_df[keep].to_numpy(dtype=np.float64)
+    y_all = y_raw[keep].to_numpy(dtype=np.float64)
+
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(X_all))[:max_rows]
+    return X_all[order], y_all[order], None
+
+
+# Grinsztajn regression-track controls: (name, OpenML data_id).
+OPENML_CONTROL_DATASETS = {
+    "houses": 537,        # California housing, 20640 x 8
+    "cpu_act": 197,       # computer activity, 8192 x 21
+    "elevators": 216,     # aircraft control, 16599 x 18
+    "wine_quality": 287,  # red+white wine, 6497 x 11
+}
+
+
 def generate_hmm_data(n_samples: int = 2000, n_states: int = 3, n_features: int = 5, seed: int = 42):
     """K-state Gaussian-emission HMM with partially observable regime.
 
