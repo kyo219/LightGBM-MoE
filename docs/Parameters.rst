@@ -1508,16 +1508,6 @@ Mixture-of-Experts Parameters
 
    -  0 means no warmup (may cause expert collapse)
 
--  ``mixture_predict_output`` :raw-html:`<a id="mixture_predict_output" title="Permalink to this parameter" href="#mixture_predict_output">&#x1F517;&#xFE0E;</a>`, default = ``value``, type = enum, options: ``value``, ``value_and_regime``, ``all``
-
-   -  output mode for mixture prediction
-
-   -  ``value``: only output predicted value (yhat)
-
-   -  ``value_and_regime``: output value and argmax regime
-
-   -  ``all``: output value, regime probabilities, and expert predictions
-
 -  ``mixture_gate_max_depth`` :raw-html:`<a id="mixture_gate_max_depth" title="Permalink to this parameter" href="#mixture_gate_max_depth">&#x1F517;&#xFE0E;</a>`, default = ``3``, type = int, constraints: ``mixture_gate_max_depth > 0``
 
    -  max depth for gate GBDT (shallower than experts for regularization)

@@ -71,14 +71,6 @@ The gate is a **multiclass classifier** (K classes = K experts). It uses shallow
 | `is_mixture()` | `bool` | Check if model is MoE |
 | `num_experts()` | `int` | K |
 
-**Prediction output mode** (`mixture_predict_output` parameter):
-
-| Mode | Output | Description |
-|------|--------|-------------|
-| `"value"` (default) | `ŷ` only | Standard prediction |
-| `"value_and_regime"` | `ŷ` + regime index | Prediction with argmax regime |
-| `"all"` | `ŷ` + regime probabilities + expert predictions | Full diagnostic output |
-
 ## Auto-applied Settings
 
 The library forces some settings to avoid known footguns:
