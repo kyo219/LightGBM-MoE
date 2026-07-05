@@ -47,8 +47,8 @@ import lightgbm_moe as lgb
 params = {
     'boosting': 'mixture',           # Enable MoE mode
     'mixture_num_experts': 3,        # Number of experts (search 2-6 for your data)
-    'mixture_gate_type': 'gbdt',     # Best on 4/6 datasets; search 'leaf_reuse' too
-    'mixture_routing_mode': 'token_choice',  # Tied 3/3 with 'expert_choice' across datasets
+    'mixture_gate_type': 'gbdt',     # Most common winner (11/24); search 'leaf_reuse'/'none' too
+    'mixture_routing_mode': 'token_choice',  # Most common winner (14/24); search 'expert_choice' too
     'objective': 'regression',
     'metric': 'rmse',
     'verbose': -1,
