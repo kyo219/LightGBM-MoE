@@ -12,8 +12,6 @@
 #include <LightGBM/utils/openmp_wrapper.h>
 #include <LightGBM/sample_strategy.h>
 
-#include "../treelearner/feature_histogram.hpp"  // for CalculateSplittedLeafOutput in RefitLeavesByGradients
-
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -24,6 +22,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "../treelearner/feature_histogram.hpp"  // for CalculateSplittedLeafOutput in RefitLeavesByGradients
 
 namespace LightGBM {
 

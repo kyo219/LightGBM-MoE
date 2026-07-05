@@ -26,17 +26,16 @@ The interesting questions to answer from the figures:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")  # headless-safe
 import matplotlib.pyplot as plt
 import numpy as np
 
 import lightgbm_moe as lgb
 from lightgbm_moe import RegimeEvolutionRecorder
-
 
 OUT_DIR = Path(__file__).parent.parent / "bench_results"
 OUT_DIR.mkdir(exist_ok=True)
@@ -46,17 +45,20 @@ OUT_DIR.mkdir(exist_ok=True)
 # 1. Time-series demo                                                         #
 # --------------------------------------------------------------------------- #
 
+
 def make_regime_switching_series(n=800, seed=0):
     """A toy series with three persistent regimes the gate can learn."""
     rng = np.random.default_rng(seed)
     X = rng.normal(size=(n, 5)).astype(np.float64)
     # Regime persists in chunks of ~80 samples and rotates 0 → 1 → 2 → 0…
     regime = (np.arange(n) // 80) % 3
-    coeffs = np.array([
-        [+2.0, +0.0, -1.0, +0.5, +0.0],   # regime 0
-        [-2.0, +1.0, +0.0, +0.0, +0.5],   # regime 1
-        [+0.0, -1.5, +1.5, +0.0, -0.5],   # regime 2
-    ])
+    coeffs = np.array(
+        [
+            [+2.0, +0.0, -1.0, +0.5, +0.0],  # regime 0
+            [-2.0, +1.0, +0.0, +0.0, +0.5],  # regime 1
+            [+0.0, -1.5, +1.5, +0.0, -0.5],  # regime 2
+        ]
+    )
     y = (X * coeffs[regime]).sum(axis=1) + 0.15 * rng.normal(size=n)
     return X, y, regime
 
@@ -77,8 +79,10 @@ def run_timeseries():
         "learning_rate": 0.05,
     }
     lgb.train(
-        params, lgb.Dataset(X, label=y),
-        num_boost_round=120, callbacks=[rec],
+        params,
+        lgb.Dataset(X, label=y),
+        num_boost_round=120,
+        callbacks=[rec],
     )
 
     fig = rec.plot(y=y, title="Regime evolution (time-series, Markov on)")
@@ -86,22 +90,24 @@ def run_timeseries():
     fig.savefig(out, dpi=110)
     plt.close(fig)
     print(f"  wrote {out}")
-    print(f"  init→final flip rate sum: {rec.flip_rate().sum():.3f} "
-          f"({rec.num_snapshots} snapshots)")
+    print(f"  init→final flip rate sum: {rec.flip_rate().sum():.3f} ({rec.num_snapshots} snapshots)")
 
 
 # --------------------------------------------------------------------------- #
 # 2. Tabular demo                                                             #
 # --------------------------------------------------------------------------- #
 
+
 def make_tabular_clusters(n=600, seed=1):
     """Three Gaussian clusters in feature space; y depends on cluster."""
     rng = np.random.default_rng(seed)
-    centers = np.array([
-        [+2.0, +0.0, +0.0],
-        [+0.0, +2.0, +0.0],
-        [-1.5, -1.5, +1.0],
-    ])
+    centers = np.array(
+        [
+            [+2.0, +0.0, +0.0],
+            [+0.0, +2.0, +0.0],
+            [-1.5, -1.5, +1.0],
+        ]
+    )
     cluster = rng.integers(0, 3, size=n)
     X = centers[cluster] + 0.4 * rng.normal(size=(n, 3))
     coeffs = np.array([+3.0, -3.0, +1.5])
@@ -125,8 +131,10 @@ def run_tabular():
         "learning_rate": 0.05,
     }
     lgb.train(
-        params, lgb.Dataset(X, label=y),
-        num_boost_round=120, callbacks=[rec],
+        params,
+        lgb.Dataset(X, label=y),
+        num_boost_round=120,
+        callbacks=[rec],
     )
 
     fig = rec.plot(y=y, title="Regime evolution (tabular, sorted by final regime)")

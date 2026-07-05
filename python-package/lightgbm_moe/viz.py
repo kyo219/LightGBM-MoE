@@ -97,15 +97,16 @@ class RegimeEvolutionRecorder:
     # ---- LightGBM callback protocol ----------------------------------------
     @property
     def order(self) -> int:
-        # Run after early stopping (order=0) and most other callbacks so the
-        # recorder sees the *final* responsibilities of the iteration.
+        """Callback ordering: run after early stopping (order=0) and most other callbacks so the recorder sees the final responsibilities of the iteration."""
         return 30
 
     @property
     def before_iteration(self) -> bool:
+        """LightGBM callback protocol: this callback runs after each iteration."""
         return False
 
     def __call__(self, env: Any) -> None:
+        """Snapshot responsibilities for the current iteration (LightGBM callback entry point)."""
         i = env.iteration
         if not (i % self.every == 0 or (self.capture_iter_zero and i == 0)):
             return
@@ -126,18 +127,18 @@ class RegimeEvolutionRecorder:
             return
         # Keep a uniform stride; np.linspace endpoints always include the first
         # and last entry, which is what we want for the trace.
-        keep = np.unique(
-            np.linspace(0, len(self.snapshots) - 1, self.max_snapshots).astype(int)
-        )
+        keep = np.unique(np.linspace(0, len(self.snapshots) - 1, self.max_snapshots).astype(int))
         self.snapshots = [self.snapshots[j] for j in keep]
 
     # ---- Derived metrics ---------------------------------------------------
     @property
     def num_snapshots(self) -> int:
+        """Number of recorded responsibility snapshots."""
         return len(self.snapshots)
 
     @property
     def iterations(self) -> np.ndarray:
+        """Iteration index of each recorded snapshot."""
         return np.array([it for it, _ in self.snapshots])
 
     def regime_argmax(self) -> np.ndarray:
@@ -204,19 +205,14 @@ class RegimeEvolutionRecorder:
         matplotlib.figure.Figure
         """
         try:
-            import matplotlib.pyplot as plt
-            from matplotlib.colors import BoundaryNorm, ListedColormap
-            from matplotlib.gridspec import GridSpec
+            import matplotlib.pyplot as plt  # noqa: PLC0415  (matplotlib is an optional dependency, imported lazily)
+            from matplotlib.colors import BoundaryNorm, ListedColormap  # noqa: PLC0415
+            from matplotlib.gridspec import GridSpec  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                "matplotlib is required for RegimeEvolutionRecorder.plot()"
-            ) from exc
+            raise ImportError("matplotlib is required for RegimeEvolutionRecorder.plot()") from exc
 
         if not self.snapshots:
-            raise RuntimeError(
-                "No snapshots recorded — did you pass the recorder to "
-                "lgb.train(callbacks=[...])?"
-            )
+            raise RuntimeError("No snapshots recorded — did you pass the recorder to lgb.train(callbacks=[...])?")
 
         argmax_matrix = self.regime_argmax()  # (S, N)
         num_snap, num_data = argmax_matrix.shape
@@ -225,9 +221,7 @@ class RegimeEvolutionRecorder:
         if y is not None:
             y_arr = np.asarray(y).ravel()
             if y_arr.shape[0] != num_data:
-                raise ValueError(
-                    f"y length {y_arr.shape[0]} != num_data {num_data}"
-                )
+                raise ValueError(f"y length {y_arr.shape[0]} != num_data {num_data}")
         else:
             y_arr = None
 
@@ -268,11 +262,11 @@ class RegimeEvolutionRecorder:
                 groups = [y_arr[final_am == k] for k in range(num_experts)]
                 positions = list(range(num_experts))
                 # Filter empty regimes from the violin (matplotlib chokes).
-                non_empty = [(p, g) for p, g in zip(positions, groups) if len(g) > 0]
+                non_empty = [(p, g) for p, g in zip(positions, groups, strict=True) if len(g) > 0]
                 if non_empty:
-                    pp, gg = zip(*non_empty)
+                    pp, gg = zip(*non_empty, strict=True)
                     parts = ax_top.violinplot(gg, positions=pp, showmeans=True)
-                    for k_idx, body in zip(pp, parts["bodies"]):
+                    for k_idx, body in zip(pp, parts["bodies"], strict=True):
                         body.set_facecolor(listed(k_idx))
                         body.set_alpha(0.7)
                 ax_top.set_xticks(range(num_experts))
@@ -288,9 +282,14 @@ class RegimeEvolutionRecorder:
                 ax_top.margins(x=0)
         else:
             ax_top.text(
-                0.5, 0.5, "(no y supplied)",
-                ha="center", va="center", transform=ax_top.transAxes,
-                color="gray", fontsize=11,
+                0.5,
+                0.5,
+                "(no y supplied)",
+                ha="center",
+                va="center",
+                transform=ax_top.transAxes,
+                color="gray",
+                fontsize=11,
             )
             ax_top.set_axis_off()
 
@@ -309,7 +308,7 @@ class RegimeEvolutionRecorder:
                 # Datetime axes: convert to matplotlib's float date units so
                 # the tape shares x-coordinates with the top panel.
                 try:
-                    from matplotlib.dates import date2num
+                    from matplotlib.dates import date2num  # noqa: PLC0415
 
                     x_left, x_right = float(date2num(time_x[0])), float(date2num(time_x[-1]))
                     datetime_axis = True
@@ -336,8 +335,10 @@ class RegimeEvolutionRecorder:
         # Inline colorbar for regime IDs.
         cbar = fig.colorbar(
             plt.cm.ScalarMappable(norm=norm, cmap=listed),
-            ax=ax_tape, ticks=range(num_experts),
-            shrink=0.6, pad=0.01,
+            ax=ax_tape,
+            ticks=range(num_experts),
+            shrink=0.6,
+            pad=0.01,
         )
         cbar.set_label("regime k = argmax r")
 
@@ -346,7 +347,11 @@ class RegimeEvolutionRecorder:
         iters = self.iterations
         ent = self.mean_entropy()
         ln1 = ax_diag.plot(
-            iters, ent, "o-", color="C3", label="mean entropy of r",
+            iters,
+            ent,
+            "o-",
+            color="C3",
+            label="mean entropy of r",
         )
         ax_diag.set_xlabel("iteration")
         ax_diag.set_ylabel("mean entropy", color="C3")
@@ -359,15 +364,18 @@ class RegimeEvolutionRecorder:
             fr = self.flip_rate()
             mid_iters = (iters[:-1] + iters[1:]) / 2
             ln2 = ax_flip.plot(
-                mid_iters, fr, "s--", color="C0", alpha=0.7,
+                mid_iters,
+                fr,
+                "s--",
+                color="C0",
+                alpha=0.7,
                 label="argmax flip rate",
             )
             ax_flip.set_ylabel("flip rate", color="C0")
             ax_flip.tick_params(axis="y", labelcolor="C0")
             ax_flip.set_ylim(0, max(0.05, float(fr.max()) * 1.1))
             lines = ln1 + ln2
-            ax_diag.legend(lines, [l.get_label() for l in lines],
-                           loc="upper right", fontsize=8)
+            ax_diag.legend(lines, [ln.get_label() for ln in lines], loc="upper right", fontsize=8)
         ax_diag.set_title("EM convergence")
 
         # --- Panel ④ expert load over iterations (stacked area) ------------
@@ -375,17 +383,18 @@ class RegimeEvolutionRecorder:
         load = self.expert_load()  # (S, K)
         colors = [listed(k) for k in range(num_experts)]
         ax_load.stackplot(
-            iters, load.T,
+            iters,
+            load.T,
             labels=[f"expert {k}" for k in range(num_experts)],
-            colors=colors, alpha=0.85,
+            colors=colors,
+            alpha=0.85,
         )
         ax_load.set_xlabel("iteration")
         ax_load.set_ylabel("mean responsibility")
         ax_load.set_ylim(0, 1)
         ax_load.set_title("Expert load (collapse warning if a band → 0 or 1)")
         ax_load.legend(loc="upper right", fontsize=8, ncol=min(num_experts, 3))
-        ax_load.axhline(1.0 / num_experts, color="gray", lw=0.7,
-                        ls=":", label="uniform")
+        ax_load.axhline(1.0 / num_experts, color="gray", lw=0.7, ls=":", label="uniform")
 
         if title is None:
             title = (
@@ -408,20 +417,13 @@ class RegimeEvolutionRecorder:
         return "tabular"
 
     def _resolve_time_axis(self, n: int) -> np.ndarray:
-        if self.time_axis is None or (
-            isinstance(self.time_axis, str) and self.time_axis == "row_index"
-        ):
+        if self.time_axis is None or (isinstance(self.time_axis, str) and self.time_axis == "row_index"):
             return np.arange(n)
         if isinstance(self.time_axis, str) and self.time_axis.startswith("column:"):
-            raise NotImplementedError(
-                "time_axis='column:N' is not supported yet — pass an explicit "
-                "array instead"
-            )
+            raise NotImplementedError("time_axis='column:N' is not supported yet — pass an explicit array instead")
         ax = np.asarray(self.time_axis)
         if ax.shape[0] != n:
-            raise ValueError(
-                f"time_axis length {ax.shape[0]} != num_data {n}"
-            )
+            raise ValueError(f"time_axis length {ax.shape[0]} != num_data {n}")
         return ax
 
 

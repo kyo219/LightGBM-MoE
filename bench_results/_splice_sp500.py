@@ -9,6 +9,7 @@ Currently merges:
 Run from repo root:
     python bench_results/_splice_sp500.py
 """
+
 from __future__ import annotations
 
 import json
@@ -69,9 +70,7 @@ def main() -> None:
     print(f"\nWrote {REPORT.name}")
 
     for side_path, _ in SIDE_RUNS:
-        for stale in (side_path,
-                      side_path.with_suffix(".log"),
-                      side_path.with_name(side_path.stem + "_report.md")):
+        for stale in (side_path, side_path.with_suffix(".log"), side_path.with_name(side_path.stem + "_report.md")):
             if stale.exists():
                 os.remove(stale)
                 print(f"Removed {stale.name}")

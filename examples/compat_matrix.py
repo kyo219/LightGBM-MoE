@@ -9,6 +9,7 @@ Phase 2 で適用した MoE quant 修正の効果を全機能軸でカバー確�
 短時間で全部回るように、データセットは小さめ (5K x 100, 30 rounds, K=3)。
 互換性の有無を二値で見るのが目的、絶対RMSEは小さいスケール参考値。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -17,8 +18,7 @@ import json
 import os
 import sys
 import time
-import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -122,40 +122,59 @@ def matrix(X, y) -> list[Result]:
         cases.append((f"moe/init={init}", {**common_moe, "mixture_init": init}))
 
     # --- Progressive (EvoMoE) ---
-    cases.append((
-        "moe/evomoe",
-        {**common_moe, "mixture_progressive_mode": "evomoe", "mixture_seed_iterations": 10, "mixture_spawn_perturbation": 0.5},
-    ))
+    cases.append(
+        (
+            "moe/evomoe",
+            {
+                **common_moe,
+                "mixture_progressive_mode": "evomoe",
+                "mixture_seed_iterations": 10,
+                "mixture_spawn_perturbation": 0.5,
+            },
+        )
+    )
 
     # --- Per-expert structural HP (MoE-PE) ---
-    cases.append((
-        "moe-pe/per_expert_hp",
-        {
-            **common_moe,
-            "mixture_expert_max_depths": [3, 5, 7],
-            "mixture_expert_num_leaves": [8, 16, 32],
-            "mixture_expert_min_data_in_leaf": [50, 20, 5],
-        },
-    ))
+    cases.append(
+        (
+            "moe-pe/per_expert_hp",
+            {
+                **common_moe,
+                "mixture_expert_max_depths": [3, 5, 7],
+                "mixture_expert_num_leaves": [8, 16, 32],
+                "mixture_expert_min_data_in_leaf": [50, 20, 5],
+            },
+        )
+    )
 
     # --- Regularizations / advanced ---
     cases.append(("moe/diversity_lambda", {**common_moe, "mixture_diversity_lambda": 0.3}))
     cases.append(("moe/gate_entropy", {**common_moe, "mixture_gate_entropy_lambda": 0.05}))
     cases.append(("moe/expert_dropout", {**common_moe, "mixture_expert_dropout_rate": 0.2}))
     cases.append(("moe/load_balance", {**common_moe, "mixture_load_balance_alpha": 0.5}))
-    cases.append(("moe/gate_temperature", {
-        **common_moe,
-        "mixture_gate_temperature_init": 2.0,
-        "mixture_gate_temperature_final": 0.5,
-    }))
+    cases.append(
+        (
+            "moe/gate_temperature",
+            {
+                **common_moe,
+                "mixture_gate_temperature_init": 2.0,
+                "mixture_gate_temperature_final": 0.5,
+            },
+        )
+    )
     cases.append(("moe/adaptive_lr", {**common_moe, "mixture_adaptive_lr": True}))
-    cases.append(("moe/dropout_curriculum", {
-        **common_moe,
-        "mixture_expert_dropout_rate": 0.2,
-        "mixture_dropout_schedule": "linear",
-        "mixture_dropout_rate_min": 0.0,
-        "mixture_dropout_rate_max": 0.3,
-    }))
+    cases.append(
+        (
+            "moe/dropout_curriculum",
+            {
+                **common_moe,
+                "mixture_expert_dropout_rate": 0.2,
+                "mixture_dropout_schedule": "linear",
+                "mixture_dropout_rate_min": 0.0,
+                "mixture_dropout_rate_max": 0.3,
+            },
+        )
+    )
 
     # Run each case in two flavors: quant off (baseline), quant on (use_quantized_grad)
     for name, params in cases:
@@ -215,19 +234,21 @@ def main():
         sp = f"{speedup:.2f}x" if np.isfinite(speedup) else "—"
         print(f"  {name:<32s}  {f_rmse:>10s}  {q_rmse:>10s}  {sp:>8s}  {compat:>8s}")
 
-        summary.append({
-            "feature": name,
-            "float_rmse": f.rmse,
-            "quant_rmse": q.rmse,
-            "float_train_s": f.train_s,
-            "quant_train_s": q.train_s,
-            "speedup": speedup,
-            "compat": compat,
-            "float_status": f.status,
-            "quant_status": q.status,
-            "float_note": f.note,
-            "quant_note": q.note,
-        })
+        summary.append(
+            {
+                "feature": name,
+                "float_rmse": f.rmse,
+                "quant_rmse": q.rmse,
+                "float_train_s": f.train_s,
+                "quant_train_s": q.train_s,
+                "speedup": speedup,
+                "compat": compat,
+                "float_status": f.status,
+                "quant_status": q.status,
+                "float_note": f.note,
+                "quant_note": q.note,
+            }
+        )
 
     out = "bench_results/compat_matrix.json"
     os.makedirs(os.path.dirname(out), exist_ok=True)

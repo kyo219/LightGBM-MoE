@@ -25,7 +25,6 @@ import sys
 import time
 import tracemalloc
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -55,7 +54,7 @@ def generate_data(cfg: BenchConfig):
     X_int8 = rng.randint(0, 5, size=(cfg.n_rows, cfg.n_cols)).astype(np.int8)
     # ターゲット: いくつかの特徴量の線形結合 + ノイズ
     coefs = rng.randn(cfg.n_cols).astype(np.float32)
-    y = (X_int8.astype(np.float32) @ coefs + rng.randn(cfg.n_rows).astype(np.float32) * 5.0)
+    y = X_int8.astype(np.float32) @ coefs + rng.randn(cfg.n_rows).astype(np.float32) * 5.0
     X_f32 = X_int8.astype(np.float32)
     return X_int8, X_f32, y
 
@@ -88,12 +87,12 @@ def measure_peak_memory(fn):
 def fmt_bytes(b):
     if b < 1024:
         return f"{b} B"
-    elif b < 1024 ** 2:
+    elif b < 1024**2:
         return f"{b / 1024:.1f} KB"
-    elif b < 1024 ** 3:
-        return f"{b / 1024 ** 2:.1f} MB"
+    elif b < 1024**3:
+        return f"{b / 1024**2:.1f} MB"
     else:
-        return f"{b / 1024 ** 3:.2f} GB"
+        return f"{b / 1024**3:.2f} GB"
 
 
 def fmt_speedup(t_base, t_new):
@@ -299,10 +298,12 @@ def main():
 
     # Summary
     print_header("Summary")
-    print(f"  Array memory:    int8 = {fmt_bytes(X_int8.nbytes)},  f32 = {fmt_bytes(X_f32.nbytes)}  "
-          f"({X_f32.nbytes / X_int8.nbytes:.0f}x reduction)")
-    print(f"\n  int8 mode eliminates the float32 conversion overhead in Python")
-    print(f"  and passes 1-byte-per-feature directly to LightGBM's C++ binning.\n")
+    print(
+        f"  Array memory:    int8 = {fmt_bytes(X_int8.nbytes)},  f32 = {fmt_bytes(X_f32.nbytes)}  "
+        f"({X_f32.nbytes / X_int8.nbytes:.0f}x reduction)"
+    )
+    print("\n  int8 mode eliminates the float32 conversion overhead in Python")
+    print("  and passes 1-byte-per-feature directly to LightGBM's C++ binning.\n")
 
 
 if __name__ == "__main__":

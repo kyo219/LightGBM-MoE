@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from typing import Any, Dict
@@ -48,7 +49,7 @@ def get_wall_s(study: Dict[str, Any], variant: str) -> float:
 
 
 def fmt_pct(num: float, denom: float) -> str:
-    if not (denom > 0) or not (num == num):  # NaN check
+    if not (denom > 0) or math.isnan(num):
         return "n/a"
     return f"{100.0 * (num - denom) / denom:+.2f}%"
 
@@ -78,18 +79,24 @@ def per_dataset_row(name: str, baseline_ds, elbo_ds, every_n_ds) -> Dict[str, An
 
 def render_markdown(rows: list[Dict[str, Any]], n_trials: int) -> str:
     lines = []
-    lines.append(f"# v0.7 leaf-refit ablation — 500-trial / 6-dataset study\n")
+    lines.append("# v0.7 leaf-refit ablation — 500-trial / 6-dataset study\n")
     lines.append(f"**{n_trials} Optuna trials per (variant × dataset), 5-fold time-series CV.**")
-    lines.append("Refit ablation runs the same MoE search space with "
-                 "`mixture_refit_leaves=True` fixed; only the trigger differs:\n")
-    lines.append("- `moe` (baseline): v0.6 behavior, refit off\n"
-                 "- `moe-refit-elbo`: refit fires only when the per-10-iter "
-                 "ELBO log shows >5% drop\n"
-                 "- `moe-refit-every_n`: refit fires every 10 post-warmup iters\n")
+    lines.append(
+        "Refit ablation runs the same MoE search space with "
+        "`mixture_refit_leaves=True` fixed; only the trigger differs:\n"
+    )
+    lines.append(
+        "- `moe` (baseline): v0.6 behavior, refit off\n"
+        "- `moe-refit-elbo`: refit fires only when the per-10-iter "
+        "ELBO log shows >5% drop\n"
+        "- `moe-refit-every_n`: refit fires every 10 post-warmup iters\n"
+    )
 
     lines.append("## Best RMSE per dataset\n")
-    lines.append("| Dataset | naive | ensemble | **moe (off)** | moe-refit-elbo | "
-                 "moe-refit-every_n | Δ elbo vs off | Δ every_n vs off |")
+    lines.append(
+        "| Dataset | naive | ensemble | **moe (off)** | moe-refit-elbo | "
+        "moe-refit-every_n | Δ elbo vs off | Δ every_n vs off |"
+    )
     lines.append("|---|---|---|---|---|---|---|---|")
     for r in rows:
         lines.append(
@@ -105,8 +112,7 @@ def render_markdown(rows: list[Dict[str, Any]], n_trials: int) -> str:
     lines.append("")
 
     lines.append("## Cost (median per-fold training, seconds)\n")
-    lines.append("| Dataset | moe (off) | moe-refit-elbo | moe-refit-every_n | "
-                 "elbo / off | every_n / off |")
+    lines.append("| Dataset | moe (off) | moe-refit-elbo | moe-refit-every_n | elbo / off | every_n / off |")
     lines.append("|---|---|---|---|---|---|")
     for r in rows:
         denom = max(r["moe_fold_s"], 1e-9)
@@ -115,8 +121,8 @@ def render_markdown(rows: list[Dict[str, Any]], n_trials: int) -> str:
             f"| {r['moe_fold_s']:.3f} "
             f"| {r['moe_elbo_fold_s']:.3f} "
             f"| {r['moe_every_n_fold_s']:.3f} "
-            f"| {r['moe_elbo_fold_s']/denom:.2f}× "
-            f"| {r['moe_every_n_fold_s']/denom:.2f}× |"
+            f"| {r['moe_elbo_fold_s'] / denom:.2f}× "
+            f"| {r['moe_every_n_fold_s'] / denom:.2f}× |"
         )
     lines.append("")
 
@@ -125,34 +131,27 @@ def render_markdown(rows: list[Dict[str, Any]], n_trials: int) -> str:
     lines.append("|---|---|---|---|")
     for r in rows:
         lines.append(
-            f"| `{r['dataset']}` "
-            f"| {r['moe_wall']:.0f} "
-            f"| {r['moe_elbo_wall']:.0f} "
-            f"| {r['moe_every_n_wall']:.0f} |"
+            f"| `{r['dataset']}` | {r['moe_wall']:.0f} | {r['moe_elbo_wall']:.0f} | {r['moe_every_n_wall']:.0f} |"
         )
 
     # Acceptance summary
     lines.append("\n## Acceptance summary (issue #37)\n")
     n_elbo_better = sum(1 for r in rows if r["moe_elbo_rmse"] < r["moe_rmse"])
-    n_elbo_within_1pct = sum(1 for r in rows
-                              if abs(r["moe_elbo_rmse"] - r["moe_rmse"])
-                                 <= 0.01 * r["moe_rmse"])
-    n_every_n_better = sum(1 for r in rows
-                            if r["moe_every_n_rmse"] < r["moe_rmse"])
-    lines.append(f"- elbo trigger: better than off on **{n_elbo_better}/{len(rows)}** datasets, "
-                 f"within ±1% on **{n_elbo_within_1pct}/{len(rows)}**\n")
+    n_elbo_within_1pct = sum(1 for r in rows if abs(r["moe_elbo_rmse"] - r["moe_rmse"]) <= 0.01 * r["moe_rmse"])
+    n_every_n_better = sum(1 for r in rows if r["moe_every_n_rmse"] < r["moe_rmse"])
+    lines.append(
+        f"- elbo trigger: better than off on **{n_elbo_better}/{len(rows)}** datasets, "
+        f"within ±1% on **{n_elbo_within_1pct}/{len(rows)}**\n"
+    )
     lines.append(f"- every_n trigger: better than off on **{n_every_n_better}/{len(rows)}** datasets")
     return "\n".join(lines) + "\n"
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--baseline", required=True,
-                   help="JSON from `--moe-refit-mode off` run (full naive/ensemble/moe)")
-    p.add_argument("--refit-elbo", required=True,
-                   help="JSON from `--moe-refit-mode elbo --variants moe` run")
-    p.add_argument("--refit-every-n", required=True,
-                   help="JSON from `--moe-refit-mode every_n --variants moe` run")
+    p.add_argument("--baseline", required=True, help="JSON from `--moe-refit-mode off` run (full naive/ensemble/moe)")
+    p.add_argument("--refit-elbo", required=True, help="JSON from `--moe-refit-mode elbo --variants moe` run")
+    p.add_argument("--refit-every-n", required=True, help="JSON from `--moe-refit-mode every_n --variants moe` run")
     p.add_argument("--out", required=True, help="output markdown path")
     args = p.parse_args()
 
@@ -166,9 +165,17 @@ def main():
     # carry the variant aggregates (presence of any variant key suffices).
     def is_dataset_row(v):
         return isinstance(v, dict) and any(
-            k in v for k in ("naive-lightgbm", "naive-ensemble", "moe",
-                              "moe-refit-elbo", "moe-refit-every_n",
-                              "moe-refit-always"))
+            k in v
+            for k in (
+                "naive-lightgbm",
+                "naive-ensemble",
+                "moe",
+                "moe-refit-elbo",
+                "moe-refit-every_n",
+                "moe-refit-always",
+            )
+        )
+
     base_ds = {k: v for k, v in base.items() if is_dataset_row(v)}
     elbo_ds = {k: v for k, v in elbo.items() if is_dataset_row(v)}
     every_n_ds = {k: v for k, v in every_n.items() if is_dataset_row(v)}

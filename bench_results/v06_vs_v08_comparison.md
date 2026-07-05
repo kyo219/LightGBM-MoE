@@ -38,7 +38,7 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 
 ### `fred_gdp`
 
-- `mixture_init`: 
+- `mixture_init`:
   - `random` (n=48): mean RMSE = 0.9978, std = 0.057, min = 0.9474
   - `tree_hierarchical` (n=22): mean RMSE = 1.0429, std = 0.0388, min = 0.9749
   - `uniform` (n=399): mean RMSE = 0.9672, std = 0.0423, min = 0.9387
@@ -46,7 +46,7 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 
 ### `hmm`
 
-- `mixture_init`: 
+- `mixture_init`:
   - `random` (n=370): mean RMSE = 2.1983, std = 0.0267, min = 2.156
   - `tree_hierarchical` (n=23): mean RMSE = 2.2944, std = 0.042, min = 2.2251
   - `uniform` (n=76): mean RMSE = 2.2181, std = 0.0171, min = 2.1877
@@ -54,7 +54,7 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 
 ### `sp500`
 
-- `mixture_init`: 
+- `mixture_init`:
   - `random` (n=377): mean RMSE = 0.0101, std = 0.0004, min = 0.0099
   - `tree_hierarchical` (n=49): mean RMSE = 0.0101, std = 0.0, min = 0.01
   - `uniform` (n=22): mean RMSE = 0.0101, std = 0.0, min = 0.0101
@@ -62,7 +62,7 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 
 ### `sp500_basic`
 
-- `mixture_init`: 
+- `mixture_init`:
   - `random` (n=23): mean RMSE = 0.0101, std = 0.0, min = 0.0101
   - `tree_hierarchical` (n=413): mean RMSE = 0.0101, std = 0.0, min = 0.01
   - `uniform` (n=34): mean RMSE = 0.0101, std = 0.0, min = 0.0101
@@ -70,7 +70,7 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 
 ### `synthetic`
 
-- `mixture_init`: 
+- `mixture_init`:
   - `random` (n=24): mean RMSE = 6.4586, std = 1.3138, min = 5.2773
   - `tree_hierarchical` (n=29): mean RMSE = 6.2597, std = 2.175, min = 4.4936
   - `uniform` (n=22): mean RMSE = 6.014, std = 0.5338, min = 5.3572
@@ -78,7 +78,7 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 
 ### `vix`
 
-- `mixture_init`: 
+- `mixture_init`:
   - `random` (n=420): mean RMSE = 2.8595, std = 0.6123, min = 2.6983
   - `tree_hierarchical` (n=25): mean RMSE = 4.2655, std = 2.5761, min = 2.7678
   - `uniform` (n=33): mean RMSE = 3.1497, std = 1.0635, min = 2.755
@@ -87,4 +87,3 @@ From the per-categorical stats already computed by `comparative_study.py`. Shows
 ## 4. fANOVA importance of v0.8 params
 
 Higher value = the param explains more of the RMSE variance across trials.
-

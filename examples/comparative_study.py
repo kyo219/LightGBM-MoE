@@ -47,6 +47,7 @@ Usage:
     # 本番 500 trials × 2 variants × 6 datasets (deterministic)
     python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -57,8 +58,6 @@ import platform
 import subprocess
 import sys
 import time
-from collections import Counter
-from dataclasses import dataclass
 
 import numpy as np
 import optuna
@@ -73,16 +72,14 @@ from sklearn.model_selection import TimeSeriesSplit
 # resolved package path + lib sha256 are recorded in the output provenance.
 _PKG_DIR = os.environ.get("LGBM_MOE_PACKAGE_DIR")
 if _PKG_DIR:
-    sys.meta_path = [f for f in sys.meta_path
-                     if "editable" not in type(f).__module__.lower()]
+    sys.meta_path = [f for f in sys.meta_path if "editable" not in type(f).__module__.lower()]
     sys.path.insert(0, _PKG_DIR)
 else:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python-package"))
-import lightgbm_moe as lgb
+import lightgbm_moe as lgb  # noqa: E402  (must follow the build-override path surgery above)
 
 if _PKG_DIR and not os.path.abspath(lgb.__file__).startswith(os.path.abspath(_PKG_DIR)):
-    raise SystemExit(f"LGBM_MOE_PACKAGE_DIR={_PKG_DIR} requested but lightgbm_moe "
-                     f"resolved to {lgb.__file__}")
+    raise SystemExit(f"LGBM_MOE_PACKAGE_DIR={_PKG_DIR} requested but lightgbm_moe resolved to {lgb.__file__}")
 
 sys.path.insert(0, os.path.dirname(__file__))
 from benchmark import (  # noqa: E402
@@ -100,10 +97,10 @@ from benchmark import (  # noqa: E402
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # matplotlib for slice plots
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib  # noqa: E402
 
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 
 # =============================================================================
 # Search space constants (per user spec)
@@ -126,8 +123,7 @@ SMOOTHING_CHOICES = ["none", "ema", "markov"]
 #     the auxiliary load-balance penalty (mixture_load_balance_alpha).
 # Wide mode adds ~6 dimensions, so give it proportionally more trials —
 # search-space dilution is real (measured in the v0.8 500-trial study).
-WIDE_INIT_CHOICES = ["random", "gmm", "gmm_features", "kmeans_features",
-                     "tree_hierarchical", "uniform"]
+WIDE_INIT_CHOICES = ["random", "gmm", "gmm_features", "kmeans_features", "tree_hierarchical", "uniform"]
 
 
 # =============================================================================
@@ -198,8 +194,7 @@ def evaluate_cv_timed(X, y, params, n_splits: int, num_boost_round: int):
     return float(np.mean(rmses)), mean_time, rmses, n_failed
 
 
-def evaluate_ensemble_cv_timed(X, y, params, n_models: int, base_seed: int,
-                               n_splits: int, num_boost_round: int):
+def evaluate_ensemble_cv_timed(X, y, params, n_models: int, base_seed: int, n_splits: int, num_boost_round: int):
     """Time-series CV with a K-way naive seed-ensemble of LightGBMs.
 
     Each ensemble member uses identical hyperparameters but a per-member seed
@@ -224,7 +219,7 @@ def evaluate_ensemble_cv_timed(X, y, params, n_models: int, base_seed: int,
                 # feature-fraction / extra-trees per the docs. Setting it
                 # per-member is the cleanest way to diverge member k from j.
                 p["seed"] = base_seed + 1009 * k  # arbitrary multiplier to
-                                                  # avoid 1-step adjacency
+                # avoid 1-step adjacency
                 model = _train_with_es(p, X[tr_idx], y[tr_idx], num_boost_round)
                 preds += model.predict(X[va_idx])
             t1 = time.perf_counter()
@@ -260,12 +255,18 @@ def make_naive_lightgbm_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
         }
-        rmse, train_s, fold_rmses, n_failed = evaluate_cv_timed(
-            X, y, params, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "naive-lightgbm", "rmse": rmse, "train_s": train_s,
-                          "fold_rmses": fold_rmses, "n_failed_folds": n_failed,
-                          "params": dict(trial.params),
-                          "lgbm_params": dict(params)})
+        rmse, train_s, fold_rmses, n_failed = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
+        trial_log.append(
+            {
+                "variant": "naive-lightgbm",
+                "rmse": rmse,
+                "train_s": train_s,
+                "fold_rmses": fold_rmses,
+                "n_failed_folds": n_failed,
+                "params": dict(trial.params),
+                "lgbm_params": dict(params),
+            }
+        )
         return rmse
 
     return objective
@@ -277,6 +278,7 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
     the ensemble has the same K-way capacity range as MoE. Per-fold compute
     is K × naive's, matching MoE's K × num_boost_round tree budget.
     """
+
     def objective(trial):
         n_models = trial.suggest_int("n_models", 2, 4)
         params = {
@@ -299,19 +301,34 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
         }
         rmse, train_s, fold_rmses, n_failed = evaluate_ensemble_cv_timed(
-            X, y, params, n_models, cfg.seed, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "naive-ensemble", "rmse": rmse, "train_s": train_s,
-                          "fold_rmses": fold_rmses, "n_failed_folds": n_failed,
-                          "params": dict(trial.params),
-                          "lgbm_params": dict(params), "n_models": n_models})
+            X, y, params, n_models, cfg.seed, cfg.n_splits, cfg.num_boost_round
+        )
+        trial_log.append(
+            {
+                "variant": "naive-ensemble",
+                "rmse": rmse,
+                "train_s": train_s,
+                "fold_rmses": fold_rmses,
+                "n_failed_folds": n_failed,
+                "params": dict(trial.params),
+                "lgbm_params": dict(params),
+                "n_models": n_models,
+            }
+        )
         return rmse
 
     return objective
 
 
-def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
-                       refit_mode: str = "search", refit_decay: float = 0.0,
-                       space: str = "standard"):
+def make_moe_objective(
+    X,
+    y,
+    cfg: BenchmarkConfig,
+    trial_log: list,
+    refit_mode: str = "search",
+    refit_decay: float = 0.0,
+    space: str = "standard",
+):
     """Build an Optuna objective that trains MoE.
 
     `refit_mode` controls how the v0.7 / v0.8 refit + regrow machinery is
@@ -336,7 +353,7 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
     forced-on triggers; in "search" mode the decay is itself a search
     variable.
     """
-    wide = (space == "wide")
+    wide = space == "wide"
     init_choices = WIDE_INIT_CHOICES if wide else INIT_CHOICES
     k_max = 6 if wide else 4
 
@@ -385,21 +402,20 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
 
         if wide:
             # Previously frozen knobs (methodology audit follow-up).
-            params["mixture_expert_dropout_rate"] = trial.suggest_float(
-                "mixture_expert_dropout_rate", 0.0, 0.3)
-            params["mixture_load_balance_alpha"] = trial.suggest_float(
-                "mixture_load_balance_alpha", 0.0, 0.5)
+            params["mixture_expert_dropout_rate"] = trial.suggest_float("mixture_expert_dropout_rate", 0.0, 0.3)
+            params["mixture_load_balance_alpha"] = trial.suggest_float("mixture_load_balance_alpha", 0.0, 0.5)
 
         if gate_type in ("gbdt", "leaf_reuse"):
             params["mixture_gate_max_depth"] = trial.suggest_int("mixture_gate_max_depth", 2, 10)
             params["mixture_gate_num_leaves"] = trial.suggest_int("mixture_gate_num_leaves", 4, 64)
-            params["mixture_gate_learning_rate"] = trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.5, log=True)
+            params["mixture_gate_learning_rate"] = trial.suggest_float(
+                "mixture_gate_learning_rate", 0.01, 0.5, log=True
+            )
             params["mixture_gate_lambda_l2"] = trial.suggest_float("mixture_gate_lambda_l2", 1e-3, 10.0, log=True)
             params["mixture_gate_iters_per_round"] = trial.suggest_int("mixture_gate_iters_per_round", 1, 3)
             if wide:
                 # Dirichlet shrinkage toward uniform routing (anti-collapse).
-                params["mixture_gate_entropy_lambda"] = trial.suggest_float(
-                    "mixture_gate_entropy_lambda", 0.0, 0.3)
+                params["mixture_gate_entropy_lambda"] = trial.suggest_float("mixture_gate_entropy_lambda", 0.0, 0.3)
                 # Temperature annealing, parameterized as (T_init, final/init
                 # ratio) so the value space is static for TPE. ratio=1.0 means
                 # no annealing; T defaults to 1.0/1.0 in standard mode.
@@ -414,7 +430,9 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             params["mixture_expert_capacity_factor"] = trial.suggest_float("mixture_expert_capacity_factor", 0.8, 1.5)
             params["mixture_expert_choice_score"] = "combined"
             params["mixture_expert_choice_boost"] = trial.suggest_float("mixture_expert_choice_boost", 5.0, 30.0)
-            params["mixture_expert_choice_hard"] = trial.suggest_categorical("mixture_expert_choice_hard", [True, False])
+            params["mixture_expert_choice_hard"] = trial.suggest_categorical(
+                "mixture_expert_choice_hard", [True, False]
+            )
 
         # v0.7 leaf-refit + v0.8 partition re-grow.
         #
@@ -430,43 +448,39 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
         #   - refit_mode in {always,elbo,every_n}: legacy v0.7 ablation
         #                              path; trigger forced, regrow off.
         if refit_mode == "search":
-            refit_on = trial.suggest_categorical("mixture_refit_leaves",
-                                                 [True, False])
+            refit_on = trial.suggest_categorical("mixture_refit_leaves", [True, False])
             if refit_on:
-                trigger = trial.suggest_categorical(
-                    "mixture_refit_trigger", ["always", "elbo", "every_n"])
+                trigger = trial.suggest_categorical("mixture_refit_trigger", ["always", "elbo", "every_n"])
                 params["mixture_refit_leaves"] = True
                 params["mixture_refit_trigger"] = trigger
                 # decay is mostly best at 0.0 (full replace) per v0.7
                 # acceptance — search a narrow range around it.
-                params["mixture_refit_decay_rate"] = trial.suggest_float(
-                    "mixture_refit_decay_rate", 0.0, 0.5)
+                params["mixture_refit_decay_rate"] = trial.suggest_float("mixture_refit_decay_rate", 0.0, 0.5)
 
                 if trigger == "elbo":
                     # v0.8 elbo trigger has its own threshold + window
                     # knobs. Search log-uniform over a sensible range —
                     # 0.001-0.05 for drop, 0.0001-0.01 for plateau.
                     params["mixture_elbo_drop_threshold"] = trial.suggest_float(
-                        "mixture_elbo_drop_threshold", 1e-3, 5e-2, log=True)
+                        "mixture_elbo_drop_threshold", 1e-3, 5e-2, log=True
+                    )
                     params["mixture_elbo_plateau_threshold"] = trial.suggest_float(
-                        "mixture_elbo_plateau_threshold", 1e-4, 1e-2, log=True)
-                    params["mixture_elbo_window"] = trial.suggest_int(
-                        "mixture_elbo_window", 5, 20)
+                        "mixture_elbo_plateau_threshold", 1e-4, 1e-2, log=True
+                    )
+                    params["mixture_elbo_window"] = trial.suggest_int("mixture_elbo_window", 5, 20)
                 elif trigger == "every_n":
-                    params["mixture_refit_every_n"] = trial.suggest_int(
-                        "mixture_refit_every_n", 5, 30)
+                    params["mixture_refit_every_n"] = trial.suggest_int("mixture_refit_every_n", 5, 30)
 
                 # v0.8 partition re-grow — only meaningful when refit is on.
                 # leaf_reuse + regrow is auto-disabled at C++ Init (warning),
                 # so no Python-side guard is needed.
-                regrow_on = trial.suggest_categorical(
-                    "mixture_regrow_oldest_trees", [True, False])
+                regrow_on = trial.suggest_categorical("mixture_regrow_oldest_trees", [True, False])
                 if regrow_on:
                     params["mixture_regrow_oldest_trees"] = True
-                    params["mixture_regrow_per_fire"] = trial.suggest_int(
-                        "mixture_regrow_per_fire", 1, 5)
+                    params["mixture_regrow_per_fire"] = trial.suggest_int("mixture_regrow_per_fire", 1, 5)
                     params["mixture_regrow_mode"] = trial.suggest_categorical(
-                        "mixture_regrow_mode", ["replace", "delete"])
+                        "mixture_regrow_mode", ["replace", "delete"]
+                    )
         elif refit_mode != "off":
             # Legacy v0.7 forced-trigger path (back-compat for older
             # ablation scripts).
@@ -474,12 +488,18 @@ def make_moe_objective(X, y, cfg: BenchmarkConfig, trial_log: list,
             params["mixture_refit_trigger"] = refit_mode
             params["mixture_refit_decay_rate"] = refit_decay
 
-        rmse, train_s, fold_rmses, n_failed = evaluate_cv_timed(
-            X, y, params, cfg.n_splits, cfg.num_boost_round)
-        trial_log.append({"variant": "moe", "rmse": rmse, "train_s": train_s,
-                          "fold_rmses": fold_rmses, "n_failed_folds": n_failed,
-                          "params": dict(trial.params),
-                          "lgbm_params": dict(params)})
+        rmse, train_s, fold_rmses, n_failed = evaluate_cv_timed(X, y, params, cfg.n_splits, cfg.num_boost_round)
+        trial_log.append(
+            {
+                "variant": "moe",
+                "rmse": rmse,
+                "train_s": train_s,
+                "fold_rmses": fold_rmses,
+                "n_failed_folds": n_failed,
+                "params": dict(trial.params),
+                "lgbm_params": dict(params),
+            }
+        )
         return rmse
 
     return objective
@@ -524,8 +544,12 @@ def categorical_value_stats(trials: list[dict], param: str) -> dict:
 
     sorted_vals = sorted(per_value.items(), key=lambda kv: kv[1]["mean"])
     best_val, runner_up = sorted_vals[0][0], sorted_vals[1][0]
-    best_rmses = by_val[type(list(by_val.keys())[0])(best_val) if not isinstance(list(by_val.keys())[0], str) else best_val]
-    runner_rmses = by_val[type(list(by_val.keys())[0])(runner_up) if not isinstance(list(by_val.keys())[0], str) else runner_up]
+    best_rmses = by_val[
+        type(list(by_val.keys())[0])(best_val) if not isinstance(list(by_val.keys())[0], str) else best_val
+    ]
+    runner_rmses = by_val[
+        type(list(by_val.keys())[0])(runner_up) if not isinstance(list(by_val.keys())[0], str) else runner_up
+    ]
 
     try:
         t_stat, p_val = stats.ttest_ind(best_rmses, runner_rmses, equal_var=False)
@@ -559,11 +583,16 @@ def numeric_quartile_stats(trials: list[dict], param: str) -> dict:
         if not mask.any():
             continue
         out[label] = {
-            "range": [round(float(lo), 4) if np.isfinite(lo) else None, round(float(hi), 4) if np.isfinite(hi) else None],
+            "range": [
+                round(float(lo), 4) if np.isfinite(lo) else None,
+                round(float(hi), 4) if np.isfinite(hi) else None,
+            ],
             "n": int(mask.sum()),
             "mean_rmse": round(float(rmses[mask].mean()), 4),
         }
-    out["best_quartile"] = min(("Q1", "Q2", "Q3", "Q4"), key=lambda q: out.get(q, {"mean_rmse": float("inf")})["mean_rmse"])
+    out["best_quartile"] = min(
+        ("Q1", "Q2", "Q3", "Q4"), key=lambda q: out.get(q, {"mean_rmse": float("inf")})["mean_rmse"]
+    )
     return out
 
 
@@ -571,6 +600,7 @@ def make_slice_plot(study, out_path: str, title: str):
     """Save an optuna slice plot as PNG."""
     try:
         from optuna.visualization.matplotlib import plot_slice
+
         ax = plot_slice(study)
         # plot_slice returns a single Axes or array; gather a Figure
         if hasattr(ax, "figure"):
@@ -617,19 +647,42 @@ def aggregate_variant(name: str, trials: list[dict], study) -> dict:
     }
 
     cat_params = (
-        ["mixture_gate_type", "mixture_routing_mode", "mixture_e_step_mode", "mixture_init",
-         "mixture_r_smoothing", "mixture_hard_m_step", "extra_trees"]
-        if name == "moe" else ["extra_trees"]
+        [
+            "mixture_gate_type",
+            "mixture_routing_mode",
+            "mixture_e_step_mode",
+            "mixture_init",
+            "mixture_r_smoothing",
+            "mixture_hard_m_step",
+            "extra_trees",
+        ]
+        if name == "moe"
+        else ["extra_trees"]
     )
     out["categorical_stats"] = {p: categorical_value_stats(trials, p) for p in cat_params}
 
     num_params = (
-        ["mixture_num_experts", "mixture_diversity_lambda",
-         "mixture_warmup_iters", "mixture_balance_factor", "learning_rate",
-         "num_leaves", "max_depth", "min_data_in_leaf"]
+        [
+            "mixture_num_experts",
+            "mixture_diversity_lambda",
+            "mixture_warmup_iters",
+            "mixture_balance_factor",
+            "learning_rate",
+            "num_leaves",
+            "max_depth",
+            "min_data_in_leaf",
+        ]
         if name == "moe"
-        else ["learning_rate", "num_leaves", "max_depth", "min_data_in_leaf",
-              "lambda_l1", "lambda_l2", "feature_fraction", "bagging_fraction"]
+        else [
+            "learning_rate",
+            "num_leaves",
+            "max_depth",
+            "min_data_in_leaf",
+            "lambda_l1",
+            "lambda_l2",
+            "feature_fraction",
+            "bagging_fraction",
+        ]
     )
     out["numeric_quartiles"] = {p: numeric_quartile_stats(trials, p) for p in num_params}
 
@@ -645,23 +698,29 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
     cfg = results.get("config", {})
     lines.append(f"- **Trials per (variant × dataset × seed)**: {cfg.get('trials')}\n")
     lines.append(f"- **Datasets**: {cfg.get('datasets')}, **seeds**: {cfg.get('seeds')}\n")
-    lines.append(f"- **n_splits**: {cfg.get('splits')} (gap={cfg.get('cv_gap')}), "
-                 f"**rounds**: {cfg.get('rounds')}, "
-                 f"**holdout**: final {cfg.get('holdout_frac', 0):.0%} (never seen by Optuna), "
-                 f"**ES**: chronological tail {cfg.get('es_fraction', 0):.0%} of each train window\n")
+    lines.append(
+        f"- **n_splits**: {cfg.get('splits')} (gap={cfg.get('cv_gap')}), "
+        f"**rounds**: {cfg.get('rounds')}, "
+        f"**holdout**: final {cfg.get('holdout_frac', 0):.0%} (never seen by Optuna), "
+        f"**ES**: chronological tail {cfg.get('es_fraction', 0):.0%} of each train window\n"
+    )
     prov = results.get("provenance", {})
     if prov:
-        lines.append(f"- **Build**: commit `{prov.get('git_commit', '?')[:12]}`"
-                     f"{' (dirty)' if prov.get('git_dirty') else ''}, "
-                     f"lib sha256 `{prov.get('lib_sha256', '?')[:12]}…`, "
-                     f"package `{prov.get('lightgbm_moe_package', '?')}`\n")
+        lines.append(
+            f"- **Build**: commit `{prov.get('git_commit', '?')[:12]}`"
+            f"{' (dirty)' if prov.get('git_dirty') else ''}, "
+            f"lib sha256 `{prov.get('lib_sha256', '?')[:12]}…`, "
+            f"package `{prov.get('lightgbm_moe_package', '?')}`\n"
+        )
     lines.append("\n---\n")
 
     # Headline: holdout metric (mean ± std across seeds)
     lines.append("## Headline: holdout RMSE (chronological tail, evaluated once per seed)\n")
-    lines.append("Selection happened on CV inside the search region; this table is the "
-                 "unbiased comparison. `cv_best` is the (optimistic) selection metric, "
-                 "shown for reference.\n")
+    lines.append(
+        "Selection happened on CV inside the search region; this table is the "
+        "unbiased comparison. `cv_best` is the (optimistic) selection metric, "
+        "shown for reference.\n"
+    )
     lines.append("| Dataset | Variant | holdout RMSE (mean ± std) | cv_best (mean) | crash rate | retrain s |")
     lines.append("|---|---|---|---|---|---|")
     for ds_name, variants in results.get("summary", {}).items():
@@ -674,8 +733,7 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
             hm_str = f"**{hm:.5f}** ± {hs:.5f}" if hm is not None else "—"
             cb = e.get("cv_best_mean")
             cb_str = f"{cb:.5f}" if cb is not None else "—"
-            lines.append(f"| {ds_name} | {v} | {hm_str} | {cb_str} | "
-                         f"{crash:.1%} | {retrain:.2f} |")
+            lines.append(f"| {ds_name} | {v} | {hm_str} | {cb_str} | {crash:.1%} | {retrain:.2f} |")
     lines.append("\n")
 
     # Secondary: CV selection-metric table per run
@@ -695,8 +753,7 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
     # Per-run detail
     for run_tag, ds in results.get("runs", {}).items():
         ds_name = run_tag
-        lines.append(f"\n---\n\n## {run_tag}  (search X={ds.get('X_search_shape')}, "
-                     f"holdout n={ds.get('n_holdout')})\n")
+        lines.append(f"\n---\n\n## {run_tag}  (search X={ds.get('X_search_shape')}, holdout n={ds.get('n_holdout')})\n")
 
         for v in ds.get("_variants", []):
             r = ds.get(v, {})
@@ -705,20 +762,26 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
             lines.append(f"\n### {v}\n")
             hold = r.get("holdout", {})
             if hold:
-                lines.append(f"- **holdout RMSE: {hold.get('holdout_rmse', float('nan')):.5f}** "
-                             f"(winner retrained in {hold.get('retrain_s', 0):.2f}s, "
-                             f"cv score of winner: {hold.get('cv_rmse_of_winner', float('nan')):.4f})")
-            lines.append(f"- cv best RMSE: {r.get('rmse_best', float('nan')):.4f}, "
-                         f"median: {r.get('rmse_median', float('nan')):.4f}, "
-                         f"p10: {r.get('rmse_p10', float('nan')):.4f}")
-            lines.append(f"- train: median {r.get('train_s_median', 0):.3f}s/fold, "
-                         f"mean {r.get('train_s_mean', 0):.3f}s, p90 {r.get('train_s_p90', 0):.3f}s")
+                lines.append(
+                    f"- **holdout RMSE: {hold.get('holdout_rmse', float('nan')):.5f}** "
+                    f"(winner retrained in {hold.get('retrain_s', 0):.2f}s, "
+                    f"cv score of winner: {hold.get('cv_rmse_of_winner', float('nan')):.4f})"
+                )
+            lines.append(
+                f"- cv best RMSE: {r.get('rmse_best', float('nan')):.4f}, "
+                f"median: {r.get('rmse_median', float('nan')):.4f}, "
+                f"p10: {r.get('rmse_p10', float('nan')):.4f}"
+            )
+            lines.append(
+                f"- train: median {r.get('train_s_median', 0):.3f}s/fold, "
+                f"mean {r.get('train_s_mean', 0):.3f}s, p90 {r.get('train_s_p90', 0):.3f}s"
+            )
             lines.append(f"- finite trials: {r.get('n_finite', 0)} / {r.get('n_trials', 0)}")
 
             # Importance
             imp = r.get("importance", {})
             if imp and "_error" not in imp:
-                lines.append(f"\n#### A. fANOVA importance (top 10)\n")
+                lines.append("\n#### A. fANOVA importance (top 10)\n")
                 lines.append("| param | importance |")
                 lines.append("|---|---|")
                 for k, val in list(imp.items())[:10]:
@@ -736,14 +799,14 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
                         f"Δ +{b['delta_mean']:.4f} | p={b['p_value']:.2e} |"
                     )
             if sig_rows:
-                lines.append(f"\n#### B. Categorical: clearly best values (p<0.01)\n")
+                lines.append("\n#### B. Categorical: clearly best values (p<0.01)\n")
                 lines.append("| param | best | mean RMSE | runner-up | Δ | p |")
                 lines.append("|---|---|---|---|---|---|")
                 lines.extend(sig_rows)
 
             # All categorical detail
             if cat:
-                lines.append(f"\n<details><summary>All categorical breakdowns</summary>\n")
+                lines.append("\n<details><summary>All categorical breakdowns</summary>\n")
                 for p, info in cat.items():
                     if not info.get("per_value"):
                         continue
@@ -757,7 +820,7 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
             # Numeric quartiles
             num = r.get("numeric_quartiles", {})
             if num:
-                lines.append(f"\n#### D. Numeric: quartile mean RMSE (sweet spot)\n")
+                lines.append("\n#### D. Numeric: quartile mean RMSE (sweet spot)\n")
                 lines.append("| param | Q1 | Q2 | Q3 | Q4 | best Q (range) |")
                 lines.append("|---|---|---|---|---|---|")
                 for p, info in num.items():
@@ -767,12 +830,14 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
                     rng = info[best_q].get("range", [None, None])
                     cells = [f"{info[q]['mean_rmse']:.4f}" if q in info else "—" for q in ("Q1", "Q2", "Q3", "Q4")]
                     rng_str = f"[{rng[0]}, {rng[1]}]" if rng[1] is not None else f"[{rng[0]}, ∞)"
-                    lines.append(f"| `{p}` | {cells[0]} | {cells[1]} | {cells[2]} | {cells[3]} | **{best_q}** {rng_str} |")
+                    lines.append(
+                        f"| `{p}` | {cells[0]} | {cells[1]} | {cells[2]} | {cells[3]} | **{best_q}** {rng_str} |"
+                    )
 
             # E. Slice plot reference
             sp = slice_paths.get(f"{run_tag}/{v}")
             if sp:
-                lines.append(f"\n#### E. Slice plot\n")
+                lines.append("\n#### E. Slice plot\n")
                 lines.append(f"![{run_tag}/{v}]({os.path.basename(sp)})\n")
 
     # Overall recommendations summary
@@ -784,8 +849,9 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
             cat = ds.get(mk, {}).get("categorical_stats", {})
             for p, info in cat.items():
                 if info.get("best") and info["best"].get("significant"):
-                    moe_recs.append((run_tag, p, info["best"]["value"],
-                                     info["best"]["delta_mean"], info["best"]["p_value"]))
+                    moe_recs.append(
+                        (run_tag, p, info["best"]["value"], info["best"]["delta_mean"], info["best"]["p_value"])
+                    )
     if moe_recs:
         lines.append("**Categorical settings that are statistically significant winners (p<0.01):**\n")
         lines.append("| dataset | param | best value | Δ vs runner-up | p |")
@@ -842,8 +908,7 @@ def holdout_eval(best: dict, X_search, y_search, X_hold, y_hold, cfg) -> dict:
             t1 = time.perf_counter()
             pred_s = 0.0  # ensemble latency folded into retrain timing
         else:
-            model = _train_with_es(dict(best["lgbm_params"]), X_search, y_search,
-                                   cfg.num_boost_round)
+            model = _train_with_es(dict(best["lgbm_params"]), X_search, y_search, cfg.num_boost_round)
             t1 = time.perf_counter()
             preds = model.predict(X_hold)
             pred_s = time.perf_counter() - t1
@@ -874,25 +939,28 @@ def collect_provenance() -> dict:
         "platform": platform.platform(),
         "lightgbm_moe_package": os.path.dirname(os.path.abspath(lgb.__file__)),
     }
-    lib_path = os.path.join(os.path.dirname(os.path.abspath(lgb.__file__)),
-                            "lib", "lib_lightgbm.so")
+    lib_path = os.path.join(os.path.dirname(os.path.abspath(lgb.__file__)), "lib", "lib_lightgbm.so")
     if os.path.exists(lib_path):
         prov["lib_sha256"] = _sha256(lib_path)
     try:
         prov["git_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=os.path.dirname(os.path.abspath(__file__)), text=True).strip()
-        prov["git_dirty"] = bool(subprocess.check_output(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
-            cwd=os.path.dirname(os.path.abspath(__file__)), text=True).strip())
+            ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)), text=True
+        ).strip()
+        prov["git_dirty"] = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                text=True,
+            ).strip()
+        )
     except Exception:
         pass
     cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_cache")
     if os.path.isdir(cache_dir):
         prov["data_cache"] = {
-            f: {"sha256": _sha256(os.path.join(cache_dir, f)),
-                "bytes": os.path.getsize(os.path.join(cache_dir, f))}
-            for f in sorted(os.listdir(cache_dir)) if f.endswith(".csv")
+            f: {"sha256": _sha256(os.path.join(cache_dir, f)), "bytes": os.path.getsize(os.path.join(cache_dir, f))}
+            for f in sorted(os.listdir(cache_dir))
+            if f.endswith(".csv")
         }
     return prov
 
@@ -900,17 +968,29 @@ def collect_provenance() -> dict:
 # =============================================================================
 # Driver
 # =============================================================================
-def run_study(dataset_name: str, X_search, y_search, X_hold, y_hold,
-              n_trials: int, n_jobs: int, cfg: BenchmarkConfig, slice_dir: str,
-              run_tag: str) -> tuple[dict, dict]:
+def run_study(
+    dataset_name: str,
+    X_search,
+    y_search,
+    X_hold,
+    y_hold,
+    n_trials: int,
+    n_jobs: int,
+    cfg: BenchmarkConfig,
+    slice_dir: str,
+    run_tag: str,
+) -> tuple[dict, dict]:
     print(f"\n{'=' * 60}")
-    print(f"  Run: {run_tag}  search={X_search.shape}  holdout={len(X_hold)}  "
-          f"trials={n_trials}  n_jobs={n_jobs}")
+    print(f"  Run: {run_tag}  search={X_search.shape}  holdout={len(X_hold)}  trials={n_trials}  n_jobs={n_jobs}")
     print(f"{'=' * 60}")
 
-    out = {"dataset": dataset_name, "seed": cfg.seed,
-           "X_search_shape": list(X_search.shape), "n_holdout": int(len(X_hold)),
-           "y_stats": {"mean": float(y_search.mean()), "std": float(y_search.std())}}
+    out = {
+        "dataset": dataset_name,
+        "seed": cfg.seed,
+        "X_search_shape": list(X_search.shape),
+        "n_holdout": int(len(X_hold)),
+        "y_stats": {"mean": float(y_search.mean()), "std": float(y_search.std())},
+    }
     slice_paths: dict = {}
     X, y = X_search, y_search  # Optuna objectives close over the search region only
 
@@ -924,22 +1004,30 @@ def run_study(dataset_name: str, X_search, y_search, X_hold, y_hold,
     # "search" and "off" both keep the canonical "moe" variant name so the
     # v0.8 study output is directly comparable to the v0.6 README JSON.
     # Forced-trigger ablation modes get a distinguishing suffix.
-    moe_variant_name = ("moe" if refit_mode in ("search", "off")
-                        else f"moe-refit-{refit_mode}")
+    moe_variant_name = "moe" if refit_mode in ("search", "off") else f"moe-refit-{refit_mode}"
 
     all_variants = [
         ("naive-lightgbm", lambda log: make_naive_lightgbm_objective(X, y, cfg, log)),
         ("naive-ensemble", lambda log: make_naive_ensemble_objective(X, y, cfg, log)),
-        (moe_variant_name, lambda log: make_moe_objective(X, y, cfg, log,
-                                                          refit_mode=refit_mode,
-                                                          refit_decay=refit_decay,
-                                                          space=getattr(cfg, "moe_space", "standard"))),
+        (
+            moe_variant_name,
+            lambda log: make_moe_objective(
+                X,
+                y,
+                cfg,
+                log,
+                refit_mode=refit_mode,
+                refit_decay=refit_decay,
+                space=getattr(cfg, "moe_space", "standard"),
+            ),
+        ),
     ]
     selected_variants = getattr(cfg, "variants", None)
     if selected_variants:
         # Match by prefix so "moe" selects "moe-refit-elbo" too.
-        all_variants = [v for v in all_variants
-                         if any(v[0] == s or v[0].startswith(s + "-") for s in selected_variants)]
+        all_variants = [
+            v for v in all_variants if any(v[0] == s or v[0].startswith(s + "-") for s in selected_variants)
+        ]
     out["_variants"] = [v[0] for v in all_variants]
     for variant, make_obj in all_variants:
         print(f"\n  → {variant} ({n_trials} trials)...")
@@ -966,10 +1054,12 @@ def run_study(dataset_name: str, X_search, y_search, X_hold, y_hold,
             slice_paths[f"{run_tag}/{variant}"] = sp_path
 
         hold = agg.get("holdout", {})
-        print(f"    cv-best RMSE = {agg.get('rmse_best', float('nan')):.4f}, "
-              f"holdout RMSE = {hold.get('holdout_rmse', float('nan')):.4f}, "
-              f"crash rate = {1 - agg.get('n_finite', 0) / max(1, agg.get('n_trials', 1)):.1%}, "
-              f"wall = {wall:.0f}s")
+        print(
+            f"    cv-best RMSE = {agg.get('rmse_best', float('nan')):.4f}, "
+            f"holdout RMSE = {hold.get('holdout_rmse', float('nan')):.4f}, "
+            f"crash rate = {1 - agg.get('n_finite', 0) / max(1, agg.get('n_trials', 1)):.1%}, "
+            f"wall = {wall:.0f}s"
+        )
 
     return out, slice_paths
 
@@ -978,15 +1068,14 @@ DATASET_GENERATORS = {
     "synthetic": lambda seed: generate_synthetic_data(seed=seed),
     "fred_gdp": lambda seed: generate_fred_gdp_data(seed=seed),
     "sp500_basic": lambda seed: generate_sp500_basic_data(seed=seed),  # ~13 features
-    "sp500": lambda seed: generate_sp500_data(seed=seed),              # ~28 features (enriched)
+    "sp500": lambda seed: generate_sp500_data(seed=seed),  # ~28 features (enriched)
     "vix": lambda seed: generate_vix_data(seed=seed),
     "hmm": lambda seed: generate_hmm_data(seed=seed),
 }
 # Non-regime CONTROL group (Grinsztajn 2022 regression track, i.i.d. tabular).
 # MoE's honest claim requires showing it does no harm here.
 for _name, _did in OPENML_CONTROL_DATASETS.items():
-    DATASET_GENERATORS[_name] = (
-        lambda seed, _n=_name, _d=_did: generate_openml_control_data(_n, _d, seed=seed))
+    DATASET_GENERATORS[_name] = lambda seed, _n=_name, _d=_did: generate_openml_control_data(_n, _d, seed=seed)
 
 
 def summarize_across_seeds(results: dict) -> dict:
@@ -997,7 +1086,7 @@ def summarize_across_seeds(results: dict) -> dict:
     be read as "no variance estimate", not "no variance".
     """
     summary: dict = {}
-    for run_tag, run in results.get("runs", {}).items():
+    for run in results.get("runs", {}).values():
         ds = run["dataset"]
         for v in run.get("_variants", []):
             agg = run.get(v, {})
@@ -1009,10 +1098,13 @@ def summarize_across_seeds(results: dict) -> dict:
                 "crash_rate": round(1 - agg.get("n_finite", 0) / max(1, agg.get("n_trials", 1)), 4),
                 "retrain_s": hold.get("retrain_s"),
             }
-    for ds, variants in summary.items():
-        for v, entry in variants.items():
-            hs = [s["holdout_rmse"] for s in entry["per_seed"].values()
-                  if s["holdout_rmse"] is not None and np.isfinite(s["holdout_rmse"])]
+    for variants in summary.values():
+        for entry in variants.values():
+            hs = [
+                s["holdout_rmse"]
+                for s in entry["per_seed"].values()
+                if s["holdout_rmse"] is not None and np.isfinite(s["holdout_rmse"])
+            ]
             cs = [s["cv_best"] for s in entry["per_seed"].values() if s["cv_best"] is not None]
             if hs:
                 entry["holdout_mean"] = round(float(np.mean(hs)), 6)
@@ -1033,14 +1125,22 @@ def main():
     p.add_argument("--n-jobs", type=int, default=1)
     p.add_argument("--rounds", type=int, default=100)
     p.add_argument("--splits", type=int, default=5)
-    p.add_argument("--seeds", type=str, default="42",
-                   help="comma-separated seeds; each seed redraws synthetic/hmm "
-                        "data AND reseeds the TPE sampler + models. Multi-seed "
-                        "runs report holdout mean±std — single-seed numbers "
-                        "have no variance estimate.")
-    p.add_argument("--holdout-frac", type=float, default=0.2,
-                   help="chronological tail fraction never seen by Optuna; the "
-                        "CV winner is retrained on the rest and scored on it once")
+    p.add_argument(
+        "--seeds",
+        type=str,
+        default="42",
+        help="comma-separated seeds; each seed redraws synthetic/hmm "
+        "data AND reseeds the TPE sampler + models. Multi-seed "
+        "runs report holdout mean±std — single-seed numbers "
+        "have no variance estimate.",
+    )
+    p.add_argument(
+        "--holdout-frac",
+        type=float,
+        default=0.2,
+        help="chronological tail fraction never seen by Optuna; the "
+        "CV winner is retrained on the rest and scored on it once",
+    )
     p.add_argument(
         "--datasets",
         type=str,
@@ -1059,21 +1159,34 @@ def main():
     # "always" / "elbo" / "every_n": legacy v0.7 forced-trigger ablation
     #     (the variant key becomes "moe-refit-<mode>" so a baseline run
     #     plus an ablation run can be merged). Regrow is OFF in this path.
-    p.add_argument("--moe-refit-mode",
-                   choices=["search", "off", "always", "elbo", "every_n"],
-                   default="search",
-                   help="how to handle the v0.7/v0.8 refit + regrow knobs. "
-                        "default 'search' = let Optuna pick (v0.8 study mode)")
-    p.add_argument("--moe-refit-decay", type=float, default=0.0,
-                   help="leaf blend factor (0=replace, 1=no-op); used when mode != off")
-    p.add_argument("--moe-space", choices=["standard", "wide"], default="standard",
-                   help="MoE search space. 'wide' adds gmm_features/kmeans_features "
-                        "inits, K up to 6, gate temperature annealing, entropy "
-                        "lambda, expert dropout, load-balance alpha (~6 extra "
-                        "dims — budget more trials)")
-    p.add_argument("--variants", type=str, default=None,
-                   help="comma-separated subset of {naive-lightgbm,naive-ensemble,moe}; "
-                        "useful with --moe-refit-mode to skip naive baselines on ablation runs")
+    p.add_argument(
+        "--moe-refit-mode",
+        choices=["search", "off", "always", "elbo", "every_n"],
+        default="search",
+        help="how to handle the v0.7/v0.8 refit + regrow knobs. default 'search' = let Optuna pick (v0.8 study mode)",
+    )
+    p.add_argument(
+        "--moe-refit-decay",
+        type=float,
+        default=0.0,
+        help="leaf blend factor (0=replace, 1=no-op); used when mode != off",
+    )
+    p.add_argument(
+        "--moe-space",
+        choices=["standard", "wide"],
+        default="standard",
+        help="MoE search space. 'wide' adds gmm_features/kmeans_features "
+        "inits, K up to 6, gate temperature annealing, entropy "
+        "lambda, expert dropout, load-balance alpha (~6 extra "
+        "dims — budget more trials)",
+    )
+    p.add_argument(
+        "--variants",
+        type=str,
+        default=None,
+        help="comma-separated subset of {naive-lightgbm,naive-ensemble,moe}; "
+        "useful with --moe-refit-mode to skip naive baselines on ablation runs",
+    )
     args = p.parse_args()
 
     seeds = [int(s.strip()) for s in args.seeds.split(",")]
@@ -1087,18 +1200,26 @@ def main():
     slice_dir = out_dir
 
     results = {
-        "config": {"trials": args.trials, "n_jobs": args.n_jobs, "rounds": args.rounds,
-                   "splits": args.splits, "seeds": seeds, "holdout_frac": args.holdout_frac,
-                   "datasets": selected, "es_fraction": ES_FRACTION, "cv_gap": CV_GAP,
-                   "moe_refit_mode": args.moe_refit_mode, "moe_space": args.moe_space},
+        "config": {
+            "trials": args.trials,
+            "n_jobs": args.n_jobs,
+            "rounds": args.rounds,
+            "splits": args.splits,
+            "seeds": seeds,
+            "holdout_frac": args.holdout_frac,
+            "datasets": selected,
+            "es_fraction": ES_FRACTION,
+            "cv_gap": CV_GAP,
+            "moe_refit_mode": args.moe_refit_mode,
+            "moe_space": args.moe_space,
+        },
         "provenance": collect_provenance(),
         "runs": {},
     }
     all_slice_paths: dict = {}
 
     for seed in seeds:
-        cfg = BenchmarkConfig(n_trials=args.trials, seed=seed, n_splits=args.splits,
-                              num_boost_round=args.rounds)
+        cfg = BenchmarkConfig(n_trials=args.trials, seed=seed, n_splits=args.splits, num_boost_round=args.rounds)
         cfg.moe_refit_mode = args.moe_refit_mode
         cfg.moe_refit_decay = args.moe_refit_decay
         cfg.moe_space = args.moe_space
@@ -1107,8 +1228,9 @@ def main():
             X, y, _ = DATASET_GENERATORS[ds_name](seed)
             X_search, y_search, X_hold, y_hold = chronological_split(X, y, args.holdout_frac)
             run_tag = f"{ds_name}@s{seed}"
-            ds_out, sp = run_study(ds_name, X_search, y_search, X_hold, y_hold,
-                                   args.trials, args.n_jobs, cfg, slice_dir, run_tag)
+            ds_out, sp = run_study(
+                ds_name, X_search, y_search, X_hold, y_hold, args.trials, args.n_jobs, cfg, slice_dir, run_tag
+            )
             results["runs"][run_tag] = ds_out
             all_slice_paths.update(sp)
 

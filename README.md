@@ -317,7 +317,7 @@ dropout 0.1–0.2 and the soft M-step, not by any init choice.
 | `mixture_diversity_lambda` | active (> 0.02) in **23 / 24** winners — still the one near-universal knob |
 | `mixture_expert_dropout_rate` | active in **21 / 24** (typically 0.05–0.2) — was frozen at 0 pre-v0.8.1 |
 | `mixture_load_balance_alpha` | active in **22 / 24** — was frozen at 0 |
-| `mixture_gate_entropy_lambda` | active in **17 / 19** gate-ful winners — was frozen at 0 |
+| `mixture_gate_entropy_lambda` | active in **17 / 19** gate-equipped winners — was frozen at 0 |
 | gate temperature | `T_init > 1.5` in **12 / 19** — the old fixed `T = 1.0` was leaving accuracy on the table |
 | `mixture_refit_leaves` | **ON in 15 / 24 winners** — updates the v0.8 finding ("Optuna declines refit on 5/6 datasets"): after the v0.8.1 stale-score fix and ELBO-trigger cooldown, leaf refit is an ordinary useful knob rather than a bad-init-only safety net |
 | `mixture_hard_m_step` | soft (False) in 16 / 24 — the hard-M-step default is *not* a universal winner |

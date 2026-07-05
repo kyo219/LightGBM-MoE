@@ -368,9 +368,8 @@ DATASETS = {
 # =============================================================================
 # Real-world & HMM datasets (added for the 5-dataset benchmark)
 # =============================================================================
-import os as _os
-import urllib.request as _urlreq
-from pathlib import Path as _Path
+import urllib.request as _urlreq  # noqa: E402  (section-local imports for the real-data generators)
+from pathlib import Path as _Path  # noqa: E402
 
 _CACHE_DIR = _Path(__file__).parent / "data_cache"
 _CACHE_DIR.mkdir(exist_ok=True)
@@ -423,6 +422,7 @@ def generate_fred_gdp_data(seed: int = 42, fred_series: str = "GDPC1"):
         _urlreq.urlretrieve(url, cache)
 
     import pandas as pd
+
     df = pd.read_csv(cache)
     df.columns = [c.strip().lower() for c in df.columns]
     val_col = [c for c in df.columns if c != "observation_date" and c != "date"][0]
@@ -437,7 +437,7 @@ def generate_fred_gdp_data(seed: int = 42, fred_series: str = "GDPC1"):
     # Build lag features (lags 1..4 of growth rate) and TS features
     lag_max = 4
     n = len(growth) - lag_max
-    lags = np.column_stack([growth[lag_max - k - 1: lag_max - k - 1 + n] for k in range(lag_max)])
+    lags = np.column_stack([growth[lag_max - k - 1 : lag_max - k - 1 + n] for k in range(lag_max)])
     ts_feats = _add_ts_features(growth)
     ts_feats = ts_feats[lag_max:]
     X = np.column_stack([lags, ts_feats])
@@ -446,14 +446,19 @@ def generate_fred_gdp_data(seed: int = 42, fred_series: str = "GDPC1"):
     return X, y, None  # No ground-truth regime label
 
 
-def _yf_download_close(symbol: str, start: str, end: str, cache_name: str) -> "pd.Series":
-    """Cached yfinance close-price download. Returns a pandas Series of daily close prices."""
+def _yf_download_close(symbol: str, start: str, end: str, cache_name: str):
+    """Cached yfinance close-price download.
+
+    Returns a ``pandas.Series`` of daily close prices.
+    """
     import pandas as pd
+
     cache = _CACHE_DIR / f"{cache_name}.csv"
     if cache.exists():
         s = pd.read_csv(cache, index_col=0, parse_dates=True).iloc[:, 0]
         return s.dropna()
     import yfinance as yf
+
     df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
     if df.empty:
         raise RuntimeError(f"yfinance returned empty data for {symbol} ({start}..{end})")
@@ -534,14 +539,14 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     # 1) Lagged returns (lag k = k-1 steps back from today, so lag-1 = today)
     for lag in (1, 2, 3, 5, 10, 20, 60):
         f = np.zeros(n_ret)
-        f[lag - 1:] = log_ret[:n_ret - lag + 1]
+        f[lag - 1 :] = log_ret[: n_ret - lag + 1]
         feats.append(f)
 
     # 2) Cumulative log return over window (momentum), inclusive of today
     def _rolling_sum(arr, w):
         out = np.zeros_like(arr)
         for i in range(w - 1, len(arr)):
-            out[i] = arr[i - w + 1:i + 1].sum()
+            out[i] = arr[i - w + 1 : i + 1].sum()
         return out
 
     cum5 = _rolling_sum(log_ret, 5)
@@ -550,7 +555,7 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     feats.extend([cum5, cum20, cum60])
 
     # 3) Realized volatility (sqrt of sum of squared returns)
-    sq = log_ret ** 2
+    sq = log_ret**2
     rv5 = np.sqrt(_rolling_sum(sq, 5))
     rv20 = np.sqrt(_rolling_sum(sq, 20))
     rv60 = np.sqrt(_rolling_sum(sq, 60))
@@ -567,7 +572,7 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     def _rsi(arr, w):
         out = np.full(len(arr), 50.0)
         for i in range(w - 1, len(arr)):
-            window = arr[i - w + 1:i + 1]
+            window = arr[i - w + 1 : i + 1]
             gains = np.maximum(window, 0).sum()
             losses = -np.minimum(window, 0).sum()
             if losses == 0:
@@ -584,18 +589,18 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     skew = np.zeros(n_ret)
     kurt = np.zeros(n_ret)
     for i in range(19, n_ret):
-        w = log_ret[i - 19:i + 1]
+        w = log_ret[i - 19 : i + 1]
         m = w.mean()
         s = w.std()
         if s > 0:
-            skew[i] = ((w - m) ** 3).mean() / s ** 3
-            kurt[i] = ((w - m) ** 4).mean() / s ** 4 - 3.0
+            skew[i] = ((w - m) ** 3).mean() / s**3
+            kurt[i] = ((w - m) ** 4).mean() / s**4 - 3.0
     feats.extend([skew, kurt])
 
     # 7) Bollinger band position (z-score of log price vs MA(20))
     bb = np.zeros(n_ret)
     for i in range(19, n_ret):
-        w = log_px_ret[i - 19:i + 1]
+        w = log_px_ret[i - 19 : i + 1]
         sd = w.std()
         if sd > 0:
             bb[i] = (log_px_ret[i] - w.mean()) / (2.0 * sd)
@@ -605,7 +610,7 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     def _drawdown(arr, w):
         out = np.zeros_like(arr)
         for i in range(w - 1, len(arr)):
-            peak = arr[i - w + 1:i + 1].max()
+            peak = arr[i - w + 1 : i + 1].max()
             out[i] = arr[i] - peak  # <= 0
         return out
 
@@ -616,7 +621,7 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     def _frac_pos(arr, w):
         out = np.zeros_like(arr)
         for i in range(w - 1, len(arr)):
-            out[i] = float((arr[i - w + 1:i + 1] > 0).mean())
+            out[i] = float((arr[i - w + 1 : i + 1] > 0).mean())
         return out
 
     feats.append(_frac_pos(log_ret, 5))
@@ -629,8 +634,8 @@ def generate_sp500_data(seed: int = 42, start: str = "2010-01-01", end: str = "2
     n = n_ret - burn - 1
     if n <= 0:
         raise RuntimeError("S&P series too short after feature construction")
-    X = X_full[burn:burn + n]
-    y = log_ret[burn + 1:burn + 1 + n]
+    X = X_full[burn : burn + n]
+    y = log_ret[burn + 1 : burn + 1 + n]
     return X, y, None
 
 
@@ -670,8 +675,7 @@ def generate_vix_data(seed: int = 42, start: str = "2010-01-01", end: str = "202
     return X, y, None
 
 
-def generate_openml_control_data(name: str, data_id: int, seed: int = 42,
-                                 max_rows: int = 10000):
+def generate_openml_control_data(name: str, data_id: int, seed: int = 42, max_rows: int = 10000):
     """Non-regime CONTROL dataset from the Grinsztajn et al. (2022) regression
     track ("Why do tree-based models still outperform deep learning on typical
     tabular data?", NeurIPS D&B). These are standard i.i.d. tabular regression
@@ -690,11 +694,13 @@ def generate_openml_control_data(name: str, data_id: int, seed: int = 42,
       per-seed shuffle also gives multi-seed runs genuine data variation.
     """
     import pandas as pd
+
     cache = _CACHE_DIR / f"openml_{name}.csv"
     if cache.exists():
         df = pd.read_csv(cache)
     else:
         from sklearn.datasets import fetch_openml
+
         bunch = fetch_openml(data_id=data_id, as_frame=True, parser="auto")
         df = bunch.data.copy()
         df["__target__"] = bunch.target
@@ -714,9 +720,9 @@ def generate_openml_control_data(name: str, data_id: int, seed: int = 42,
 
 # Grinsztajn regression-track controls: (name, OpenML data_id).
 OPENML_CONTROL_DATASETS = {
-    "houses": 537,        # California housing, 20640 x 8
-    "cpu_act": 197,       # computer activity, 8192 x 21
-    "elevators": 216,     # aircraft control, 16599 x 18
+    "houses": 537,  # California housing, 20640 x 8
+    "cpu_act": 197,  # computer activity, 8192 x 21
+    "elevators": 216,  # aircraft control, 16599 x 18
     "wine_quality": 287,  # red+white wine, 6497 x 11
 }
 

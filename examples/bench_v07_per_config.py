@@ -45,40 +45,46 @@ from sklearn.model_selection import TimeSeriesSplit
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python-package"))
 
-import lightgbm_moe as lgb  # noqa: E402
-
 from benchmark import (  # noqa: E402
-    generate_synthetic_data,
     generate_fred_gdp_data,
+    generate_hmm_data,
     generate_sp500_basic_data,
     generate_sp500_data,
+    generate_synthetic_data,
     generate_vix_data,
-    generate_hmm_data,
 )
 
+import lightgbm_moe as lgb  # noqa: E402
 
 DATASET_GENERATORS = {
-    "synthetic":   lambda seed: generate_synthetic_data(seed=seed),
-    "fred_gdp":    lambda seed: generate_fred_gdp_data(seed=seed),
+    "synthetic": lambda seed: generate_synthetic_data(seed=seed),
+    "fred_gdp": lambda seed: generate_fred_gdp_data(seed=seed),
     "sp500_basic": lambda seed: generate_sp500_basic_data(seed=seed),
-    "sp500":       lambda seed: generate_sp500_data(seed=seed),
-    "vix":         lambda seed: generate_vix_data(seed=seed),
-    "hmm":         lambda seed: generate_hmm_data(seed=seed),
+    "sp500": lambda seed: generate_sp500_data(seed=seed),
+    "vix": lambda seed: generate_vix_data(seed=seed),
+    "hmm": lambda seed: generate_hmm_data(seed=seed),
 }
 
 
 REFIT_VARIANTS: List[Dict[str, Any]] = [
-    {"name": "off",     "params": {}},
-    {"name": "elbo",    "params": {"mixture_refit_leaves": True,
-                                    "mixture_refit_trigger": "elbo",
-                                    "mixture_refit_decay_rate": 0.0}},
-    {"name": "every_n", "params": {"mixture_refit_leaves": True,
-                                    "mixture_refit_trigger": "every_n",
-                                    "mixture_refit_every_n": 10,
-                                    "mixture_refit_decay_rate": 0.0}},
-    {"name": "always",  "params": {"mixture_refit_leaves": True,
-                                    "mixture_refit_trigger": "always",
-                                    "mixture_refit_decay_rate": 0.0}},
+    {"name": "off", "params": {}},
+    {
+        "name": "elbo",
+        "params": {"mixture_refit_leaves": True, "mixture_refit_trigger": "elbo", "mixture_refit_decay_rate": 0.0},
+    },
+    {
+        "name": "every_n",
+        "params": {
+            "mixture_refit_leaves": True,
+            "mixture_refit_trigger": "every_n",
+            "mixture_refit_every_n": 10,
+            "mixture_refit_decay_rate": 0.0,
+        },
+    },
+    {
+        "name": "always",
+        "params": {"mixture_refit_leaves": True, "mixture_refit_trigger": "always", "mixture_refit_decay_rate": 0.0},
+    },
 ]
 
 
@@ -118,7 +124,8 @@ def evaluate_cv(X, y, params, n_splits: int, num_boost_round: int):
         try:
             t0 = time.perf_counter()
             model = lgb.train(
-                params, train,
+                params,
+                train,
                 num_boost_round=num_boost_round,
                 valid_sets=[valid],
                 callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
@@ -134,18 +141,18 @@ def evaluate_cv(X, y, params, n_splits: int, num_boost_round: int):
     return rmses, times
 
 
-def bench_dataset(name: str, X, y, v06_best: Dict[str, Any],
-                  n_splits: int, num_boost_round: int) -> Dict[str, Any]:
+def bench_dataset(name: str, X, y, v06_best: Dict[str, Any], n_splits: int, num_boost_round: int) -> Dict[str, Any]:
     print(f"\n=== {name} ===  N={len(y)}  F={X.shape[1]}")
-    print(f"  v0.6 best config: K={v06_best.get('mixture_num_experts')}, "
-          f"init={v06_best.get('mixture_init')}, "
-          f"gate={v06_best.get('mixture_gate_type')}, "
-          f"routing={v06_best.get('mixture_routing_mode')}, "
-          f"e_step={v06_best.get('mixture_e_step_mode')}, "
-          f"div={v06_best.get('mixture_diversity_lambda', 0):.3f}")
+    print(
+        f"  v0.6 best config: K={v06_best.get('mixture_num_experts')}, "
+        f"init={v06_best.get('mixture_init')}, "
+        f"gate={v06_best.get('mixture_gate_type')}, "
+        f"routing={v06_best.get('mixture_routing_mode')}, "
+        f"e_step={v06_best.get('mixture_e_step_mode')}, "
+        f"div={v06_best.get('mixture_diversity_lambda', 0):.3f}"
+    )
 
-    out: Dict[str, Any] = {"name": name, "v06_best": dict(v06_best),
-                           "variants": {}}
+    out: Dict[str, Any] = {"name": name, "v06_best": dict(v06_best), "variants": {}}
     for v in REFIT_VARIANTS:
         params = {**base_static_params(), **v06_best, **v["params"]}
         rmses, times = evaluate_cv(X, y, params, n_splits, num_boost_round)
@@ -161,8 +168,7 @@ def bench_dataset(name: str, X, y, v06_best: Dict[str, Any],
             "time_per_fold": times,
             "n_folds": len(rmses),
         }
-        print(f"  refit={v['name']:<8s}  rmse={rmse_mean:.4f} ± {rmse_std:.4f}  "
-              f"fold_time={time_mean:.2f}s")
+        print(f"  refit={v['name']:<8s}  rmse={rmse_mean:.4f} ± {rmse_std:.4f}  fold_time={time_mean:.2f}s")
     return out
 
 
@@ -183,7 +189,7 @@ def render_md(results: Dict[str, Any], n_trials_v06: int) -> str:
         v = ds["variants"]
         off = v["off"]["rmse_mean"]
 
-        def pct(x):
+        def pct(x, off=off):  # bind loop var: late binding gave every row the LAST dataset's baseline
             if not (off > 0) or not np.isfinite(x):
                 return "n/a"
             return f"{100.0 * (x - off) / off:+.2f}%"
@@ -213,22 +219,34 @@ def render_md(results: Dict[str, Any], n_trials_v06: int) -> str:
             f"| {v['elbo']['time_mean']:.2f} "
             f"| {v['every_n']['time_mean']:.2f} "
             f"| {v['always']['time_mean']:.2f} "
-            f"| {v['elbo']['time_mean']/off_t:.2f}× "
-            f"| {v['every_n']['time_mean']/off_t:.2f}× "
-            f"| {v['always']['time_mean']/off_t:.2f}× |"
+            f"| {v['elbo']['time_mean'] / off_t:.2f}× "
+            f"| {v['every_n']['time_mean'] / off_t:.2f}× "
+            f"| {v['always']['time_mean'] / off_t:.2f}× |"
         )
     lines.append("")
 
     # Summary
     n_total = len(results["datasets"])
-    elbo_better = sum(1 for ds in results["datasets"].values()
-                       if ds["variants"]["elbo"]["rmse_mean"] < ds["variants"]["off"]["rmse_mean"] - 1e-6)
-    elbo_match = sum(1 for ds in results["datasets"].values()
-                      if abs(ds["variants"]["elbo"]["rmse_mean"] - ds["variants"]["off"]["rmse_mean"]) <= 1e-6)
-    every_n_better = sum(1 for ds in results["datasets"].values()
-                          if ds["variants"]["every_n"]["rmse_mean"] < ds["variants"]["off"]["rmse_mean"] - 1e-6)
-    always_better = sum(1 for ds in results["datasets"].values()
-                         if ds["variants"]["always"]["rmse_mean"] < ds["variants"]["off"]["rmse_mean"] - 1e-6)
+    elbo_better = sum(
+        1
+        for ds in results["datasets"].values()
+        if ds["variants"]["elbo"]["rmse_mean"] < ds["variants"]["off"]["rmse_mean"] - 1e-6
+    )
+    elbo_match = sum(
+        1
+        for ds in results["datasets"].values()
+        if abs(ds["variants"]["elbo"]["rmse_mean"] - ds["variants"]["off"]["rmse_mean"]) <= 1e-6
+    )
+    every_n_better = sum(
+        1
+        for ds in results["datasets"].values()
+        if ds["variants"]["every_n"]["rmse_mean"] < ds["variants"]["off"]["rmse_mean"] - 1e-6
+    )
+    always_better = sum(
+        1
+        for ds in results["datasets"].values()
+        if ds["variants"]["always"]["rmse_mean"] < ds["variants"]["off"]["rmse_mean"] - 1e-6
+    )
     lines += [
         "## Summary",
         "",
@@ -243,24 +261,27 @@ def render_md(results: Dict[str, Any], n_trials_v06: int) -> str:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--v06-json",
-                   default="bench_results/study_500_3way_20260502_200635.json",
-                   help="v0.6 study JSON to read best_params from")
-    p.add_argument("--rounds", type=int, default=100,
-                   help="num_boost_round per CV fold (default 100)")
-    p.add_argument("--splits", type=int, default=5,
-                   help="number of TimeSeriesSplit folds (default 5)")
+    p.add_argument(
+        "--v06-json",
+        default="bench_results/study_500_3way_20260502_200635.json",
+        help="v0.6 study JSON to read best_params from",
+    )
+    p.add_argument("--rounds", type=int, default=100, help="num_boost_round per CV fold (default 100)")
+    p.add_argument("--splits", type=int, default=5, help="number of TimeSeriesSplit folds (default 5)")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--datasets", type=str,
-                   default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm")
-    p.add_argument("--override-init", type=str, default=None,
-                   help="if set, overrides mixture_init in every variant — useful "
-                        "for stress-testing refit on a deliberately-bad init like "
-                        "'uniform' or 'random' (the case refit was designed for)")
+    p.add_argument("--datasets", type=str, default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm")
+    p.add_argument(
+        "--override-init",
+        type=str,
+        default=None,
+        help="if set, overrides mixture_init in every variant — useful "
+        "for stress-testing refit on a deliberately-bad init like "
+        "'uniform' or 'random' (the case refit was designed for)",
+    )
     p.add_argument("--out", type=str, default=None)
     args = p.parse_args()
 
-    print(f"v0.7 leaf-refit per-config ablation")
+    print("v0.7 leaf-refit per-config ablation")
     print(f"v0.6 best params from: {args.v06_json}")
     print(f"rounds={args.rounds}  splits={args.splits}  seed={args.seed}")
 
@@ -270,11 +291,13 @@ def main():
     if unknown:
         raise SystemExit(f"Unknown dataset(s): {unknown}")
 
-    results: Dict[str, Any] = {"timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-                                "v06_json": args.v06_json,
-                                "num_boost_round": args.rounds,
-                                "n_splits": args.splits,
-                                "datasets": {}}
+    results: Dict[str, Any] = {
+        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "v06_json": args.v06_json,
+        "num_boost_round": args.rounds,
+        "n_splits": args.splits,
+        "datasets": {},
+    }
 
     if args.override_init:
         print(f"[override] mixture_init forced to '{args.override_init}' for all configs")
@@ -292,8 +315,7 @@ def main():
         cfg = dict(v06_bests[name])
         if args.override_init:
             cfg["mixture_init"] = args.override_init
-        results["datasets"][name] = bench_dataset(
-            name, X, y, cfg, args.splits, args.rounds)
+        results["datasets"][name] = bench_dataset(name, X, y, cfg, args.splits, args.rounds)
 
     # Outputs
     ts = results["timestamp"]

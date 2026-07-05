@@ -89,7 +89,9 @@ def evaluate_cv(X, y, params, cfg: BenchConfig):
         ds_va = lgb.Dataset(X[va], label=y[va], reference=ds_tr, free_raw_data=False)
         try:
             bst = lgb.train(
-                params, ds_tr, num_boost_round=cfg.num_boost_round,
+                params,
+                ds_tr,
+                num_boost_round=cfg.num_boost_round,
                 valid_sets=[ds_va],
                 callbacks=[lgb.early_stopping(50, verbose=False)],
             )
@@ -106,8 +108,11 @@ def evaluate_cv(X, y, params, cfg: BenchConfig):
 def create_objective_standard(X, y, cfg):
     def objective(trial):
         params = {
-            "objective": "regression", "boosting": "gbdt", "verbose": -1,
-            "num_threads": cfg.num_threads, "seed": cfg.seed,
+            "objective": "regression",
+            "boosting": "gbdt",
+            "verbose": -1,
+            "num_threads": cfg.num_threads,
+            "seed": cfg.seed,
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
             "max_depth": trial.suggest_int("max_depth", 3, 12),
             "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 100),
@@ -119,15 +124,19 @@ def create_objective_standard(X, y, cfg):
             "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
         }
         return evaluate_cv(X, y, params, cfg)
+
     return objective
 
 
 def create_objective_moe(X, y, cfg, gate_type):
     """Create MoE objective with fixed gate_type."""
+
     def objective(trial):
         params = {
-            "objective": "regression", "verbose": -1,
-            "num_threads": cfg.num_threads, "seed": cfg.seed,
+            "objective": "regression",
+            "verbose": -1,
+            "num_threads": cfg.num_threads,
+            "seed": cfg.seed,
             # Tree params
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
             "max_depth": trial.suggest_int("max_depth", 3, 12),
@@ -145,16 +154,15 @@ def create_objective_moe(X, y, cfg, gate_type):
             "mixture_warmup_iters": trial.suggest_int("mixture_warmup_iters", 5, 50),
             "mixture_hard_m_step": True,
             "mixture_r_smoothing": "none",
-            "mixture_init": trial.suggest_categorical(
-                "mixture_init", ["uniform", "quantile", "balanced_kmeans"]),
+            "mixture_init": trial.suggest_categorical("mixture_init", ["uniform", "quantile", "balanced_kmeans"]),
             # Gate config (fixed per study)
             "mixture_gate_type": gate_type,
             "mixture_gate_max_depth": trial.suggest_int("mixture_gate_max_depth", 2, 6),
             "mixture_gate_num_leaves": trial.suggest_int("mixture_gate_num_leaves", 4, 32),
-            "mixture_gate_learning_rate": trial.suggest_float(
-                "mixture_gate_learning_rate", 0.01, 0.3, log=True),
+            "mixture_gate_learning_rate": trial.suggest_float("mixture_gate_learning_rate", 0.01, 0.3, log=True),
         }
         return evaluate_cv(X, y, params, cfg)
+
     return objective
 
 
@@ -167,20 +175,22 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--splits", type=int, default=5)
-    parser.add_argument("--threads", type=int, default=4,
-                        help="OMP threads per LightGBM call")
-    parser.add_argument("--n-jobs", type=int, default=1,
-                        help="Optuna parallel trials (uses Python threads)")
+    parser.add_argument("--threads", type=int, default=4, help="OMP threads per LightGBM call")
+    parser.add_argument("--n-jobs", type=int, default=1, help="Optuna parallel trials (uses Python threads)")
     args = parser.parse_args()
 
-    cfg = BenchConfig(n_trials=args.trials, seed=args.seed,
-                      num_boost_round=args.rounds, n_splits=args.splits,
-                      num_threads=args.threads, n_jobs=args.n_jobs)
+    cfg = BenchConfig(
+        n_trials=args.trials,
+        seed=args.seed,
+        num_boost_round=args.rounds,
+        n_splits=args.splits,
+        num_threads=args.threads,
+        n_jobs=args.n_jobs,
+    )
 
     print("=" * 72)
     print("  Gate Type Benchmark: gbdt vs none vs leaf_reuse")
-    print(f"  Optuna trials={cfg.n_trials}, CV splits={cfg.n_splits}, "
-          f"rounds={cfg.num_boost_round}")
+    print(f"  Optuna trials={cfg.n_trials}, CV splits={cfg.n_splits}, rounds={cfg.num_boost_round}")
     print("=" * 72)
 
     all_results = {}
@@ -196,27 +206,19 @@ def main():
 
         # Standard GBDT baseline
         t0 = time.perf_counter()
-        study = optuna.create_study(direction="minimize",
-                                     sampler=optuna.samplers.TPESampler(seed=cfg.seed))
-        study.optimize(create_objective_standard(X, y, cfg),
-                       n_trials=cfg.n_trials, n_jobs=cfg.n_jobs)
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=cfg.seed))
+        study.optimize(create_objective_standard(X, y, cfg), n_trials=cfg.n_trials, n_jobs=cfg.n_jobs)
         elapsed = time.perf_counter() - t0
-        results["Standard"] = {
-            "rmse": study.best_value, "time": elapsed, "params": study.best_params}
+        results["Standard"] = {"rmse": study.best_value, "time": elapsed, "params": study.best_params}
         print(f"  Standard GBDT:    RMSE={study.best_value:.4f}  ({elapsed:.1f}s)")
 
         # MoE with each gate type
         for gate_type in ["gbdt", "none", "leaf_reuse"]:
             t0 = time.perf_counter()
-            study = optuna.create_study(
-                direction="minimize",
-                sampler=optuna.samplers.TPESampler(seed=cfg.seed))
-            study.optimize(
-                create_objective_moe(X, y, cfg, gate_type),
-                n_trials=cfg.n_trials, n_jobs=cfg.n_jobs)
+            study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=cfg.seed))
+            study.optimize(create_objective_moe(X, y, cfg, gate_type), n_trials=cfg.n_trials, n_jobs=cfg.n_jobs)
             elapsed = time.perf_counter() - t0
-            results[f"MoE_{gate_type}"] = {
-                "rmse": study.best_value, "time": elapsed, "params": study.best_params}
+            results[f"MoE_{gate_type}"] = {"rmse": study.best_value, "time": elapsed, "params": study.best_params}
             print(f"  MoE gate={gate_type:<12s} RMSE={study.best_value:.4f}  ({elapsed:.1f}s)")
 
         all_results[ds_name] = results
@@ -232,8 +234,7 @@ def main():
         for method, res in results.items():
             improvement = (std_rmse - res["rmse"]) / std_rmse * 100
             imp_str = f"{improvement:+.1f}%" if method != "Standard" else "—"
-            print(f"  {ds_name:<12s}  {method:<20s}  {res['rmse']:8.4f}  "
-                  f"{res['time']:7.1f}s  {imp_str:>8s}")
+            print(f"  {ds_name:<12s}  {method:<20s}  {res['rmse']:8.4f}  {res['time']:7.1f}s  {imp_str:>8s}")
         print()
 
 

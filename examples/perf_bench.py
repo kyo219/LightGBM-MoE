@@ -20,6 +20,7 @@ Usage:
     # 比較
     python examples/perf_bench.py --compare results_baseline.json results_phase1.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +31,6 @@ import resource
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
 
 import numpy as np
 
@@ -102,6 +102,7 @@ def get_build_info() -> str:
     """git の HEAD と .so の md5 を返す"""
     import hashlib
     import subprocess
+
     here = os.path.dirname(os.path.abspath(__file__))
     repo = os.path.dirname(here)
     try:
@@ -218,11 +219,13 @@ def build_matrix(cfg: BenchConfig) -> list[tuple[str, str, dict]]:
 
     # 2. quantized grad (4/16/32 bins)
     for bins in (4, 16, 32):
-        matrix.append((
-            f"gbdt/quant{bins}",
-            "gbdt",
-            {**common, "use_quantized_grad": True, "num_grad_quant_bins": bins},
-        ))
+        matrix.append(
+            (
+                f"gbdt/quant{bins}",
+                "gbdt",
+                {**common, "use_quantized_grad": True, "num_grad_quant_bins": bins},
+            )
+        )
 
     # MoE パターン
     moe_common = {
@@ -239,11 +242,13 @@ def build_matrix(cfg: BenchConfig) -> list[tuple[str, str, dict]]:
 
     # 4. MoE quantized grad
     for bins in (16, 32):
-        matrix.append((
-            f"moe/quant{bins}",
-            "moe",
-            {**moe_common, "use_quantized_grad": True, "num_grad_quant_bins": bins},
-        ))
+        matrix.append(
+            (
+                f"moe/quant{bins}",
+                "moe",
+                {**moe_common, "use_quantized_grad": True, "num_grad_quant_bins": bins},
+            )
+        )
 
     return matrix
 
@@ -262,12 +267,12 @@ def cmd_run(args):
         threads=args.threads,
     )
 
-    print(f"=== perf_bench.py ===")
+    print("=== perf_bench.py ===")
     print(f"  rows={cfg.n_rows:,}  cols={cfg.n_cols}  rounds={cfg.n_boost_round}  threads={cfg.threads}")
     print(f"  CPU: {get_cpu_info()}")
     print(f"  Build: {get_build_info()}")
 
-    print(f"\nGenerating data...")
+    print("\nGenerating data...")
     X_tr, y_tr, X_va, y_va = generate_data(cfg)
     print(f"  X_tr={X_tr.shape} {X_tr.dtype}  X_va={X_va.shape}")
 
@@ -287,8 +292,10 @@ def cmd_run(args):
         try:
             r = run_one(label, model, params, X_tr, y_tr, X_va, y_va, cfg)
             report.runs.append(asdict(r))
-            print(f"  {r.label:<22s}  {r.train_time_s:>7.2f}s  {r.predict_time_s:>7.3f}s  "
-                  f"{r.peak_rss_mb:>7.0f}M  {r.rmse_holdout:>8.4f}  {r.n_trees:>6d}")
+            print(
+                f"  {r.label:<22s}  {r.train_time_s:>7.2f}s  {r.predict_time_s:>7.3f}s  "
+                f"{r.peak_rss_mb:>7.0f}M  {r.rmse_holdout:>8.4f}  {r.n_trees:>6d}"
+            )
         except Exception as e:
             print(f"  {label:<22s}  FAILED: {e}")
             report.runs.append({"label": label, "model": model, "params": params, "error": str(e)})
@@ -306,7 +313,7 @@ def cmd_compare(args):
     with open(args.after) as f:
         after = json.load(f)
 
-    print(f"=== Comparison ===")
+    print("=== Comparison ===")
     print(f"  before: {args.before}  build={before.get('build_info', '?')}")
     print(f"  after : {args.after}  build={after.get('build_info', '?')}")
 
@@ -328,10 +335,12 @@ def cmd_compare(args):
         tr_speedup = tr_b / tr_a if tr_a > 0 else float("inf")
         pr_speedup = pr_b / pr_a if pr_a > 0 else float("inf")
         rm_diff = rm_a - rm_b
-        print(f"  {label:<22s}  "
-              f"{tr_b:>6.2f}s → {tr_a:>6.2f}s ({tr_speedup:>4.2f}x)  "
-              f"{pr_b:>6.3f}s → {pr_a:>6.3f}s ({pr_speedup:>4.2f}x)  "
-              f"{rm_b:>7.4f} → {rm_a:>7.4f} ({rm_diff:+.4f})")
+        print(
+            f"  {label:<22s}  "
+            f"{tr_b:>6.2f}s → {tr_a:>6.2f}s ({tr_speedup:>4.2f}x)  "
+            f"{pr_b:>6.3f}s → {pr_a:>6.3f}s ({pr_speedup:>4.2f}x)  "
+            f"{rm_b:>7.4f} → {rm_a:>7.4f} ({rm_diff:+.4f})"
+        )
 
 
 def main():
@@ -370,13 +379,20 @@ def main():
         # default to 'run'; fill defaults
         if args.cmd is None:
             args.cmd = "run"
-        if args.rows is None: args.rows = 200_000
-        if args.cols is None: args.cols = 800
-        if args.rounds is None: args.rounds = 100
-        if args.experts is None: args.experts = 4
-        if args.repeats is None: args.repeats = 2
-        if args.seed is None: args.seed = 42
-        if args.threads is None: args.threads = 8
+        if args.rows is None:
+            args.rows = 200_000
+        if args.cols is None:
+            args.cols = 800
+        if args.rounds is None:
+            args.rounds = 100
+        if args.experts is None:
+            args.experts = 4
+        if args.repeats is None:
+            args.repeats = 2
+        if args.seed is None:
+            args.seed = 42
+        if args.threads is None:
+            args.threads = 8
         if args.out is None:
             print("error: --out is required for 'run'", file=sys.stderr)
             sys.exit(2)
