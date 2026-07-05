@@ -26,6 +26,17 @@ import sys
 import numpy as np
 import pytest
 
+# benchmark.py / comparative_study.py import the full bench stack at module
+# level; these tests only run where that stack is installed (they exercise
+# the benchmark methodology, not the library). Skip cleanly elsewhere —
+# without this guard, test COLLECTION dies with ModuleNotFoundError in the
+# wheel-test CI environments.
+pytest.importorskip("optuna")
+pytest.importorskip("matplotlib")
+pytest.importorskip("shap")
+pytest.importorskip("sklearn")
+pytest.importorskip("scipy")
+
 _EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 sys.path.insert(0, _EXAMPLES)
 
