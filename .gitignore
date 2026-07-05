@@ -294,6 +294,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# dev-environment symlink (dir-only 'lib/' above does not match symlinks)
+python-package/lightgbm_moe/lib
 parts/
 sdist/
 var/
