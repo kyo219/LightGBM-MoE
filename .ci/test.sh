@@ -234,7 +234,12 @@ elif [[ $TASK == "cuda" ]]; then
         pytest -ra ./tests || exit 1
         exit 0
     elif [[ $METHOD == "source" ]]; then
-        cmake -B build -S . -DUSE_CUDA=ON
+        # we want at least 1 CI job testing that manual override of CMAKE_CUDA_ARCHITECTURES works
+        cmake \
+            -B build \
+            -S . \
+            -DUSE_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="native"
     fi
 elif [[ $TASK == "mpi" ]]; then
     if [[ $METHOD == "pip" ]]; then
@@ -306,6 +311,7 @@ matplotlib.use\(\"Agg\"\)\
             joblib \
             matplotlib-base \
             pandas \
+            polars \
             psutil \
             pyarrow \
             python-graphviz \
