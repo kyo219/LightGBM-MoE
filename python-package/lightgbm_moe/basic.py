@@ -5432,8 +5432,11 @@ class Booster:
         if not self.is_mixture():
             raise LightGBMError("_extract_gate_model_string can only be used with MoE models")
 
-        model_str = self.model_to_string(num_iteration=-1)
+        return self._slice_gate_section(self.model_to_string(num_iteration=-1))
 
+    @staticmethod
+    def _slice_gate_section(model_str: str) -> str:
+        """Slice the gate section out of an already-serialized MoE model string."""
         # Find [gate_model] section
         gate_marker = "[gate_model]"
         gate_start = model_str.find(gate_marker)
@@ -5478,8 +5481,11 @@ class Booster:
         if expert_index < 0 or expert_index >= num_experts:
             raise LightGBMError(f"expert_index must be in [0, {num_experts}), got {expert_index}")
 
-        model_str = self.model_to_string(num_iteration=-1)
+        return self._slice_expert_section(self.model_to_string(num_iteration=-1), expert_index, num_experts)
 
+    @staticmethod
+    def _slice_expert_section(model_str: str, expert_index: int, num_experts: int) -> str:
+        """Slice expert k's section out of an already-serialized MoE model string."""
         # Find [expert_model_k] section
         section_marker = f"[expert_model_{expert_index}]"
         section_start = model_str.find(section_marker)
@@ -5592,12 +5598,17 @@ class Booster:
         if not self.is_mixture():
             raise LightGBMError("get_all_boosters can only be used with MoE models")
 
+        # Serialize the full model ONCE and slice every component from that
+        # string. Going through get_gate_booster / get_expert_booster would
+        # re-serialize the entire mixture model K+1 times.
+        model_str = self.model_to_string(num_iteration=-1)
+
         result: Dict[str, "Booster"] = {}
-        result["gate"] = self.get_gate_booster()
+        result["gate"] = Booster(model_str=self._slice_gate_section(model_str))
 
         num_experts = self.num_experts()
         for k in range(num_experts):
-            result[f"expert_{k}"] = self.get_expert_booster(k)
+            result[f"expert_{k}"] = Booster(model_str=self._slice_expert_section(model_str, k, num_experts))
 
         return result
 
