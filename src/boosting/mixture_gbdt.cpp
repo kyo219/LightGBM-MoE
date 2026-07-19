@@ -1606,16 +1606,28 @@ void MixtureGBDT::Forward() {
     // gate_proba_ / gate_proba_no_bias_ are in sample-major order
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
-      std::vector<double> scores_no_bias(num_experts_);
-      std::vector<double> scores_with_bias(num_experts_);
+      // Stack buffers for K ≤ 64 — avoids two heap allocs per sample per
+      // iteration (same pattern as EStep / MStepGate).
+      double stack_buf[2 * 64];
+      std::vector<double> heap_buf;
+      double* scores_no_bias;
+      double* scores_with_bias;
+      if (num_experts_ <= 64) {
+        scores_no_bias = stack_buf;
+        scores_with_bias = stack_buf + num_experts_;
+      } else {
+        heap_buf.resize(2 * static_cast<size_t>(num_experts_));
+        scores_no_bias = heap_buf.data();
+        scores_with_bias = heap_buf.data() + num_experts_;
+      }
       for (int k = 0; k < num_experts_; ++k) {
         const double z_over_T = gate_raw[k * num_data_ + i] * inv_T;
         scores_no_bias[k]   = z_over_T;
         scores_with_bias[k] = z_over_T + expert_bias_[k] * inv_T;
       }
-      Softmax(scores_no_bias.data(), num_experts_,
+      Softmax(scores_no_bias, num_experts_,
               gate_proba_no_bias_.data() + i * num_experts_);
-      Softmax(scores_with_bias.data(), num_experts_,
+      Softmax(scores_with_bias, num_experts_,
               gate_proba_.data() + i * num_experts_);
     }
   }
@@ -1642,13 +1654,15 @@ void MixtureGBDT::Forward() {
     if (lambda > 0.0 && num_data_ > 1) {
       auto markov_sweep = [&](double* buf) {
         std::vector<double> prev_row(num_experts_);
+        // Reused across rows (fully overwritten each iteration) — allocating
+        // it inside the loop cost one heap alloc per row per sweep.
+        std::vector<double> cur_row(num_experts_);
         // Row 0 is never blended (no prior available).
         for (int k = 0; k < num_experts_; ++k) {
           prev_row[k] = buf[k];
         }
         for (data_size_t i = 1; i < num_data_; ++i) {
           // Snapshot row i's unsmoothed value before the blend.
-          std::vector<double> cur_row(num_experts_);
           for (int k = 0; k < num_experts_; ++k) {
             cur_row[k] = buf[i * num_experts_ + k];
           }
@@ -1724,11 +1738,21 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
   // gate_proba is in sample-major order: gate_proba[i * num_experts_ + k]
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_valid; ++i) {
-    std::vector<double> scores(num_experts_);
+    // Stack buffer for K ≤ 64 — avoids a heap alloc per sample per iteration
+    // (same pattern as EStep / MStepGate).
+    double scores_buf[64];
+    std::vector<double> scores_heap;
+    double* scores;
+    if (num_experts_ <= 64) {
+      scores = scores_buf;
+    } else {
+      scores_heap.resize(num_experts_);
+      scores = scores_heap.data();
+    }
     for (int k = 0; k < num_experts_; ++k) {
       scores[k] = (gate_raw[k * num_valid + i] + expert_bias_[k]) / gate_temperature_;
     }
-    Softmax(scores.data(), num_experts_, gate_proba.data() + i * num_experts_);
+    Softmax(scores, num_experts_, gate_proba.data() + i * num_experts_);
   }
 
   // Markov mode: same single-pass forward sweep as Forward(); see audit
@@ -1739,11 +1763,12 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
     const double lambda = config_->mixture_smoothing_lambda;
     if (lambda > 0.0 && num_valid > 1) {
       std::vector<double> prev_row(num_experts_);
+      // Reused across rows — see the markov_sweep note in Forward().
+      std::vector<double> cur_row(num_experts_);
       for (int k = 0; k < num_experts_; ++k) {
         prev_row[k] = gate_proba[k];
       }
       for (data_size_t i = 1; i < num_valid; ++i) {
-        std::vector<double> cur_row(num_experts_);
         for (int k = 0; k < num_experts_; ++k) {
           cur_row[k] = gate_proba[i * num_experts_ + k];
         }
@@ -1996,7 +2021,17 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) reduction(+:total)
   for (data_size_t i = 0; i < num_data_; ++i) {
     double max_term = -std::numeric_limits<double>::infinity();
-    std::vector<double> terms(num_experts_);
+    // Stack buffer for K ≤ 64 — this loop runs over all N rows on every
+    // post-warmup iteration (same pattern as EStep).
+    double terms_buf[64];
+    std::vector<double> terms_heap;
+    double* terms;
+    if (num_experts_ <= 64) {
+      terms = terms_buf;
+    } else {
+      terms_heap.resize(num_experts_);
+      terms = terms_heap.data();
+    }
     for (int k = 0; k < num_experts_; ++k) {
       // Prior π_k(x) is bias-free, matching the E-step. ELBO is the model
       // log-likelihood; the routing-side bias is not part of the model.
@@ -2465,118 +2500,11 @@ void MixtureGBDT::MStepExperts() {
     }
   }
 
-  // Phase 1: Pre-compute gradients for all experts (using full OMP parallelism)
-  std::vector<std::vector<score_t>> all_grads(num_experts_);
-  std::vector<std::vector<score_t>> all_hess(num_experts_);
-
-  for (int k = 0; k < num_experts_; ++k) {
-    if (!expert_active[k]) {
-      // Dropped experts get zero gradients (trivial no-split tree)
-      all_grads[k].assign(num_data_, 0.0);
-      all_hess[k].assign(num_data_, kMixtureEpsilon);
-      continue;
-    }
-
-    all_grads[k].resize(num_data_);
-    all_hess[k].resize(num_data_);
-
-    const double* expert_k_pred = expert_pred_.data() + k * num_data_;
-
-    if (objective_function_ != nullptr) {
-      std::vector<double> expert_k_pred_vec(expert_k_pred, expert_k_pred + num_data_);
-      std::vector<score_t> temp_grad(num_data_);
-      std::vector<score_t> temp_hess(num_data_);
-      objective_function_->GetGradients(expert_k_pred_vec.data(), temp_grad.data(), temp_hess.data());
-
-      // Gradient weighting is always soft (r_ik). The hard_m_step flag now
-      // only restricts which samples each expert sees via SetBaggingData
-      // (sparse subset of argmax winners) — see the bagging branch above.
-      // Earlier behavior zeroed gradients for non-winners outright, which
-      // produced expert collapse whenever bagging fell back to the full
-      // dataset (assigned < min_safe): losers got no gradient signal at all
-      // for those samples, so the gate could not learn to route to them.
-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-      for (data_size_t i = 0; i < num_data_; ++i) {
-        double r_ik = responsibilities_[i * num_experts_ + k];
-        all_grads[k][i] = static_cast<score_t>(r_ik * temp_grad[i]);
-        const double hess_val = r_ik * static_cast<double>(temp_hess[i]);
-        all_hess[k][i] = static_cast<score_t>(std::max(hess_val, kMixtureEpsilon));
-
-        if (diversity_lambda > 0.0) {
-          // Diversity regularizer — encourages f_k to differ from f_j on
-          // samples j owns (high r_ij). Earlier code added
-          //     +λ Σ_{j≠k} r_ij (f_k − f_j)
-          // to the gradient — that is the gradient of *aligning* f_k with
-          // the other experts, not diversifying them. Verified empirically:
-          // at λ=0.05 with K=3 the old sign drove pairwise expert distance
-          // down to 22% of the λ=0 baseline.
-          //
-          // Sign-flipping alone is unstable (the natural diversity reward
-          // R_k = -½ λ Σ r_ij (f_k − f_j)² is unbounded below; predictions
-          // run off to ±∞ at any non-trivial λ — λ=0.001 was empirically
-          // shown to inflate peak |pred| 25× in 30 iters). Huber-style
-          // saturation: clip (f_k − f_j) to ±δ before summing so the per-
-          // pair contribution is bounded by ±λ·δ·r_ij. Inside the clip
-          // region the reward is quadratic; outside it is linear. Hessian
-          // damping +λ·Σ r_ij keeps the leaf-value Newton step
-          // well-conditioned (the un-saturated true Hessian of a diversity
-          // reward is negative, which destabilizes Newton).
-          constexpr double kDiversityClip = 1.0;
-          double div_grad = 0.0;
-          double div_hess = 0.0;
-          for (int j = 0; j < num_experts_; ++j) {
-            if (j == k) continue;
-            const double r_ij = responsibilities_[i * num_experts_ + j];
-            const double f_k = expert_k_pred[i];
-            const double f_j = expert_pred_sm_[i * num_experts_ + j];
-            const double diff = f_k - f_j;
-            const double clipped = std::max(-kDiversityClip,
-                                            std::min(kDiversityClip, diff));
-            div_grad += r_ij * clipped;
-            div_hess += r_ij;
-          }
-          const double inv_pairs = 1.0 / (num_experts_ - 1);
-          all_grads[k][i] -= static_cast<score_t>(diversity_lambda * div_grad * inv_pairs);
-          all_hess[k][i] += static_cast<score_t>(diversity_lambda * div_hess * inv_pairs);
-        }
-      }
-    } else {
-      // L2 fallback path: same soft-gradient policy as above.
-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-      for (data_size_t i = 0; i < num_data_; ++i) {
-        double diff = expert_k_pred[i] - labels[i];
-        double r_ik = responsibilities_[i * num_experts_ + k];
-        all_grads[k][i] = static_cast<score_t>(r_ik * 2.0 * diff);
-        all_hess[k][i] = static_cast<score_t>(
-            std::max(r_ik * 2.0, kMixtureEpsilon));
-
-        if (diversity_lambda > 0.0) {
-          // Same Huber-saturated diversity regularizer as the
-          // objective_function_ branch above. See that branch for the
-          // sign / clip / Hessian damping rationale.
-          constexpr double kDiversityClip = 1.0;
-          double div_grad = 0.0;
-          double div_hess = 0.0;
-          for (int j = 0; j < num_experts_; ++j) {
-            if (j == k) continue;
-            const double r_ij = responsibilities_[i * num_experts_ + j];
-            const double f_k = expert_k_pred[i];
-            const double f_j = expert_pred_sm_[i * num_experts_ + j];
-            const double dd = f_k - f_j;
-            const double clipped = std::max(-kDiversityClip,
-                                            std::min(kDiversityClip, dd));
-            div_grad += r_ij * clipped;
-            div_hess += r_ij;
-          }
-          const double inv_pairs = 1.0 / (num_experts_ - 1);
-          all_grads[k][i] -= static_cast<score_t>(diversity_lambda * div_grad * inv_pairs);
-          all_hess[k][i] += static_cast<score_t>(diversity_lambda * div_hess * inv_pairs);
-        }
-      }
-    }
-  }
-
-  // Adaptive per-expert learning rate: scale gradients based on loss trend
+  // Adaptive per-expert learning rate: update the loss history and derive
+  // per-expert scales BEFORE the training loop. This reads only expert_pred_
+  // and responsibilities_, both frozen until the next Forward()/EStep, so
+  // hoisting it above the per-expert gradient computation is exact. The
+  // scale itself is applied right after each expert's gradients are built.
   if (config_->mixture_adaptive_lr) {
     const label_t* lr_labels = train_data_->metadata().label();
     const int window = config_->mixture_adaptive_lr_window;
@@ -2631,19 +2559,6 @@ void MixtureGBDT::MStepExperts() {
       }
     }
 
-    // Apply LR scale to gradients
-    for (int k = 0; k < num_experts_; ++k) {
-      if (!expert_active[k]) continue;
-      double scale = expert_lr_scale_[k];
-      if (std::abs(scale - 1.0) > 1e-6) {
-        score_t s = static_cast<score_t>(scale);
-        #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-        for (data_size_t i = 0; i < num_data_; ++i) {
-          all_grads[k][i] *= s;
-        }
-      }
-    }
-
     // Log occasionally
     if (iter_ % 20 == 0) {
       std::string lr_str;
@@ -2653,6 +2568,136 @@ void MixtureGBDT::MStepExperts() {
       Log::Debug("MixtureGBDT: Adaptive LR scales = [%s]", lr_str.c_str());
     }
   }
+
+  // Gradients are computed lazily, immediately before each expert's
+  // TrainOneIter call, into the member scratch buffers gradients_ /
+  // hessians_ (N each; otherwise idle outside the progressive-seed phase).
+  // Everything the gradients depend on — expert_pred_, expert_pred_sm_,
+  // responsibilities_, labels — is frozen while experts train, so lazy
+  // per-expert computation matches the former precompute-all-experts
+  // "Phase 1" exactly, without reallocating K×N×2 gradient buffers every
+  // boosting iteration. The former defensive copy of the expert's
+  // predictions is also gone: GetGradients takes its input as const.
+  if (static_cast<data_size_t>(gradients_.size()) < num_data_) {
+    gradients_.resize(num_data_);
+    hessians_.resize(num_data_);
+  }
+  score_t* grads = gradients_.data();
+  score_t* hesss = hessians_.data();
+
+  auto compute_expert_gradients = [&](int k) {
+    if (!expert_active[k]) {
+      // Dropped experts get zero gradients (trivial no-split tree)
+      std::fill_n(grads, num_data_, static_cast<score_t>(0.0));
+      std::fill_n(hesss, num_data_, static_cast<score_t>(kMixtureEpsilon));
+      return;
+    }
+
+    const double* expert_k_pred = expert_pred_.data() + k * num_data_;
+
+    if (objective_function_ != nullptr) {
+      objective_function_->GetGradients(expert_k_pred, grads, hesss);
+
+      // Gradient weighting is always soft (r_ik). The hard_m_step flag now
+      // only restricts which samples each expert sees via SetBaggingData
+      // (sparse subset of argmax winners) — see the bagging branch below.
+      // Earlier behavior zeroed gradients for non-winners outright, which
+      // produced expert collapse whenever bagging fell back to the full
+      // dataset (assigned < min_safe): losers got no gradient signal at all
+      // for those samples, so the gate could not learn to route to them.
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        double r_ik = responsibilities_[i * num_experts_ + k];
+        grads[i] = static_cast<score_t>(r_ik * grads[i]);
+        const double hess_val = r_ik * static_cast<double>(hesss[i]);
+        hesss[i] = static_cast<score_t>(std::max(hess_val, kMixtureEpsilon));
+
+        if (diversity_lambda > 0.0) {
+          // Diversity regularizer — encourages f_k to differ from f_j on
+          // samples j owns (high r_ij). Earlier code added
+          //     +λ Σ_{j≠k} r_ij (f_k − f_j)
+          // to the gradient — that is the gradient of *aligning* f_k with
+          // the other experts, not diversifying them. Verified empirically:
+          // at λ=0.05 with K=3 the old sign drove pairwise expert distance
+          // down to 22% of the λ=0 baseline.
+          //
+          // Sign-flipping alone is unstable (the natural diversity reward
+          // R_k = -½ λ Σ r_ij (f_k − f_j)² is unbounded below; predictions
+          // run off to ±∞ at any non-trivial λ — λ=0.001 was empirically
+          // shown to inflate peak |pred| 25× in 30 iters). Huber-style
+          // saturation: clip (f_k − f_j) to ±δ before summing so the per-
+          // pair contribution is bounded by ±λ·δ·r_ij. Inside the clip
+          // region the reward is quadratic; outside it is linear. Hessian
+          // damping +λ·Σ r_ij keeps the leaf-value Newton step
+          // well-conditioned (the un-saturated true Hessian of a diversity
+          // reward is negative, which destabilizes Newton).
+          constexpr double kDiversityClip = 1.0;
+          double div_grad = 0.0;
+          double div_hess = 0.0;
+          for (int j = 0; j < num_experts_; ++j) {
+            if (j == k) continue;
+            const double r_ij = responsibilities_[i * num_experts_ + j];
+            const double f_k = expert_k_pred[i];
+            const double f_j = expert_pred_sm_[i * num_experts_ + j];
+            const double diff = f_k - f_j;
+            const double clipped = std::max(-kDiversityClip,
+                                            std::min(kDiversityClip, diff));
+            div_grad += r_ij * clipped;
+            div_hess += r_ij;
+          }
+          const double inv_pairs = 1.0 / (num_experts_ - 1);
+          grads[i] -= static_cast<score_t>(diversity_lambda * div_grad * inv_pairs);
+          hesss[i] += static_cast<score_t>(diversity_lambda * div_hess * inv_pairs);
+        }
+      }
+    } else {
+      // L2 fallback path: same soft-gradient policy as above.
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        double diff = expert_k_pred[i] - labels[i];
+        double r_ik = responsibilities_[i * num_experts_ + k];
+        grads[i] = static_cast<score_t>(r_ik * 2.0 * diff);
+        hesss[i] = static_cast<score_t>(
+            std::max(r_ik * 2.0, kMixtureEpsilon));
+
+        if (diversity_lambda > 0.0) {
+          // Same Huber-saturated diversity regularizer as the
+          // objective_function_ branch above. See that branch for the
+          // sign / clip / Hessian damping rationale.
+          constexpr double kDiversityClip = 1.0;
+          double div_grad = 0.0;
+          double div_hess = 0.0;
+          for (int j = 0; j < num_experts_; ++j) {
+            if (j == k) continue;
+            const double r_ij = responsibilities_[i * num_experts_ + j];
+            const double f_k = expert_k_pred[i];
+            const double f_j = expert_pred_sm_[i * num_experts_ + j];
+            const double dd = f_k - f_j;
+            const double clipped = std::max(-kDiversityClip,
+                                            std::min(kDiversityClip, dd));
+            div_grad += r_ij * clipped;
+            div_hess += r_ij;
+          }
+          const double inv_pairs = 1.0 / (num_experts_ - 1);
+          grads[i] -= static_cast<score_t>(diversity_lambda * div_grad * inv_pairs);
+          hesss[i] += static_cast<score_t>(diversity_lambda * div_hess * inv_pairs);
+        }
+      }
+    }
+
+    // Apply the adaptive LR scale to gradients (matching the former
+    // post-pass over the precomputed per-expert buffers).
+    if (config_->mixture_adaptive_lr) {
+      const double scale = expert_lr_scale_[k];
+      if (std::abs(scale - 1.0) > 1e-6) {
+        const score_t s = static_cast<score_t>(scale);
+        #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          grads[i] *= s;
+        }
+      }
+    }
+  };
 
   // Lazily build the [0..num_data_-1] identity index buffer used as the
   // "no sparse restriction" fallback for SetBaggingData. Holding it on the
@@ -2664,7 +2709,8 @@ void MixtureGBDT::MStepExperts() {
               static_cast<data_size_t>(0));
   }
 
-  // Phase 2: Train experts sequentially.
+  // Train experts sequentially, computing each expert's gradients into the
+  // shared scratch buffers just before its TrainOneIter call.
   //
   // Earlier versions trained experts concurrently via std::thread (#9), but
   // running OpenMP parallel regions from multiple non-OMP host threads
@@ -2676,6 +2722,8 @@ void MixtureGBDT::MStepExperts() {
   // so sequential training keeps the inner parallelism while avoiding the
   // unsafe nested host-thread + OMP interaction.
   for (int k = 0; k < num_experts_; ++k) {
+    compute_expert_gradients(k);
+
     // Always call SetBaggingData with a member-owned buffer. data_partition_
     // stores the raw pointer and re-reads it on every BeforeTrain(). Passing
     // a stack pointer (the original #10 implementation) left a dangling
@@ -2697,7 +2745,7 @@ void MixtureGBDT::MStepExperts() {
       experts_[k]->SetBaggingData(all_data_indices_.data(), num_data_);
     }
     try {
-      experts_[k]->TrainOneIter(all_grads[k].data(), all_hess[k].data());
+      experts_[k]->TrainOneIter(grads, hesss);
     } catch (const std::exception& e) {
       Log::Warning("MixtureGBDT: expert %d skipped iter %d (%s)",
                    k, iter_, e.what());

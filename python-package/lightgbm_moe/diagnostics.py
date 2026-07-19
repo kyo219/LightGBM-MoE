@@ -30,7 +30,10 @@ def diagnose_moe(model, X, y, print_report=True):
 
     regime_proba = model.predict_regime_proba(X)
     expert_preds = model.predict_expert_pred(X)
-    moe_preds = model.predict(X)
+    # The MoE combined prediction is exactly sum_k gate_prob_k * expert_pred_k
+    # (MixtureGBDT::Predict); deriving it from the two arrays above avoids a
+    # third full inference pass over the gate + all expert forests.
+    moe_preds = (regime_proba * expert_preds).sum(axis=1)
     # argmax of gate probabilities — identical to predict_regime(X),
     # without a redundant prediction pass.
     regime_pred = np.argmax(regime_proba, axis=1)

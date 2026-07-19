@@ -143,8 +143,12 @@ def generate_data(cfg: BenchConfig):
 # =============================================================================
 # Run a single config
 # =============================================================================
-def run_one(label: str, model: str, params: dict, X_tr, y_tr, X_va, y_va, cfg: BenchConfig) -> RunResult:
-    """指定パラメータで訓練+予測、メトリクスを返す"""
+def run_one(label: str, model: str, params: dict, ds, X_tr, y_tr, X_va, y_va, cfg: BenchConfig) -> RunResult:
+    """指定パラメータで訓練+予測、メトリクスを返す。
+
+    ds は構築済み lgb.Dataset。全 config / repeat で共有することで、
+    ビニング(遅延構築)が train_time_s に混入して speedup 比を
+    1x 方向に希釈するのを防ぐ。"""
     base_rss = get_peak_rss_mb()
 
     train_times = []
@@ -155,7 +159,6 @@ def run_one(label: str, model: str, params: dict, X_tr, y_tr, X_va, y_va, cfg: B
 
     for rep in range(cfg.n_repeats):
         gc.collect()
-        ds = lgb.Dataset(X_tr, label=y_tr, free_raw_data=False)
 
         t0 = time.perf_counter()
         bst = lgb.train(params, ds, num_boost_round=cfg.n_boost_round)
@@ -176,7 +179,7 @@ def run_one(label: str, model: str, params: dict, X_tr, y_tr, X_va, y_va, cfg: B
             except Exception:
                 n_trees = 0
 
-        del bst, ds
+        del bst
         gc.collect()
 
     peak_rss = get_peak_rss_mb()
@@ -269,28 +272,39 @@ def cmd_run(args):
 
     print("=== perf_bench.py ===")
     print(f"  rows={cfg.n_rows:,}  cols={cfg.n_cols}  rounds={cfg.n_boost_round}  threads={cfg.threads}")
-    print(f"  CPU: {get_cpu_info()}")
-    print(f"  Build: {get_build_info()}")
+    cpu_info = get_cpu_info()
+    build_info = get_build_info()
+    print(f"  CPU: {cpu_info}")
+    print(f"  Build: {build_info}")
 
     print("\nGenerating data...")
     X_tr, y_tr, X_va, y_va = generate_data(cfg)
     print(f"  X_tr={X_tr.shape} {X_tr.dtype}  X_va={X_va.shape}")
+
+    # Dataset は一度だけ構築して全 config / repeat で共有する
+    # (ビニングを計測区間の外へ出す — run_one の docstring 参照)
+    t0 = time.perf_counter()
+    ds = lgb.Dataset(X_tr, label=y_tr, free_raw_data=False)
+    ds.construct()
+    construct_s = time.perf_counter() - t0
+    print(f"  Dataset constructed in {construct_s:.2f}s (shared across runs)")
 
     matrix = build_matrix(cfg)
     print(f"\nRunning {len(matrix)} configs...\n")
 
     report = BenchReport(
         config=asdict(cfg),
-        cpu_info=get_cpu_info(),
-        build_info=get_build_info(),
+        cpu_info=cpu_info,
+        build_info=build_info,
     )
+    report.config["dataset_construct_s"] = round(construct_s, 3)
 
     print(f"  {'label':<22s}  {'train':>8s}  {'predict':>8s}  {'peak_MB':>8s}  {'rmse_va':>8s}  {'trees':>6s}")
     print(f"  {'-' * 22}  {'-' * 8}  {'-' * 8}  {'-' * 8}  {'-' * 8}  {'-' * 6}")
 
     for label, model, params in matrix:
         try:
-            r = run_one(label, model, params, X_tr, y_tr, X_va, y_va, cfg)
+            r = run_one(label, model, params, ds, X_tr, y_tr, X_va, y_va, cfg)
             report.runs.append(asdict(r))
             print(
                 f"  {r.label:<22s}  {r.train_time_s:>7.2f}s  {r.predict_time_s:>7.3f}s  "
