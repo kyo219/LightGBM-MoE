@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -4440,43 +4441,70 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
       ? start_iteration * gate_iters_per_round_ : start_iteration;
   const int gate_num = (num_iterations > 0)
       ? num_iterations * gate_iters_per_round_ : num_iterations;
-  ss << "[gate_model]\n";
-  ss << gate_->SaveModelToString(gate_start, gate_num, feature_importance_type);
-  ss << "\n";
+
+  // Assemble into a plain std::string. The old stringstream pipeline held
+  // one extra full copy of the (potentially 100s-of-MB) model in the
+  // stream's internal buffer and copied the aggregate once more in
+  // ss.str(); appending component strings scoped one at a time keeps the
+  // peak at ~one model plus a single component.
+  std::string result = ss.str();
+  result += "[gate_model]\n";
+  {
+    std::string gate_str =
+        gate_->SaveModelToString(gate_start, gate_num, feature_importance_type);
+    result += gate_str;
+  }
+  result += "\n";
 
   // Expert models
-  if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
-    // Still in seed phase - save seed expert as all experts
-    for (int k = 0; k < num_experts_; ++k) {
-      ss << "[expert_model_" << k << "]\n";
-      ss << seed_expert_->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
-      ss << "\n";
+  for (int k = 0; k < num_experts_; ++k) {
+    result += "[expert_model_";
+    result += std::to_string(k);
+    result += "]\n";
+    {
+      // Still in seed phase: save the seed expert as all experts.
+      GBDT* component = (use_progressive_ && !seed_phase_complete_ && seed_expert_)
+          ? seed_expert_.get() : experts_[k].get();
+      std::string expert_str = component->SaveModelToString(
+          start_iteration, num_iterations, feature_importance_type);
+      result += expert_str;
     }
-  } else {
-    for (int k = 0; k < num_experts_; ++k) {
-      ss << "[expert_model_" << k << "]\n";
-      ss << experts_[k]->SaveModelToString(start_iteration, num_iterations, feature_importance_type);
-      ss << "\n";
-    }
+    result += "\n";
   }
 
-  return ss.str();
+  return result;
 }
 
 bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
-  std::string model_str(buffer, len);
-  std::istringstream ss(model_str);
+  // Parse (buffer, len) in place. The model string can be hundreds of MB
+  // (gate + K experts), and this loader runs on every lgb.train post-train
+  // round-trip — the old implementation transiently held ~4 full copies
+  // (std::string of the buffer, istringstream's internal copy, a substr of
+  // the remainder, and one substr per component section). Only the small
+  // header lines are materialized as std::string below; component sections
+  // are handed to the sub-loaders as (pointer, length) slices.
+  const char* const buf_end = buffer + len;
+  const char* cursor = buffer;
+  auto next_line = [&cursor, buf_end](std::string* out) -> bool {
+    if (cursor >= buf_end) return false;
+    const char* nl = static_cast<const char*>(
+        memchr(cursor, '\n', static_cast<size_t>(buf_end - cursor)));
+    const char* line_end = (nl == nullptr) ? buf_end : nl;
+    out->assign(cursor, static_cast<size_t>(line_end - cursor));
+    cursor = (nl == nullptr) ? buf_end : nl + 1;
+    return true;
+  };
   std::string line;
 
   // Read header (trim to handle Windows CRLF line endings)
-  if (!std::getline(ss, line) || Common::Trim(line) != "mixture") {
+  if (!next_line(&line) || Common::Trim(line) != "mixture") {
     Log::Fatal("Invalid mixture model format: expected 'mixture' header");
     return false;
   }
 
   // Parse mixture parameters
   std::unordered_map<std::string, std::string> params;
-  while (std::getline(ss, line)) {
+  while (next_line(&line)) {
     line = Common::Trim(line);
     if (line.empty() || line[0] == '[') {
       break;
@@ -4579,65 +4607,76 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
   param_ss << "}";
   loaded_parameter_ = param_ss.str();
 
-  // Find sections
-  std::string gate_model_str;
-  std::vector<std::string> expert_model_strs(num_experts_);
+  // Find sections directly in the input buffer. Successive markers are
+  // searched from the previous section's start (they appear in order in
+  // anything SaveModelToString produced), so the buffer is scanned once.
+  auto find_marker = [buf_end](const char* from,
+                               const char* needle) -> const char* {
+    const size_t n = std::strlen(needle);
+    const char* found = std::search(from, buf_end, needle, needle + n);
+    return (found == buf_end) ? nullptr : found;
+  };
+  auto skip_marker_line = [buf_end](const char* pos, size_t marker_len) {
+    pos += marker_len;
+    // Skip newline (handles both CRLF and LF)
+    if (pos < buf_end && *pos == '\r') ++pos;
+    if (pos < buf_end && *pos == '\n') ++pos;
+    return pos;
+  };
 
-  // We need to re-parse from the section markers
-  std::string remaining = model_str.substr(ss.tellg() > 0 ? static_cast<size_t>(ss.tellg()) - line.size() - 1 : 0);
-
-  // Find [gate_model]
-  size_t gate_start = remaining.find("[gate_model]");
-  if (gate_start == std::string::npos) {
+  const char* gate_marker = find_marker(cursor, "[gate_model]");
+  if (gate_marker == nullptr) {
     Log::Fatal("Invalid mixture model format: [gate_model] section not found");
     return false;
   }
-  gate_start += std::string("[gate_model]").length();
-  // Skip newline (handles both CRLF and LF)
-  if (gate_start < remaining.length() && remaining[gate_start] == '\r') {
-    ++gate_start;
-  }
-  if (gate_start < remaining.length() && remaining[gate_start] == '\n') {
-    ++gate_start;
-  }
+  const char* gate_begin =
+      skip_marker_line(gate_marker, std::strlen("[gate_model]"));
 
-  // Find first expert
-  size_t expert0_start = remaining.find("[expert_model_0]");
-  if (expert0_start == std::string::npos) {
+  const char* expert0_marker = find_marker(gate_begin, "[expert_model_0]");
+  if (expert0_marker == nullptr) {
     Log::Fatal("Invalid mixture model format: [expert_model_0] section not found");
     return false;
   }
 
-  gate_model_str = remaining.substr(gate_start, expert0_start - gate_start);
+  struct Section { const char* begin; size_t size; };
+  Section gate_section{gate_begin,
+                       static_cast<size_t>(expert0_marker - gate_begin)};
 
-  // Parse expert models
+  std::vector<Section> expert_sections(num_experts_);
+  const char* search_from = expert0_marker;
   for (int k = 0; k < num_experts_; ++k) {
     std::string section_name = "[expert_model_" + std::to_string(k) + "]";
-    size_t section_start = remaining.find(section_name);
-    if (section_start == std::string::npos) {
+    const char* marker = find_marker(search_from, section_name.c_str());
+    if (marker == nullptr) {
       Log::Fatal("Invalid mixture model format: %s section not found", section_name.c_str());
       return false;
     }
-    section_start += section_name.length();
-    // Skip newline (handles both CRLF and LF)
-    if (section_start < remaining.length() && remaining[section_start] == '\r') {
-      ++section_start;
-    }
-    if (section_start < remaining.length() && remaining[section_start] == '\n') {
-      ++section_start;
-    }
-
-    // Find next section or end
-    size_t section_end;
+    const char* begin = skip_marker_line(marker, section_name.size());
+    const char* section_end = buf_end;
     if (k < num_experts_ - 1) {
       std::string next_section = "[expert_model_" + std::to_string(k + 1) + "]";
-      section_end = remaining.find(next_section);
-    } else {
-      section_end = remaining.length();
+      const char* next_marker = find_marker(begin, next_section.c_str());
+      if (next_marker != nullptr) {
+        section_end = next_marker;
+        search_from = next_marker;
+      }
     }
-
-    expert_model_strs[k] = remaining.substr(section_start, section_end - section_start);
+    expert_sections[k] = {begin, static_cast<size_t>(section_end - begin)};
   }
+
+  // GBDT::LoadModelFromString's line scanner (Common::GetLine) terminates on
+  // '\n' / '\r' / '\0'. Every section SaveModelToString writes ends with a
+  // newline, so an in-place slice is safe; a section that does NOT end with
+  // a newline (hand-edited file) falls back to a bounded copy so the scanner
+  // cannot run into the next section.
+  auto load_component = [](GBDT* target, const Section& sec) -> bool {
+    if (sec.size == 0 ||
+        sec.begin[sec.size - 1] == '\n' || sec.begin[sec.size - 1] == '\r') {
+      return target->LoadModelFromString(sec.begin, sec.size);
+    }
+    std::string bounded(sec.begin, sec.size);
+    return target->LoadModelFromString(bounded.c_str(), bounded.size());
+  };
 
   // Create config for loading (minimal config)
   config_ = std::unique_ptr<Config>(new Config());
@@ -4685,7 +4724,7 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
   experts_.reserve(num_experts_);
   for (int k = 0; k < num_experts_; ++k) {
     experts_.emplace_back(new GBDT());
-    if (!experts_[k]->LoadModelFromString(expert_model_strs[k].c_str(), expert_model_strs[k].size())) {
+    if (!load_component(experts_[k].get(), expert_sections[k])) {
       Log::Fatal("Failed to load expert model %d", k);
       return false;
     }
@@ -4693,7 +4732,7 @@ bool MixtureGBDT::LoadModelFromString(const char* buffer, size_t len) {
 
   // Initialize gate
   gate_.reset(new GBDT());
-  if (!gate_->LoadModelFromString(gate_model_str.c_str(), gate_model_str.size())) {
+  if (!load_component(gate_.get(), gate_section)) {
     Log::Fatal("Failed to load gate model");
     return false;
   }
