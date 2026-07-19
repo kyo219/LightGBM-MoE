@@ -33,7 +33,7 @@ def diagnose_moe(model, X, y, print_report=True):
     # The MoE combined prediction is exactly sum_k gate_prob_k * expert_pred_k
     # (MixtureGBDT::Predict); deriving it from the two arrays above avoids a
     # third full inference pass over the gate + all expert forests.
-    moe_preds = (regime_proba * expert_preds).sum(axis=1)
+    moe_preds = np.einsum("ij,ij->i", regime_proba, expert_preds)
     # argmax of gate probabilities — identical to predict_regime(X),
     # without a redundant prediction pass.
     regime_pred = np.argmax(regime_proba, axis=1)
@@ -43,7 +43,11 @@ def diagnose_moe(model, X, y, print_report=True):
     # [1] Gate Entropy
     # =========================================================================
     eps = 1e-12
-    entropy_per_sample = -np.sum(regime_proba * np.log(regime_proba + eps), axis=1)
+    log_proba = np.empty_like(regime_proba)
+    np.add(regime_proba, eps, out=log_proba)
+    np.log(log_proba, out=log_proba)
+    entropy_per_sample = -np.einsum("ij,ij->i", regime_proba, log_proba)
+    del log_proba
     max_entropy = np.log(K)
     mean_entropy = float(np.mean(entropy_per_sample))
     median_entropy = float(np.median(entropy_per_sample))
@@ -52,21 +56,24 @@ def diagnose_moe(model, X, y, print_report=True):
     # =========================================================================
     # [2] Expert Specialization
     # =========================================================================
-    se_all = (expert_preds - y[:, None]) ** 2  # (N, K)
+    se_all = np.empty_like(expert_preds)
+    np.subtract(expert_preds, y[:, None], out=se_all)
+    np.square(se_all, out=se_all)  # (N, K)
     assigned_se = se_all[np.arange(len(y)), regime_pred]
 
     # Mean SE of non-assigned experts
-    mask = np.ones((len(y), K), dtype=bool)
-    mask[np.arange(len(y)), regime_pred] = False
-    other_se_mean = np.where(mask, se_all, 0.0).sum(axis=1) / np.maximum(mask.sum(axis=1), 1)
+    other_se_mean = (se_all.sum(axis=1) - assigned_se) / max(K - 1, 1)
 
     wins = assigned_se < other_se_mean
     specialization_rate = float(np.mean(wins))
 
-    improvement_where_wins = np.where(
-        wins & (other_se_mean > 0),
-        (other_se_mean - assigned_se) / (other_se_mean + eps),
-        0.0,
+    improvement_where_wins = np.zeros_like(assigned_se)
+    improvement_mask = wins & (other_se_mean > 0)
+    np.divide(
+        other_se_mean - assigned_se,
+        other_se_mean + eps,
+        out=improvement_where_wins,
+        where=improvement_mask,
     )
     mean_loss_improvement = float(np.sum(improvement_where_wins) / max(np.sum(wins), 1))
 
@@ -74,20 +81,18 @@ def diagnose_moe(model, X, y, print_report=True):
     # [3] Routing Gain
     # =========================================================================
     moe_rmse = float(np.sqrt(np.mean((moe_preds - y) ** 2)))
-    expert_rmses = [float(np.sqrt(np.mean((expert_preds[:, k] - y) ** 2))) for k in range(K)]
+    expert_rmses = np.sqrt(np.mean(se_all, axis=0)).tolist()
     best_single_rmse = min(expert_rmses)
     routing_gain = (best_single_rmse - moe_rmse) / (best_single_rmse + eps) * 100
 
     # =========================================================================
     # [4] Expert Correlation
     # =========================================================================
-    corrs = []
-    for i in range(K):
-        for j in range(i + 1, K):
-            corrs.append(float(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1]))
-    if corrs:
-        expert_corr_max = max(corrs)
-        expert_corr_min = min(corrs)
+    if K > 1:
+        corr_matrix = np.corrcoef(expert_preds, rowvar=False)
+        corrs = corr_matrix[np.triu_indices(K, k=1)]
+        expert_corr_max = float(np.max(corrs))
+        expert_corr_min = float(np.min(corrs))
     else:
         expert_corr_max = expert_corr_min = 0.0
     expert_collapsed = expert_corr_max > 0.99
@@ -95,7 +100,7 @@ def diagnose_moe(model, X, y, print_report=True):
     # =========================================================================
     # [5] Expert Utilization
     # =========================================================================
-    utilization = [float(np.mean(regime_pred == k)) for k in range(K)]
+    utilization = (np.bincount(regime_pred, minlength=K) / max(len(regime_pred), 1)).tolist()
     utilization_min = min(utilization)
     any_underutilized = utilization_min < 0.05
 

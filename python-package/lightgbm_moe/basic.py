@@ -4708,40 +4708,42 @@ class Booster:
         if num_iteration is None:
             num_iteration = self.best_iteration
         importance_type_int = _FEATURE_IMPORTANCE_TYPE_MAPPER[importance_type]
-        buffer_len = 1 << 20
         tmp_out_len = ctypes.c_int64(0)
-        string_buffer = ctypes.create_string_buffer(buffer_len)
-        ptr_string_buffer = ctypes.c_char_p(ctypes.addressof(string_buffer))
+        model_ptr = ctypes.c_void_p()
         _safe_call(
-            _LIB.LGBM_BoosterSaveModelToString(
+            _LIB.LGBM_BoosterSaveModelToStringAlloc(
                 self._handle,
                 ctypes.c_int(start_iteration),
                 ctypes.c_int(num_iteration),
                 ctypes.c_int(importance_type_int),
-                ctypes.c_int64(buffer_len),
                 ctypes.byref(tmp_out_len),
-                ptr_string_buffer,
+                ctypes.byref(model_ptr),
             )
         )
-        actual_len = tmp_out_len.value
-        # if buffer length is not long enough, re-allocate a buffer
-        if actual_len > buffer_len:
-            string_buffer = ctypes.create_string_buffer(actual_len)
-            ptr_string_buffer = ctypes.c_char_p(ctypes.addressof(string_buffer))
-            _safe_call(
-                _LIB.LGBM_BoosterSaveModelToString(
-                    self._handle,
-                    ctypes.c_int(start_iteration),
-                    ctypes.c_int(num_iteration),
-                    ctypes.c_int(importance_type_int),
-                    ctypes.c_int64(actual_len),
-                    ctypes.byref(tmp_out_len),
-                    ptr_string_buffer,
-                )
-            )
-        ret = string_buffer.value.decode("utf-8")
+        try:
+            ret = ctypes.string_at(model_ptr, tmp_out_len.value - 1).decode("utf-8")
+        finally:
+            _safe_call(_LIB.LGBM_BoosterFreeModelString(model_ptr))
         ret += _dump_pandas_categorical(self.pandas_categorical)
         return ret
+
+    def _compact_for_prediction(self) -> "Booster":
+        """Replace the training booster with an inference-only native clone."""
+        new_handle = ctypes.c_void_p()
+        _safe_call(
+            _LIB.LGBM_BoosterCreateForPrediction(
+                self._handle,
+                ctypes.c_int(0),
+                ctypes.c_int(self.best_iteration),
+                ctypes.c_int(_FEATURE_IMPORTANCE_TYPE_MAPPER["split"]),
+                ctypes.byref(new_handle),
+            )
+        )
+        old_handle = self._handle
+        self._handle = new_handle
+        self._free_buffer()
+        _safe_call(_LIB.LGBM_BoosterFree(old_handle))
+        return self.free_dataset()
 
     def dump_model(
         self,
@@ -4934,6 +4936,19 @@ class Booster:
         out = ctypes.c_int(0)
         _safe_call(
             _LIB.LGBM_BoosterGetNumExperts(
+                self._handle,
+                ctypes.byref(out),
+            )
+        )
+        return out.value
+
+    def _mixture_num_leaves(self) -> int:
+        """Return the total leaf count without serializing the model."""
+        if not self.is_mixture():
+            raise LightGBMError("_mixture_num_leaves can only be used with MoE models")
+        out = ctypes.c_int64(0)
+        _safe_call(
+            _LIB.LGBM_BoosterGetMixtureNumLeaves(
                 self._handle,
                 ctypes.byref(out),
             )
@@ -5328,43 +5343,43 @@ class Booster:
 
         Notes
         -----
-        The Markov smoothing uses the mixture_smoothing_lambda parameter to blend
-        the current gate probabilities with the previous sample's probabilities:
-        proba[t] = (1-lambda) * gate_proba[t] + lambda * proba[t-1]
+        This follows the native training/inference recurrence exactly: each
+        current gate row is blended with the preceding *unsmoothed* gate row.
         """
         if not self.is_mixture():
             raise LightGBMError("predict_regime_proba_markov can only be used with MoE models")
 
         num_experts = self.num_experts()
+        data_array = self._moe_data_to_array(data)
+        pred_parameter = self._moe_pred_parameter_str(start_iteration, num_iteration, kwargs)
+        nrow, ncol = data_array.shape
 
-        # Get base regime probabilities (data conversion happens there)
-        base_proba = self.predict_regime_proba(
-            data, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
-        )
-        nrow = base_proba.shape[0]
-
-        # Get lambda from model params
-        params = self.params
-        lambda_val = float(params.get("mixture_smoothing_lambda", 0.0))
-        smoothing = params.get("mixture_r_smoothing", "none")
-
-        # Apply Markov smoothing if in markov mode
-        if smoothing == "markov" and lambda_val > 0.0:
-            out_result = np.empty((nrow, num_experts), dtype=np.float64)
-            # First sample: use base probabilities
-            out_result[0] = base_proba[0]
-            # Subsequent samples: blend with previous. The recurrence is
-            # inherently sequential; reuse one scratch row instead of
-            # allocating several temporaries per row.
-            blended = np.empty(num_experts, dtype=np.float64)
-            for i in range(1, nrow):
-                np.multiply(base_proba[i], 1.0 - lambda_val, out=blended)
-                blended += lambda_val * out_result[i - 1]
-                blended /= blended.sum()  # Renormalize
-                out_result[i] = blended
-            return out_result
+        if data_array.dtype == np.int8:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+            dtype_code = _C_API_DTYPE_INT8
+        elif data_array.dtype == np.float32:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            dtype_code = _C_API_DTYPE_FLOAT32
         else:
-            return base_proba
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            dtype_code = _C_API_DTYPE_FLOAT64
+
+        out_len = ctypes.c_int64(0)
+        out_result = np.empty((nrow, num_experts), dtype=np.float64)
+        _safe_call(
+            _LIB.LGBM_BoosterPredictRegimeProbaMarkov(
+                self._handle,
+                ptr_data,
+                ctypes.c_int(dtype_code),
+                ctypes.c_int32(nrow),
+                ctypes.c_int32(ncol),
+                ctypes.c_int(1),
+                _c_str(pred_parameter),
+                ctypes.byref(out_len),
+                out_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            )
+        )
+        return out_result
 
     def predict_markov(
         self,
@@ -5407,26 +5422,36 @@ class Booster:
         if not self.is_mixture():
             raise LightGBMError("predict_markov can only be used with MoE models")
 
-        # Convert the input ONCE and pass the resulting ndarray to both
-        # sub-calls: their own _moe_data_to_array becomes a no-op on an
-        # already-contiguous array. Passing the raw input instead would
-        # materialize the N x F matrix twice (DataFrame conversion in
-        # particular is a full copy each time).
         data_array = self._moe_data_to_array(data)
+        pred_parameter = self._moe_pred_parameter_str(start_iteration, num_iteration, kwargs)
+        nrow, ncol = data_array.shape
 
-        # Get expert predictions
-        expert_preds = self.predict_expert_pred(
-            data_array, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
-        )  # (nrow, n_experts)
+        if data_array.dtype == np.int8:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+            dtype_code = _C_API_DTYPE_INT8
+        elif data_array.dtype == np.float32:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            dtype_code = _C_API_DTYPE_FLOAT32
+        else:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            dtype_code = _C_API_DTYPE_FLOAT64
 
-        # Get Markov-smoothed regime probabilities
-        regime_proba = self.predict_regime_proba_markov(
-            data_array, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
-        )  # (nrow, n_experts)
-
-        # Weighted sum: prediction = sum_k(proba[k] * expert[k]) without
-        # materializing the intermediate N x K product array.
-        return np.einsum("ij,ij->i", regime_proba, expert_preds)
+        out_len = ctypes.c_int64(0)
+        out_result = np.empty(nrow, dtype=np.float64)
+        _safe_call(
+            _LIB.LGBM_BoosterPredictMarkov(
+                self._handle,
+                ptr_data,
+                ctypes.c_int(dtype_code),
+                ctypes.c_int32(nrow),
+                ctypes.c_int32(ncol),
+                ctypes.c_int(1),
+                _c_str(pred_parameter),
+                ctypes.byref(out_len),
+                out_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            )
+        )
+        return out_result
 
     def _extract_gate_model_string(self) -> str:
         """Extract gate model section from MoE model string.
