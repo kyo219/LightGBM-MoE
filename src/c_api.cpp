@@ -506,11 +506,21 @@ class Booster {
     UNIQUE_LOCK(mutex_)
     mixture->InitPredict(config.start_iteration_predict,
                          config.num_iteration_predict, false);
+    // Per-thread row-conversion scratch. The per-row callback receives a
+    // slice sized ncol; accessors that can read the caller's matrix in
+    // place (float64 row-major) simply ignore it. This replaces the old
+    // RowFunctionFromDenseMatrix pattern of one heap-allocated
+    // std::vector<double>(ncol) per row.
+    const size_t scratch_stride = static_cast<size_t>(std::max(ncol, 1));
+    std::vector<double> row_scratch(
+        static_cast<size_t>(OMP_NUM_THREADS()) * scratch_stride);
     OMP_INIT_EX();
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (int32_t i = 0; i < nrow; ++i) {
       OMP_LOOP_EX_BEGIN();
-      per_row_fn(mixture, i);
+      double* scratch = row_scratch.data() +
+          static_cast<size_t>(omp_get_thread_num()) * scratch_stride;
+      per_row_fn(mixture, i, scratch);
       OMP_LOOP_EX_END();
     }
     OMP_THROW_EX();
@@ -2971,6 +2981,60 @@ int LGBM_BoosterIsMixture(BoosterHandle handle, int* out_is_mixture) {
   API_END();
 }
 
+namespace {
+
+// Per-row accessor for the MoE batch predict entry points. The generic
+// RowFunctionFromDenseMatrix heap-allocates and element-copies an ncol-sized
+// std::vector<double> per row — N mallocs plus a full-matrix copy per batch
+// call. Float64 row-major input (the standard lightgbm_moe Python path,
+// which always passes is_row_major=1 and converts DataFrames to float64) is
+// read directly from the caller's matrix with zero copies; float32 / int8 /
+// col-major inputs convert into the per-thread scratch provided by
+// PredictMoERows.
+template <typename T>
+std::function<const double*(int row_idx, double* scratch)>
+MoERowAccessor_helper(const void* data, int num_row, int num_col,
+                      int is_row_major) {
+  const T* data_ptr = reinterpret_cast<const T*>(data);
+  if (is_row_major) {
+    return [data_ptr, num_col](int row_idx, double* scratch) {
+      const T* row = data_ptr + static_cast<size_t>(num_col) * row_idx;
+      for (int j = 0; j < num_col; ++j) {
+        scratch[j] = static_cast<double>(row[j]);
+      }
+      return static_cast<const double*>(scratch);
+    };
+  }
+  return [data_ptr, num_row, num_col](int row_idx, double* scratch) {
+    for (int j = 0; j < num_col; ++j) {
+      scratch[j] = static_cast<double>(
+          data_ptr[static_cast<size_t>(num_row) * j + row_idx]);
+    }
+    return static_cast<const double*>(scratch);
+  };
+}
+
+std::function<const double*(int row_idx, double* scratch)>
+MoERowAccessor(const void* data, int num_row, int num_col, int data_type,
+               int is_row_major) {
+  if (data_type == C_API_DTYPE_FLOAT64 && is_row_major) {
+    const double* data_ptr = reinterpret_cast<const double*>(data);
+    return [data_ptr, num_col](int row_idx, double* /*scratch*/) {
+      return data_ptr + static_cast<size_t>(num_col) * row_idx;
+    };
+  } else if (data_type == C_API_DTYPE_FLOAT64) {
+    return MoERowAccessor_helper<double>(data, num_row, num_col, is_row_major);
+  } else if (data_type == C_API_DTYPE_FLOAT32) {
+    return MoERowAccessor_helper<float>(data, num_row, num_col, is_row_major);
+  } else if (data_type == C_API_DTYPE_INT8) {
+    return MoERowAccessor_helper<int8_t>(data, num_row, num_col, is_row_major);
+  }
+  Log::Fatal("Unknown data type in MoERowAccessor");
+  return nullptr;
+}
+
+}  // anonymous namespace
+
 int LGBM_BoosterPredictRegime(BoosterHandle handle,
                                const void* data,
                                int data_type,
@@ -2982,13 +3046,14 @@ int LGBM_BoosterPredictRegime(BoosterHandle handle,
                                int32_t* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
+  auto get_row = MoERowAccessor(data, nrow, ncol, data_type, is_row_major);
   ref_booster->PredictMoERows(
       nrow, ncol, parameter, "LGBM_BoosterPredictRegime",
-      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i) {
-        auto row = get_row(i);
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i,
+                             double* scratch) {
+        const double* row = get_row(i, scratch);
         int regime;
-        mixture->PredictRegime(row.data(), &regime);
+        mixture->PredictRegime(row, &regime);
         out_result[i] = regime;
       });
   *out_len = nrow;
@@ -3006,14 +3071,15 @@ int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
                                     double* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
+  auto get_row = MoERowAccessor(data, nrow, ncol, data_type, is_row_major);
   int64_t total = 0;
   ref_booster->PredictMoERows(
       nrow, ncol, parameter, "LGBM_BoosterPredictRegimeProba",
-      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i) {
-        auto row = get_row(i);
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i,
+                             double* scratch) {
+        const double* row = get_row(i, scratch);
         mixture->PredictRegimeProba(
-            row.data(),
+            row,
             out_result + static_cast<size_t>(i) * mixture->NumExperts());
       });
   {
@@ -3035,14 +3101,15 @@ int LGBM_BoosterPredictExpertPred(BoosterHandle handle,
                                    double* out_result) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  auto get_row = RowFunctionFromDenseMatrix(data, nrow, ncol, data_type, is_row_major);
+  auto get_row = MoERowAccessor(data, nrow, ncol, data_type, is_row_major);
   int64_t total = 0;
   ref_booster->PredictMoERows(
       nrow, ncol, parameter, "LGBM_BoosterPredictExpertPred",
-      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i) {
-        auto row = get_row(i);
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i,
+                             double* scratch) {
+        const double* row = get_row(i, scratch);
         mixture->PredictExpertPred(
-            row.data(),
+            row,
             out_result + static_cast<size_t>(i) * mixture->NumExperts());
       });
   {

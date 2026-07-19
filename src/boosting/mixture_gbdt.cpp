@@ -3892,16 +3892,31 @@ void MixtureGBDT::PredictByMap(const std::unordered_map<int, double>& features, 
   const PredictionEarlyStopInstance* early_stop_ptr =
       early_stop ? early_stop : &NoEarlyStopInstance();
 
-  std::vector<double> expert_preds(num_experts_);
+  // Stack buffers for K ≤ 64 — same per-row rationale as Predict() above;
+  // this is the per-row path for map-based (sparse single-row) prediction.
+  double stack_buf[3 * 64];
+  std::vector<double> heap_buf;
+  double* expert_preds;
+  double* gate_raw;
+  double* gate_prob;
+  if (num_experts_ <= 64) {
+    expert_preds = stack_buf;
+    gate_raw = stack_buf + num_experts_;
+    gate_prob = stack_buf + 2 * num_experts_;
+  } else {
+    heap_buf.resize(3 * static_cast<size_t>(num_experts_));
+    expert_preds = heap_buf.data();
+    gate_raw = heap_buf.data() + num_experts_;
+    gate_prob = heap_buf.data() + 2 * num_experts_;
+  }
+
   for (int k = 0; k < num_experts_; ++k) {
     experts_[k]->PredictByMap(features, &expert_preds[k], early_stop_ptr);
   }
 
-  std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRawByMap(features, gate_raw.data(), early_stop_ptr);
+  gate_->PredictRawByMap(features, gate_raw, early_stop_ptr);
 
-  std::vector<double> gate_prob(num_experts_);
-  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
+  ComputeGateProbForInference(gate_raw, gate_prob);
 
   double sum = 0.0;
   for (int k = 0; k < num_experts_; ++k) {
