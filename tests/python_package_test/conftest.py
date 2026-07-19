@@ -1,15 +1,6 @@
 import numpy as np
 import pytest
 
-import lightgbm_moe
-
-
-@pytest.fixture(scope="function")
-def missing_module_cffi(monkeypatch):
-    """Mock 'cffi' not being importable"""
-    monkeypatch.setattr(lightgbm_moe.compat, "CFFI_INSTALLED", False)
-    monkeypatch.setattr(lightgbm_moe.basic, "CFFI_INSTALLED", False)
-
 
 @pytest.fixture(scope="function")
 def rng():
