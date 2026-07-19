@@ -4792,13 +4792,14 @@ class Booster:
     def _moe_data_to_array(self, data: _LGBM_PredictDataType) -> np.ndarray:
         """Convert MoE prediction input to a contiguous 2-D numpy array.
 
-        int8 arrays are preserved; pandas DataFrames are processed with the
-        booster's stored pandas_categorical mapping — the same path
-        ``predict()`` uses — so pandas-categorical columns are encoded
-        consistently with training.
+        int8, float32 and float64 arrays are preserved as-is — the C API
+        consumes all three natively, so upcasting float32 would only add an
+        N×F copy. pandas DataFrames are processed with the booster's stored
+        pandas_categorical mapping — the same path ``predict()`` uses — so
+        pandas-categorical columns are encoded consistently with training.
         """
         if isinstance(data, np.ndarray):
-            if data.dtype == np.int8:
+            if data.dtype in (np.int8, np.float32, np.float64):
                 return np.ascontiguousarray(data)
             return np.ascontiguousarray(data, dtype=np.float64)
         elif PANDAS_INSTALLED and isinstance(data, pd_DataFrame):
@@ -4808,6 +4809,8 @@ class Booster:
                 categorical_feature="auto",
                 pandas_categorical=self.pandas_categorical,
             )[0]
+            if df_array.dtype in (np.float32, np.float64):
+                return np.ascontiguousarray(df_array)
             return np.ascontiguousarray(df_array, dtype=np.float64)
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
@@ -4880,6 +4883,9 @@ class Booster:
         if data_array.dtype == np.int8:
             ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
             dtype_code = _C_API_DTYPE_INT8
+        elif data_array.dtype == np.float32:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            dtype_code = _C_API_DTYPE_FLOAT32
         else:
             ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
             dtype_code = _C_API_DTYPE_FLOAT64
@@ -4950,6 +4956,9 @@ class Booster:
         if data_array.dtype == np.int8:
             ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
             dtype_code = _C_API_DTYPE_INT8
+        elif data_array.dtype == np.float32:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            dtype_code = _C_API_DTYPE_FLOAT32
         else:
             ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
             dtype_code = _C_API_DTYPE_FLOAT64
@@ -5020,6 +5029,9 @@ class Booster:
         if data_array.dtype == np.int8:
             ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
             dtype_code = _C_API_DTYPE_INT8
+        elif data_array.dtype == np.float32:
+            ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            dtype_code = _C_API_DTYPE_FLOAT32
         else:
             ptr_data = data_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
             dtype_code = _C_API_DTYPE_FLOAT64
