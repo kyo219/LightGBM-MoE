@@ -374,11 +374,38 @@ class MixtureGBDT : public GBDTBase {
   /*! \brief Responsibilities r_ik (N x K) */
   std::vector<double> responsibilities_;
 
-  /*! \brief Expert predictions in expert-major layout (K x N): expert_pred_[k*N + i] */
-  std::vector<double> expert_pred_;
+  /*! \brief Borrowed pointers into each expert's training-score buffer
+   *  (length N each, expert k's cumulative prediction f_k). Refreshed by
+   *  Forward(); the underlying buffers are owned by the experts' score
+   *  updaters and never reallocate during a fit. Experts are Init'd with a
+   *  null objective, so GetPredictAt(0, ...) used to produce a verbatim copy
+   *  of exactly these buffers — the pointers replace K x N doubles of
+   *  resident duplicate storage plus one full copy per Forward().
+   *  Snapshot semantics for the M-step come from expert_pred_sm_, which
+   *  Forward() fills from these pointers. CPU-only (matches the rest of
+   *  MixtureGBDT, which passes host gradient buffers to TrainOneIter). */
+  std::vector<const double*> expert_score_ptrs_;
 
-  /*! \brief Expert predictions in sample-major layout (N x K): expert_pred_sm_[i*K + k] */
+  /*! \brief Expert predictions in sample-major layout (N x K): expert_pred_sm_[i*K + k].
+   *  Snapshot taken by Forward(); stays frozen while experts train in the
+   *  M-step (the diversity term must read pre-update f_j for all j). */
   std::vector<double> expert_pred_sm_;
+
+  /*! \brief Reused N x K grad/hess scratch for the gate M-step (MStepGate /
+   *  MStepGateLeafReuse — mutually exclusive per fit). Hoisted members so
+   *  the gate M-step doesn't allocate + zero-fill two N x K buffers every
+   *  boosting iteration. */
+  std::vector<score_t> gate_grad_scratch_;
+  std::vector<score_t> gate_hess_scratch_;
+
+  /*! \brief Per-iteration argmax assignment scratch for the hard M-step.
+   *  Sized lazily; only filled (fully overwritten) when
+   *  mixture_hard_m_step=true. */
+  std::vector<int> best_expert_scratch_;
+
+  /*! \brief (score, index) ranking scratch for expert-choice routing's
+   *  top-C selection. Sized lazily; fully overwritten per expert. */
+  std::vector<std::pair<double, data_size_t>> expert_choice_rank_scratch_;
 
   /*! \brief Gate probabilities (N x K). For "gbdt" gate type this is
    *  softmax((z + expert_bias_) / T) — i.e. the bias-included routing used
@@ -667,6 +694,13 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief Gate probabilities for validation (sample-major: [i * K + k]) */
   std::vector<std::vector<double>> gate_proba_valid_;
+
+  /*! \brief Gate raw-score scratch for validation (class-major:
+   *  [k * num_valid + i]). Persistent so ForwardValid doesn't allocate a
+   *  fresh N_valid x K buffer every iteration per valid set. (Unlike the
+   *  training path there is no zero-copy accessor for valid scores, so the
+   *  GetPredictAt copy itself remains.) */
+  std::vector<std::vector<double>> gate_raw_valid_;
 
   /*! \brief Combined predictions for validation */
   std::vector<std::vector<double>> yhat_valid_;

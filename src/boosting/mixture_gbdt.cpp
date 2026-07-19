@@ -444,7 +444,7 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // Allocate buffers
   size_t nk = static_cast<size_t>(num_data_) * num_experts_;
   responsibilities_.resize(nk);
-  expert_pred_.resize(nk);
+  expert_score_ptrs_.assign(num_experts_, nullptr);
   expert_pred_sm_.resize(nk);
   gate_proba_.resize(nk);
   // Bias-free routing prior used by E-step / ELBO / affinity. Initialized to
@@ -1566,10 +1566,17 @@ void MixtureGBDT::SpawnExpertsFromSeed() {
 }
 
 void MixtureGBDT::Forward() {
-  // Get expert predictions
+  // Borrow each expert's training-score pointer (cumulative prediction f_k).
+  // Experts have a null objective, so the old GetPredictAt(0, ...) here was a
+  // verbatim N-double copy of exactly this buffer, K times per Forward call.
+  // The buffers never reallocate during a fit; snapshot semantics for the
+  // M-step are provided by expert_pred_sm_ (filled below).
+  if (static_cast<int>(expert_score_ptrs_.size()) != num_experts_) {
+    expert_score_ptrs_.assign(num_experts_, nullptr);
+  }
   for (int k = 0; k < num_experts_; ++k) {
     int64_t out_len;
-    experts_[k]->GetPredictAt(0, expert_pred_.data() + k * num_data_, &out_len);
+    expert_score_ptrs_[k] = experts_[k]->GetTrainingScore(&out_len);
   }
 
   // Get gate probabilities
@@ -1597,9 +1604,11 @@ void MixtureGBDT::Forward() {
     // the gate would have to spend each iter undoing the bias the load
     // balancer just added (PR #25 fixed this on the gradient side via
     // bias-free p; the prior side stayed bias-tainted until this fix).
-    std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
-    int64_t out_len;
-    gate_->GetPredictAt(0, gate_raw.data(), &out_len);
+    // Live pointer into the gate's training-score buffer (class-major, the
+    // same layout GetPredictAt used to copy out — the gate also has a null
+    // objective, so that copy was verbatim). Read-only below.
+    int64_t gate_raw_len;
+    const double* gate_raw = gate_->GetTrainingScore(&gate_raw_len);
 
     const double inv_T = 1.0 / std::max(gate_temperature_, kMixtureEpsilon);
     // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
@@ -1691,12 +1700,13 @@ void MixtureGBDT::Forward() {
     // which takes its prior from a caller-supplied argument anyway.
   }
 
-  // Transpose expert_pred_ (expert-major) → expert_pred_sm_ (sample-major)
-  // so that E-step and yhat can read [i*K + k] with sequential cache access
+  // Snapshot expert predictions into sample-major expert_pred_sm_ so that
+  // E-step / yhat read [i*K + k] with sequential cache access, and so the
+  // M-step's diversity term sees pre-update f_j while experts train.
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     for (int k = 0; k < num_experts_; ++k) {
-      expert_pred_sm_[i * num_experts_ + k] = expert_pred_[k * num_data_ + i];
+      expert_pred_sm_[i * num_experts_ + k] = expert_score_ptrs_[k][i];
     }
   }
 
@@ -1728,8 +1738,10 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
     experts_[k]->GetPredictAt(data_idx, expert_pred.data() + k * num_valid, &out_len);
   }
 
-  // Get gate raw predictions on validation data (class-major order)
-  std::vector<double> gate_raw(static_cast<size_t>(num_valid) * num_experts_);
+  // Get gate raw predictions on validation data (class-major order).
+  // Persistent per-valid-set scratch — no zero-copy accessor exists for
+  // valid scores, but at least the N_valid x K allocation is hoisted.
+  std::vector<double>& gate_raw = gate_raw_valid_[valid_idx];
   int64_t out_len;
   gate_->GetPredictAt(data_idx, gate_raw.data(), &out_len);
 
@@ -2194,13 +2206,19 @@ void MixtureGBDT::SelectTopSamplesPerExpert() {
     noise_scale = score_std * 0.01 + 1e-6;
   }
 
+  // Member scratch, fully overwritten per expert — the old per-expert local
+  // was K allocations of N x 16 bytes every expert-choice iteration.
+  std::vector<std::pair<double, data_size_t>>& scores_idx =
+      expert_choice_rank_scratch_;
+  if (static_cast<data_size_t>(scores_idx.size()) != num_data_) {
+    scores_idx.resize(num_data_);
+  }
+
   for (int k = 0; k < num_experts_; ++k) {
     // Use expert-specific seed for noise (different each iteration and expert)
     std::mt19937 rng(config_->seed + k * 10000 + iter_ * 100);
     std::normal_distribution<double> noise_dist(0.0, noise_scale);
 
-    // Collect (score + noise, index) pairs for this expert
-    std::vector<std::pair<double, data_size_t>> scores_idx(num_data_);
     for (data_size_t i = 0; i < num_data_; ++i) {
       double score = affinity_scores_[i * num_experts_ + k];
       // Add noise to break ties and force differentiation
@@ -2465,7 +2483,13 @@ void MixtureGBDT::MStepExperts() {
   // Precompute argmax assignment for hard M-step
   const bool hard_m_step = config_->mixture_hard_m_step;
   const double diversity_lambda = config_->mixture_diversity_lambda;
-  std::vector<int> best_expert(num_data_, 0);
+  // Member scratch: only the hard M-step reads it, and that branch fully
+  // overwrites every element, so no per-iteration zero-fill is needed.
+  std::vector<int>& best_expert = best_expert_scratch_;
+  if (hard_m_step &&
+      static_cast<data_size_t>(best_expert.size()) != num_data_) {
+    best_expert.resize(num_data_);
+  }
 
   // Per-expert sample index lists for sparse activation. Stored as a member
   // (expert_sample_indices_) so the buffer outlives the MStepExperts call —
@@ -2514,7 +2538,9 @@ void MixtureGBDT::MStepExperts() {
     // Compute current mean loss per expert (over assigned samples)
     for (int k = 0; k < num_experts_; ++k) {
       if (!expert_active[k]) continue;
-      const double* expert_k_pred = expert_pred_.data() + k * num_data_;
+      // Runs before the expert training loop, so the live score pointer
+      // still equals the Forward()-time snapshot for every expert.
+      const double* expert_k_pred = expert_score_ptrs_[k];
       double total_loss = 0.0;
       int count = 0;
       for (data_size_t i = 0; i < num_data_; ++i) {
@@ -2593,7 +2619,13 @@ void MixtureGBDT::MStepExperts() {
       return;
     }
 
-    const double* expert_k_pred = expert_pred_.data() + k * num_data_;
+    // Expert k has not trained yet when its gradients are computed (experts
+    // train sequentially, gradients built immediately before TrainOneIter),
+    // so the live pointer equals the Forward()-time snapshot for f_k. The
+    // diversity term below reads OTHER experts' f_j from expert_pred_sm_,
+    // which is the frozen snapshot — required, since experts 0..k-1 have
+    // already trained by now.
+    const double* expert_k_pred = expert_score_ptrs_[k];
 
     if (objective_function_ != nullptr) {
       objective_function_->GetGradients(expert_k_pred, grads, hesss);
@@ -2871,9 +2903,12 @@ void MixtureGBDT::RefitExpertsAndGate() {
       // L2 fallback: gradients computed inline from labels.
       auto labels = train_data_->metadata().label();
       return [this, k, labels](score_t* g, score_t* h) {
-        std::vector<double> f_or_backbone(num_data_);
+        // Live pointer read — experts have a null objective, so the old
+        // GetPredictAt(0, ...) was a verbatim copy of this buffer. The
+        // callback fires once per tree-iteration of the refit replay, so
+        // the O(N) alloc + copy here multiplied into O(T) churn per fire.
         int64_t out_len;
-        experts_[k]->GetPredictAt(0, f_or_backbone.data(), &out_len);
+        const double* f_or_backbone = experts_[k]->GetTrainingScore(&out_len);
         for (data_size_t i = 0; i < num_data_; ++i) {
           const double r_ik = responsibilities_[i * num_experts_ + k];
           const double diff = f_or_backbone[i] - static_cast<double>(labels[i]);
@@ -2883,16 +2918,18 @@ void MixtureGBDT::RefitExpertsAndGate() {
       };
     }
     return [this, k](score_t* g, score_t* h) {
-      std::vector<double> f_or_backbone(num_data_);
+      // Live pointer read (see the L2-fallback callback above). The
+      // objective writes unweighted (g, h) directly into the output
+      // buffers, then the r_ik weighting is applied in place — the two
+      // O(N) intermediate vectors the old code allocated per invocation
+      // carried no extra information.
       int64_t out_len;
-      experts_[k]->GetPredictAt(0, f_or_backbone.data(), &out_len);
-      std::vector<score_t> obj_grad(num_data_);
-      std::vector<score_t> obj_hess(num_data_);
-      objective_function_->GetGradients(f_or_backbone.data(), obj_grad.data(), obj_hess.data());
+      const double* f_or_backbone = experts_[k]->GetTrainingScore(&out_len);
+      objective_function_->GetGradients(f_or_backbone, g, h);
       for (data_size_t i = 0; i < num_data_; ++i) {
         const double r_ik = responsibilities_[i * num_experts_ + k];
-        g[i] = static_cast<score_t>(r_ik * static_cast<double>(obj_grad[i]));
-        const double hv = r_ik * static_cast<double>(obj_hess[i]);
+        g[i] = static_cast<score_t>(r_ik * static_cast<double>(g[i]));
+        const double hv = r_ik * static_cast<double>(h[i]);
         h[i] = static_cast<score_t>(std::max(hv, kMixtureEpsilon));
       }
     };
@@ -2912,11 +2949,11 @@ void MixtureGBDT::RefitExpertsAndGate() {
         : 1.0;
     return [this, dirichlet_lambda, uniform_prob, inv_T, inv_T2, friedman_factor]
            (score_t* g, score_t* h) {
-      // Layout: gate_raw[k * num_data_ + i] (class-major), matching
-      // gate_->GetPredictAt's convention.
-      std::vector<double> gate_raw(static_cast<size_t>(num_data_) * num_experts_);
+      // Layout: gate_raw[k * num_data_ + i] (class-major). Live pointer —
+      // the gate's null objective made the old GetPredictAt(0, ...) a
+      // verbatim N*K copy per callback invocation.
       int64_t out_len;
-      gate_->GetPredictAt(0, gate_raw.data(), &out_len);
+      const double* gate_raw = gate_->GetTrainingScore(&out_len);
 
       #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
       for (data_size_t i = 0; i < num_data_; ++i) {
@@ -3065,10 +3102,19 @@ void MixtureGBDT::MStepGate() {
   // Earlier versions of this code collapsed r_i to a one-hot via argmax
   // before computing CE, which discarded the soft routing signal: that fix
   // landed in PR #23 (Jordan-Jacobs soft EM) — kept here.
-  std::vector<score_t> gate_grad(static_cast<size_t>(num_data_) * num_experts_);
-  std::vector<score_t> gate_hess(static_cast<size_t>(num_data_) * num_experts_);
-  std::vector<double> gate_raw_no_bias(
-      static_cast<size_t>(num_data_) * num_experts_);
+  const size_t nk = static_cast<size_t>(num_data_) * num_experts_;
+  if (gate_grad_scratch_.size() != nk) {
+    gate_grad_scratch_.resize(nk);
+    gate_hess_scratch_.resize(nk);
+  }
+  score_t* gate_grad = gate_grad_scratch_.data();
+  score_t* gate_hess = gate_hess_scratch_.data();
+  // Live pointer into the gate's training scores (class-major; the gate's
+  // null objective made GetPredictAt a verbatim copy). The buffer is fixed
+  // for the fit, and TrainOneIter updates it in place — so the (d) per-iter
+  // refresh below is automatic through the pointer.
+  int64_t gate_raw_len;
+  const double* gate_raw_no_bias = gate_->GetTrainingScore(&gate_raw_len);
 
   // Dirichlet-shrinkage regularizer (kept under the legacy
   // `mixture_gate_entropy_lambda` parameter name for back-compat — see the
@@ -3088,12 +3134,8 @@ void MixtureGBDT::MStepGate() {
       : 1.0;
 
   for (int g = 0; g < config_->mixture_gate_iters_per_round; ++g) {
-    // (d) Refresh raw logits each iter — previous TrainOneIter mutated z.
-    {
-      int64_t out_len;
-      gate_->GetPredictAt(0, gate_raw_no_bias.data(), &out_len);
-    }
-
+    // (d) holds via the live pointer: the previous TrainOneIter mutated the
+    // score buffer gate_raw_no_bias points into.
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
       // Per-sample bias-free softmax. Stack buffer for K ≤ 64 to avoid the
@@ -3140,7 +3182,7 @@ void MixtureGBDT::MStepGate() {
       }
     }
 
-    gate_->TrainOneIter(gate_grad.data(), gate_hess.data());
+    gate_->TrainOneIter(gate_grad, gate_hess);
   }
 
   // Log Dirichlet-shrinkage effect (occasionally). Reads gate_proba_ which
@@ -3322,9 +3364,16 @@ void MixtureGBDT::MStepGateLeafReuse() {
   // (NOT gate_proba_, which was just overwritten with the leaf-aggregated
   // targets in Step 3). The CE gradient is then q_ik - target_ik, which
   // matches the same soft-EM gradient used by MStepGate in gbdt mode.
-  std::vector<double> gate_raw_lr(static_cast<size_t>(num_data_) * num_experts_);
-  std::vector<score_t> gate_grad_lr(static_cast<size_t>(num_data_) * num_experts_);
-  std::vector<score_t> gate_hess_lr(static_cast<size_t>(num_data_) * num_experts_);
+  const size_t nk_lr = static_cast<size_t>(num_data_) * num_experts_;
+  if (gate_grad_scratch_.size() != nk_lr) {
+    gate_grad_scratch_.resize(nk_lr);
+    gate_hess_scratch_.resize(nk_lr);
+  }
+  score_t* gate_grad_lr = gate_grad_scratch_.data();
+  score_t* gate_hess_lr = gate_hess_scratch_.data();
+  // Live pointer into the gate's training scores — see MStepGate.
+  int64_t gate_raw_lr_len;
+  const double* gate_raw_lr = gate_->GetTrainingScore(&gate_raw_lr_len);
 
   // Gate audit fixes mirroring MStepGate (gbdt path):
   //  (a) train against bias-free softmax — bias is for routing, not for the
@@ -3342,11 +3391,7 @@ void MixtureGBDT::MStepGateLeafReuse() {
       : 1.0;
 
   for (int g = 0; g < config_->mixture_gate_iters_per_round; ++g) {
-    {
-      int64_t out_len;
-      gate_->GetPredictAt(0, gate_raw_lr.data(), &out_len);
-    }
-
+    // Raw-logit refresh between gate iters is automatic via the live pointer.
     #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
       // Bias-free softmax q_k = softmax(z_k / T) for the gradient target.
@@ -3393,7 +3438,7 @@ void MixtureGBDT::MStepGateLeafReuse() {
       }
     }
 
-    gate_->TrainOneIter(gate_grad_lr.data(), gate_hess_lr.data());
+    gate_->TrainOneIter(gate_grad_lr, gate_hess_lr);
   }
 }
 
@@ -3520,7 +3565,7 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
     // boosted-tree experts. ShouldRefit() encapsulates the warmup guard
     // and the trigger-mode dispatch (always / elbo / every_n). When refit
     // fires, Forward() is re-run so MStepExperts / MStepGate below see
-    // the post-refit expert_pred_ / gate_proba_.
+    // the post-refit expert scores / gate_proba_.
     if (ShouldRefit()) {
       RefitExpertsAndGate();
       last_refit_moe_iter_ = moe_iter;  // start the elbo-trigger cooldown
@@ -4096,7 +4141,7 @@ void MixtureGBDT::ResetTrainingData(const Dataset* train_data,
   // Reallocate buffers
   size_t nk = static_cast<size_t>(num_data_) * num_experts_;
   responsibilities_.resize(nk);
-  expert_pred_.resize(nk);
+  expert_score_ptrs_.assign(num_experts_, nullptr);
   expert_pred_sm_.resize(nk);
   gate_proba_.resize(nk);
   gate_proba_no_bias_.assign(nk, 1.0 / num_experts_);
@@ -4213,6 +4258,7 @@ void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
   // Allocate validation buffers for this dataset
   expert_pred_valid_.emplace_back(nk_valid, 0.0);
   gate_proba_valid_.emplace_back(nk_valid, 0.0);
+  gate_raw_valid_.emplace_back(nk_valid, 0.0);
   yhat_valid_.emplace_back(num_valid, 0.0);
 
   // Initialize Markov buffers if needed
