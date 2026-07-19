@@ -57,8 +57,9 @@ class PrunedMoEModel:
                 full_proba[:, survivor] += full_proba[:, victim]
         active_proba = full_proba[:, self.active_mask]  # (N, K_active)
         row_sums = active_proba.sum(axis=1, keepdims=True)
-        row_sums = np.maximum(row_sums, 1e-15)
-        return active_proba / row_sums
+        np.maximum(row_sums, 1e-15, out=row_sums)
+        np.divide(active_proba, row_sums, out=active_proba)
+        return active_proba
 
     def predict_expert_pred(self, X):
         """Return per-expert predictions for active experts (with merge weighting).
@@ -71,13 +72,19 @@ class PrunedMoEModel:
         active_indices = np.where(self.active_mask)[0]
 
         result = np.empty((full_preds.shape[0], len(active_indices)), dtype=np.float64)
+        merge_scratch = None
         for col, orig_idx in enumerate(active_indices):
             if orig_idx in self.merge_weights:
-                # Weighted average of merged experts
-                merged = np.zeros(full_preds.shape[0], dtype=np.float64)
-                for src_idx, w in self.merge_weights[orig_idx].items():
-                    merged += w * full_preds[:, src_idx]
-                result[:, col] = merged
+                # Accumulate directly into the result column; avoid an extra
+                # N-sized temporary for every survivor group.
+                sources = iter(self.merge_weights[orig_idx].items())
+                src_idx, weight = next(sources)
+                np.multiply(full_preds[:, src_idx], weight, out=result[:, col])
+                for src_idx, weight in sources:
+                    if merge_scratch is None:
+                        merge_scratch = np.empty(full_preds.shape[0], dtype=np.float64)
+                    np.multiply(full_preds[:, src_idx], weight, out=merge_scratch)
+                    np.add(result[:, col], merge_scratch, out=result[:, col])
             else:
                 result[:, col] = full_preds[:, orig_idx]
 
@@ -92,7 +99,7 @@ class PrunedMoEModel:
         """
         proba = self.predict_regime_proba(X)  # (N, K_active)
         preds = self.predict_expert_pred(X)  # (N, K_active)
-        return (proba * preds).sum(axis=1)
+        return np.einsum("ij,ij->i", proba, preds)
 
     def predict_regime(self, X):
         """Return argmax regime index among active experts.
@@ -142,7 +149,8 @@ def prune_experts(
     expert_preds = model.predict_expert_pred(X)
 
     # Compute utilization per expert
-    utilization = np.array([float(np.mean(regime_pred == k)) for k in range(K)])
+    utilization = np.bincount(regime_pred, minlength=K).astype(np.float64)
+    utilization /= max(len(regime_pred), 1)
 
     active = np.ones(K, dtype=bool)
     actions = []
@@ -160,9 +168,10 @@ def prune_experts(
 
     # Compute pairwise correlations among active experts
     pairs_to_merge = []
+    corr_matrix = np.corrcoef(expert_preds, rowvar=False) if len(active_indices) > 1 else None
     for i_pos, i in enumerate(active_indices):
         for j in active_indices[i_pos + 1 :]:
-            corr = float(np.corrcoef(expert_preds[:, i], expert_preds[:, j])[0, 1])
+            corr = float(corr_matrix[i, j])
             if corr > correlation_threshold:
                 pairs_to_merge.append((i, j, corr))
 
@@ -269,7 +278,8 @@ def merge_experts(
     """
     K = model.num_experts()
     regime_pred = model.predict_regime(X)
-    utilization = np.array([float(np.mean(regime_pred == k)) for k in range(K)])
+    utilization = np.bincount(regime_pred, minlength=K).astype(np.float64)
+    utilization /= max(len(regime_pred), 1)
 
     active = np.ones(K, dtype=bool)
     merge_weights = {}

@@ -84,6 +84,7 @@ class MixtureGBDT : public GBDTBase {
   std::string DumpModel(int start_iteration, int num_iteration, int feature_importance_type) const override;
   std::string ModelToIfElse(int num_iteration) const override;
   bool SaveModelToIfElse(int num_iteration, const char* filename) const override;
+
   bool SaveModelToFile(int start_iteration, int num_iterations, int feature_importance_type, const char* filename) const override;
   std::string SaveModelToString(int start_iteration, int num_iterations, int feature_importance_type) const override;
   bool LoadModelFromString(const char* buffer, size_t len) override;
@@ -130,10 +131,20 @@ class MixtureGBDT : public GBDTBase {
    */
   void PredictExpertPred(const double* features, double* output) const;
 
+  /*! \brief Predict experts and combine them with caller-provided gate probabilities. */
+  void PredictWithGateProba(const double* features, const double* gate_proba,
+                            double* output) const;
+
+  /*! \brief Apply the training-time one-step Markov prior in place to N x K probabilities. */
+  void ApplyMarkovSmoothing(int32_t num_rows, double* probabilities) const;
+
   /*!
    * \brief Get number of experts
    */
   int NumExperts() const { return num_experts_; }
+
+  /*! \brief Total leaf count across the gate and all experts. */
+  int64_t TotalNumLeaves() const;
 
   /*!
    * \brief Number of training rows the responsibilities buffer is sized for.
@@ -199,6 +210,9 @@ class MixtureGBDT : public GBDTBase {
   void PredictRegimeProbaWithPrevProba(const double* features, const double* prev_proba, double* output) const;
 
  protected:
+  /*! \brief Serialize the small MoE metadata header shared by file/string paths. */
+  std::string SaveMixtureHeader() const;
+
   /*!
    * \brief Initialize expert responsibilities (uniform, kmeans, etc.)
    */
@@ -533,8 +547,9 @@ class MixtureGBDT : public GBDTBase {
    * mixture_estimate_variance=true. Initialized to the marginal label
    * variance (or Laplace scale) as a worst-case default and floored with
    * kMixtureEpsilon to prevent collapse.
-   */
+  */
   std::vector<double> expert_variance_;
+  std::vector<double> expert_variance_thread_scratch_;
 
   /*! \brief Loaded parameter string for serialization */
   std::string loaded_parameter_;
@@ -542,9 +557,6 @@ class MixtureGBDT : public GBDTBase {
   // Markov switching members
   /*! \brief Whether Markov mode is enabled */
   bool use_markov_;
-
-  /*! \brief Previous gate probabilities for Markov mode (N x K) */
-  std::vector<double> prev_gate_proba_;
 
   /*! \brief Whether momentum mode is enabled */
   bool use_momentum_;
@@ -555,6 +567,7 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief Expert load from previous iteration (size K), used for auxiliary loss */
   std::vector<double> expert_load_;
+  std::vector<double> expert_load_thread_scratch_;
 
   /*! \brief Update expert bias based on recent load */
   void UpdateExpertBias();
@@ -689,7 +702,7 @@ class MixtureGBDT : public GBDTBase {
   std::vector<std::vector<const Metric*>> valid_metrics_;
 
   // ===== Validation prediction buffers =====
-  /*! \brief Expert predictions for validation (expert-major: [k * num_valid + i]) */
+  /*! \brief N-sized scratch for one expert's validation predictions */
   std::vector<std::vector<double>> expert_pred_valid_;
 
   /*! \brief Gate probabilities for validation (sample-major: [i * K + k]) */
@@ -704,9 +717,6 @@ class MixtureGBDT : public GBDTBase {
 
   /*! \brief Combined predictions for validation */
   std::vector<std::vector<double>> yhat_valid_;
-
-  /*! \brief Previous gate probabilities for Markov mode validation */
-  std::vector<std::vector<double>> prev_gate_proba_valid_;
 
   // ===== Progressive training (EvoMoE) =====
   /*! \brief Whether progressive mode is enabled */

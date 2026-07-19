@@ -193,10 +193,9 @@ def _eval_ic(params, train_set, num_boost_round, valid_sets, callbacks, criterio
     mse = float(np.mean((preds - y) ** 2))
 
     # Effective number of parameters: total leaf count across all trees.
-    # Parsed from the model string — dump_model() is not implemented for
-    # mixture models, while model_to_string() embeds standard LightGBM tree
-    # text in the [gate_model] / [expert_model_k] sections.
-    n_params = _count_leaves_from_model_str(model.model_to_string())
+    # Ask the native model directly; serializing the whole MoE merely to count
+    # ``num_leaves=`` lines was a substantial Auto-K overhead.
+    n_params = model._mixture_num_leaves()
 
     # Log-likelihood under Gaussian assumption
     log_lik = -N / 2.0 * np.log(2 * np.pi * max(mse, 1e-15)) - N / 2.0

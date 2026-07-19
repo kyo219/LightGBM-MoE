@@ -725,6 +725,24 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterLoadModelFromString(const char* model_str,
                                                       BoosterHandle* out);
 
 /*!
+ * \brief Create an inference-only booster from an existing booster.
+ *
+ * Serializes and reloads entirely inside the native library, avoiding a
+ * model-sized C++ -> Python -> C++ string round trip.
+ * \param handle Handle of source booster
+ * \param start_iteration Start index of the iteration that should be kept
+ * \param num_iteration Number of iterations that should be kept
+ * \param feature_importance_type Type of feature importance to save
+ * \param[out] out Handle of the newly-created inference booster
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterCreateForPrediction(BoosterHandle handle,
+                                                       int start_iteration,
+                                                       int num_iteration,
+                                                       int feature_importance_type,
+                                                       BoosterHandle* out);
+
+/*!
  * \brief Get parameters as JSON string.
  * \param handle Handle of booster
  * \param buffer_len Allocated space for string
@@ -1571,6 +1589,30 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterSaveModelToString(BoosterHandle handle,
                                                     char* out_str);
 
 /*!
+ * \brief Save a model to a newly allocated string in one serialization pass.
+ * \param handle Handle of booster
+ * \param start_iteration Start index of the iteration that should be saved
+ * \param num_iteration Number of iterations that should be saved
+ * \param feature_importance_type Type of feature importance to save
+ * \param[out] out_len Actual size of string including the terminating NUL
+ * \param[out] out_str Newly allocated model string
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterSaveModelToStringAlloc(BoosterHandle handle,
+                                                          int start_iteration,
+                                                          int num_iteration,
+                                                          int feature_importance_type,
+                                                          int64_t* out_len,
+                                                          char** out_str);
+
+/*!
+ * \brief Free a string allocated by LGBM_BoosterSaveModelToStringAlloc.
+ * \param model_str Allocated model string
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterFreeModelString(char* model_str);
+
+/*!
  * \brief Dump model to JSON.
  * \param handle Handle of booster
  * \param start_iteration Start index of the iteration that should be dumped
@@ -1706,6 +1748,15 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterGetNumExperts(BoosterHandle handle,
                                                  int* out_num_experts);
 
 /*!
+ * \brief Get the total number of leaves in all gate and expert trees.
+ * \param handle Handle of a MoE booster
+ * \param[out] out_num_leaves Total leaf count
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterGetMixtureNumLeaves(BoosterHandle handle,
+                                                       int64_t* out_num_leaves);
+
+/*!
  * \brief Check if a booster is a MoE model.
  * \param handle Handle of booster
  * \param[out] out_is_mixture 1 if MoE model, 0 otherwise
@@ -1769,6 +1820,38 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
                                                       const char* parameter,
                                                       int64_t* out_len,
                                                       double* out_result);
+
+/*!
+ * \brief Predict Markov-smoothed regime probabilities for a MoE model.
+ * \note
+ * You should pre-allocate memory for ``out_result`` with size ``nrow * num_experts``.
+ * Input rows are interpreted in time order.
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterPredictRegimeProbaMarkov(BoosterHandle handle,
+                                                            const void* data,
+                                                            int data_type,
+                                                            int32_t nrow,
+                                                            int32_t ncol,
+                                                            int is_row_major,
+                                                            const char* parameter,
+                                                            int64_t* out_len,
+                                                            double* out_result);
+
+/*!
+ * \brief Predict a MoE model using Markov-smoothed gate probabilities.
+ * \note
+ * You should pre-allocate memory for ``out_result`` with size ``nrow``.
+ * Input rows are interpreted in time order.
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterPredictMarkov(BoosterHandle handle,
+                                                 const void* data,
+                                                 int data_type,
+                                                 int32_t nrow,
+                                                 int32_t ncol,
+                                                 int is_row_major,
+                                                 const char* parameter,
+                                                 int64_t* out_len,
+                                                 double* out_result);
 
 /*!
  * \brief Predict individual expert predictions for MoE model.

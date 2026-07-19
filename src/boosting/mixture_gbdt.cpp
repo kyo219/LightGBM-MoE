@@ -457,13 +457,6 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   gradients_.resize(num_data_);
   hessians_.resize(num_data_);
 
-  // Initialize Markov-specific buffers
-  if (use_markov_) {
-    prev_gate_proba_.resize(nk);
-    const double uniform_prob = 1.0 / num_experts_;
-    std::fill(prev_gate_proba_.begin(), prev_gate_proba_.end(), uniform_prob);
-  }
-
   // Initialize expert bias for loss-free load balancing
   expert_bias_.resize(num_experts_, 0.0);
 
@@ -731,37 +724,52 @@ CompactBinMatrix<BinT> BuildCompactBinMatrix(const Dataset* train_data,
   m.bins.resize(static_cast<size_t>(N) * m.num_features);
   if (include_label) m.label.resize(N);
 
-  std::vector<BinIterator*> iters(m.num_features, nullptr);
+  const int num_threads = OMP_NUM_THREADS();
+  m.mean.assign(m.D, 0.0);
+  // Sparse BinIterator::RawGet advances mutable cursor state. Parallelize by
+  // feature so each iterator remains private and rows are visited in order.
+  #pragma omp parallel for num_threads(num_threads) schedule(static)
   for (int f = 0; f < m.num_features; ++f) {
-    iters[f] = train_data->FeatureIterator(f);
-  }
-  for (data_size_t i = 0; i < N; ++i) {
-    for (int f = 0; f < m.num_features; ++f) {
-      m.bins[static_cast<size_t>(i) * m.num_features + f] =
-          static_cast<BinT>(iters[f]->RawGet(i));
+    std::unique_ptr<BinIterator> iter(train_data->FeatureIterator(f));
+    double sum = 0.0;
+    for (data_size_t i = 0; i < N; ++i) {
+      const BinT value = static_cast<BinT>(iter->RawGet(i));
+      m.bins[static_cast<size_t>(i) * m.num_features + f] = value;
+      sum += static_cast<double>(value);
     }
-    if (include_label) {
-      m.label[i] = static_cast<double>(labels[i]);
-    }
-  }
-  for (BinIterator* p : iters) {
-    delete p;
+    m.mean[f] = sum / N;
   }
 
-  m.mean.assign(m.D, 0.0);
-  std::vector<double> stddev(m.D, 0.0);
-  for (data_size_t i = 0; i < N; ++i) {
-    for (int d = 0; d < m.D; ++d) {
-      m.mean[d] += m.Raw(i, d);
+  if (include_label) {
+    double label_sum = 0.0;
+    #pragma omp parallel for num_threads(num_threads) schedule(static) reduction(+:label_sum)
+    for (data_size_t i = 0; i < N; ++i) {
+      const double value = static_cast<double>(labels[i]);
+      m.label[i] = value;
+      label_sum += value;
+    }
+    m.mean[m.num_features] = label_sum / N;
+  }
+
+  std::vector<double> thread_sum(
+      static_cast<size_t>(num_threads) * m.D, 0.0);
+  std::fill(thread_sum.begin(), thread_sum.end(), 0.0);
+  #pragma omp parallel num_threads(num_threads)
+  {
+    const int tid = omp_get_thread_num();
+    double* local_ss = thread_sum.data() + static_cast<size_t>(tid) * m.D;
+    #pragma omp for schedule(static)
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int d = 0; d < m.D; ++d) {
+        const double diff = m.Raw(i, d) - m.mean[d];
+        local_ss[d] += diff * diff;
+      }
     }
   }
-  for (int d = 0; d < m.D; ++d) {
-    m.mean[d] /= N;
-  }
-  for (data_size_t i = 0; i < N; ++i) {
+  std::vector<double> stddev(m.D, 0.0);
+  for (int t = 0; t < num_threads; ++t) {
     for (int d = 0; d < m.D; ++d) {
-      const double diff = m.Raw(i, d) - m.mean[d];
-      stddev[d] += diff * diff;
+      stddev[d] += thread_sum[static_cast<size_t>(t) * m.D + d];
     }
   }
   m.inv_std.assign(m.D, 1.0);
@@ -834,6 +842,17 @@ void BalancedKMeansImpl(const CompactBinMatrix<BinT>& X, int K,
   // K-means iterations
   std::vector<int> assignments(N);
   std::vector<double> distances(static_cast<size_t>(N) * K);
+  std::vector<data_size_t> cluster_sizes(K, 0);
+  std::vector<data_size_t> cluster_capacity(K);
+  std::vector<std::pair<double, data_size_t>> sample_order(N);
+  std::vector<double> new_centroids(static_cast<size_t>(K) * D, 0.0);
+  std::vector<int> counts(K, 0);
+
+  const data_size_t base_size = N / K;
+  const data_size_t remainder = N % K;
+  for (int k = 0; k < K; ++k) {
+    cluster_capacity[k] = base_size + (k < remainder ? 1 : 0);
+  }
 
   for (int iter = 0; iter < max_iters; ++iter) {
     // Compute distances to all centroids
@@ -851,16 +870,9 @@ void BalancedKMeansImpl(const CompactBinMatrix<BinT>& X, int K,
 
     // Balanced assignment using greedy approach
     // Target: each cluster gets exactly N/K samples (with remainder distributed)
-    const data_size_t base_size = N / K;
-    const data_size_t remainder = N % K;
-    std::vector<data_size_t> cluster_sizes(K, 0);
-    std::vector<data_size_t> cluster_capacity(K);
-    for (int k = 0; k < K; ++k) {
-      cluster_capacity[k] = base_size + (k < remainder ? 1 : 0);
-    }
+    std::fill(cluster_sizes.begin(), cluster_sizes.end(), 0);
 
     // Sort samples by their minimum distance to any centroid (greedy)
-    std::vector<std::pair<double, data_size_t>> sample_order(N);
     for (data_size_t i = 0; i < N; ++i) {
       double min_d = distances[i * K];
       for (int k = 1; k < K; ++k) {
@@ -903,8 +915,8 @@ void BalancedKMeansImpl(const CompactBinMatrix<BinT>& X, int K,
     }
 
     // Update centroids
-    std::vector<double> new_centroids(static_cast<size_t>(K) * D, 0.0);
-    std::vector<int> counts(K, 0);
+    std::fill(new_centroids.begin(), new_centroids.end(), 0.0);
+    std::fill(counts.begin(), counts.end(), 0);
 
     for (data_size_t i = 0; i < N; ++i) {
       int k = assignments[i];
@@ -930,7 +942,7 @@ void BalancedKMeansImpl(const CompactBinMatrix<BinT>& X, int K,
                              std::abs(new_centroids[k * D + d] - centroids[k * D + d]));
       }
     }
-    centroids = std::move(new_centroids);
+    centroids.swap(new_centroids);
 
     if (max_shift < 1e-6) {
       Log::Debug("MixtureGBDT: Balanced K-Means converged at iteration %d", iter + 1);
@@ -998,52 +1010,95 @@ void GMMInitImpl(const CompactBinMatrix<BinT>& X, int K, data_size_t N,
 
   // EM iterations
   std::vector<double> gamma(static_cast<size_t>(N) * K);  // Responsibilities
+  const size_t kd = static_cast<size_t>(K) * D;
+  const int num_threads = OMP_NUM_THREADS();
+  std::vector<double> log_component(K, 0.0);
+  std::vector<double> inv_two_var(kd, 0.0);
+  std::vector<double> N_k(K, 0.0);
+  std::vector<double> new_means(kd, 0.0);
+  std::vector<double> new_variances(kd, 0.0);
+  std::vector<double> thread_Nk(
+      static_cast<size_t>(num_threads) * K, 0.0);
+  std::vector<double> thread_moments(
+      static_cast<size_t>(num_threads) * kd, 0.0);
 
   for (int iter = 0; iter < max_iters; ++iter) {
+    for (int k = 0; k < K; ++k) {
+      double base = std::log(weights[k] + 1e-300);
+      for (int d = 0; d < D; ++d) {
+        const size_t idx = static_cast<size_t>(k) * D + d;
+        const double var_k = std::max(variances[idx], min_variance);
+        base -= 0.5 * std::log(2.0 * M_PI * var_k);
+        inv_two_var[idx] = 0.5 / var_k;
+      }
+      log_component[k] = base;
+    }
+
     // E-step: compute responsibilities
-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-    for (data_size_t i = 0; i < N; ++i) {
-      std::vector<double> log_prob(K);
-      double max_log_prob = -std::numeric_limits<double>::max();
-
-      for (int k = 0; k < K; ++k) {
-        // Log probability under Gaussian k (diagonal covariance)
-        double log_p = std::log(weights[k] + 1e-300);
-        for (int d = 0; d < D; ++d) {
-          double var_k = std::max(variances[k * D + d], min_variance);
-          double diff = X.Get(i, d) - means[k * D + d];
-          log_p -= 0.5 * std::log(2.0 * M_PI * var_k);
-          log_p -= 0.5 * diff * diff / var_k;
+    #pragma omp parallel num_threads(num_threads)
+    {
+      double log_prob_stack[64];
+      std::vector<double> log_prob_heap;
+      double* log_prob = log_prob_stack;
+      if (K > 64) {
+        log_prob_heap.resize(K);
+        log_prob = log_prob_heap.data();
+      }
+      #pragma omp for schedule(static)
+      for (data_size_t i = 0; i < N; ++i) {
+        double max_log_prob = -std::numeric_limits<double>::max();
+        for (int k = 0; k < K; ++k) {
+          double log_p = log_component[k];
+          const size_t k_off = static_cast<size_t>(k) * D;
+          for (int d = 0; d < D; ++d) {
+            const double diff = X.Get(i, d) - means[k_off + d];
+            log_p -= diff * diff * inv_two_var[k_off + d];
+          }
+          log_prob[k] = log_p;
+          max_log_prob = std::max(max_log_prob, log_p);
         }
-        log_prob[k] = log_p;
-        max_log_prob = std::max(max_log_prob, log_p);
-      }
 
-      // Softmax to get responsibilities
-      double sum_exp = 0.0;
-      for (int k = 0; k < K; ++k) {
-        gamma[i * K + k] = std::exp(log_prob[k] - max_log_prob);
-        sum_exp += gamma[i * K + k];
-      }
-      for (int k = 0; k < K; ++k) {
-        gamma[i * K + k] /= sum_exp;
+        double sum_exp = 0.0;
+        for (int k = 0; k < K; ++k) {
+          gamma[i * K + k] = std::exp(log_prob[k] - max_log_prob);
+          sum_exp += gamma[i * K + k];
+        }
+        const double inv_sum = 1.0 / sum_exp;
+        for (int k = 0; k < K; ++k) {
+          gamma[i * K + k] *= inv_sum;
+        }
       }
     }
 
     // M-step: update parameters
-    std::vector<double> N_k(K, 0.0);  // Effective number of points per cluster
-    std::vector<double> new_means(static_cast<size_t>(K) * D, 0.0);
-    std::vector<double> new_variances(static_cast<size_t>(K) * D, 0.0);
+    std::fill(N_k.begin(), N_k.end(), 0.0);
+    std::fill(new_means.begin(), new_means.end(), 0.0);
+    std::fill(thread_Nk.begin(), thread_Nk.end(), 0.0);
+    std::fill(thread_moments.begin(), thread_moments.end(), 0.0);
 
     // Compute new means
-    for (data_size_t i = 0; i < N; ++i) {
-      for (int k = 0; k < K; ++k) {
-        double g = gamma[i * K + k];
-        N_k[k] += g;
-        for (int d = 0; d < D; ++d) {
-          new_means[k * D + d] += g * X.Get(i, d);
+    #pragma omp parallel num_threads(num_threads)
+    {
+      const int tid = omp_get_thread_num();
+      double* local_Nk = thread_Nk.data() + static_cast<size_t>(tid) * K;
+      double* local_sum = thread_moments.data() + static_cast<size_t>(tid) * kd;
+      #pragma omp for schedule(static)
+      for (data_size_t i = 0; i < N; ++i) {
+        for (int k = 0; k < K; ++k) {
+          const double g = gamma[i * K + k];
+          local_Nk[k] += g;
+          const size_t k_off = static_cast<size_t>(k) * D;
+          for (int d = 0; d < D; ++d) {
+            local_sum[k_off + d] += g * X.Get(i, d);
+          }
         }
       }
+    }
+    for (int t = 0; t < num_threads; ++t) {
+      const double* local_Nk = thread_Nk.data() + static_cast<size_t>(t) * K;
+      const double* local_sum = thread_moments.data() + static_cast<size_t>(t) * kd;
+      for (int k = 0; k < K; ++k) N_k[k] += local_Nk[k];
+      for (size_t j = 0; j < kd; ++j) new_means[j] += local_sum[j];
     }
     for (int k = 0; k < K; ++k) {
       if (N_k[k] > 1e-10) {
@@ -1054,14 +1109,27 @@ void GMMInitImpl(const CompactBinMatrix<BinT>& X, int K, data_size_t N,
     }
 
     // Compute new variances
-    for (data_size_t i = 0; i < N; ++i) {
-      for (int k = 0; k < K; ++k) {
-        double g = gamma[i * K + k];
-        for (int d = 0; d < D; ++d) {
-          double diff = X.Get(i, d) - new_means[k * D + d];
-          new_variances[k * D + d] += g * diff * diff;
+    std::fill(new_variances.begin(), new_variances.end(), 0.0);
+    std::fill(thread_moments.begin(), thread_moments.end(), 0.0);
+    #pragma omp parallel num_threads(num_threads)
+    {
+      const int tid = omp_get_thread_num();
+      double* local_var = thread_moments.data() + static_cast<size_t>(tid) * kd;
+      #pragma omp for schedule(static)
+      for (data_size_t i = 0; i < N; ++i) {
+        for (int k = 0; k < K; ++k) {
+          const double g = gamma[i * K + k];
+          const size_t k_off = static_cast<size_t>(k) * D;
+          for (int d = 0; d < D; ++d) {
+            const double diff = X.Get(i, d) - new_means[k_off + d];
+            local_var[k_off + d] += g * diff * diff;
+          }
         }
       }
+    }
+    for (int t = 0; t < num_threads; ++t) {
+      const double* local_var = thread_moments.data() + static_cast<size_t>(t) * kd;
+      for (size_t j = 0; j < kd; ++j) new_variances[j] += local_var[j];
     }
     for (int k = 0; k < K; ++k) {
       if (N_k[k] > 1e-10) {
@@ -1090,8 +1158,8 @@ void GMMInitImpl(const CompactBinMatrix<BinT>& X, int K, data_size_t N,
       }
     }
 
-    means = std::move(new_means);
-    variances = std::move(new_variances);
+    means.swap(new_means);
+    variances.swap(new_variances);
 
     if (max_shift < 1e-6) {
       Log::Debug("MixtureGBDT: GMM converged at iteration %d", iter + 1);
@@ -1443,12 +1511,16 @@ void MixtureGBDT::ComputeGateProbForInference(const double* gate_raw,
   // annealing produce a routing at inference that does not match the routing
   // used during training — silently degrading test metrics.
   double scores_buf[64];
-  std::vector<double> scores_heap;
   double* scores;
   if (num_experts_ <= 64) {
     scores = scores_buf;
   } else {
-    scores_heap.resize(num_experts_);
+    // Inference calls this once per row. Keep one capacity per prediction
+    // worker instead of crossing a sharp malloc/free cliff at K=65.
+    static thread_local std::vector<double> scores_heap;
+    if (scores_heap.size() < static_cast<size_t>(num_experts_)) {
+      scores_heap.resize(num_experts_);
+    }
     scores = scores_heap.data();
   }
   const double inv_T = 1.0 / std::max(gate_temperature_, kMixtureEpsilon);
@@ -1654,12 +1726,13 @@ void MixtureGBDT::Forward() {
     const double* gate_raw = gate_->GetTrainingScore(&gate_raw_len);
 
     const double inv_T = 1.0 / std::max(gate_temperature_, kMixtureEpsilon);
+    const bool has_routing_bias = std::any_of(
+        expert_bias_.begin(), expert_bias_.end(),
+        [](double bias) { return bias != 0.0; });
     // gate_raw is in class-major order: gate_raw[k * num_data_ + i] = score for sample i, class k
     // gate_proba_ / gate_proba_no_bias_ are in sample-major order
-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-    for (data_size_t i = 0; i < num_data_; ++i) {
-      // Stack buffers for K ≤ 64 — avoids two heap allocs per sample per
-      // iteration (same pattern as EStep / MStepGate).
+    #pragma omp parallel num_threads(OMP_NUM_THREADS())
+    {
       double stack_buf[2 * 64];
       std::vector<double> heap_buf;
       double* scores_no_bias;
@@ -1672,15 +1745,25 @@ void MixtureGBDT::Forward() {
         scores_no_bias = heap_buf.data();
         scores_with_bias = heap_buf.data() + num_experts_;
       }
-      for (int k = 0; k < num_experts_; ++k) {
-        const double z_over_T = gate_raw[k * num_data_ + i] * inv_T;
-        scores_no_bias[k]   = z_over_T;
-        scores_with_bias[k] = z_over_T + expert_bias_[k] * inv_T;
+      #pragma omp for schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        for (int k = 0; k < num_experts_; ++k) {
+          const double z_over_T = gate_raw[k * num_data_ + i] * inv_T;
+          scores_no_bias[k] = z_over_T;
+          if (has_routing_bias) {
+            scores_with_bias[k] = z_over_T + expert_bias_[k] * inv_T;
+          }
+        }
+        Softmax(scores_no_bias, num_experts_,
+                gate_proba_no_bias_.data() + i * num_experts_);
+        if (has_routing_bias) {
+          Softmax(scores_with_bias, num_experts_,
+                  gate_proba_.data() + i * num_experts_);
+        } else {
+          std::copy_n(gate_proba_no_bias_.data() + i * num_experts_,
+                      num_experts_, gate_proba_.data() + i * num_experts_);
+        }
       }
-      Softmax(scores_no_bias, num_experts_,
-              gate_proba_no_bias_.data() + i * num_experts_);
-      Softmax(scores_with_bias, num_experts_,
-              gate_proba_.data() + i * num_experts_);
     }
   }
 
@@ -1705,23 +1788,14 @@ void MixtureGBDT::Forward() {
     const double lambda = config_->mixture_smoothing_lambda;
     if (lambda > 0.0 && num_data_ > 1) {
       auto markov_sweep = [&](double* buf) {
-        std::vector<double> prev_row(num_experts_);
-        // Reused across rows (fully overwritten each iteration) — allocating
-        // it inside the loop cost one heap alloc per row per sweep.
-        std::vector<double> cur_row(num_experts_);
-        // Row 0 is never blended (no prior available).
-        for (int k = 0; k < num_experts_; ++k) {
-          prev_row[k] = buf[k];
-        }
-        for (data_size_t i = 1; i < num_data_; ++i) {
-          // Snapshot row i's unsmoothed value before the blend.
-          for (int k = 0; k < num_experts_; ++k) {
-            cur_row[k] = buf[i * num_experts_ + k];
-          }
+        // Sweep backwards: row i-1 is still unsmoothed when consumed by i,
+        // so no K-sized previous/current row buffers are needed.
+        for (data_size_t i = num_data_ - 1; i >= 1; --i) {
           double sum = 0.0;
           for (int k = 0; k < num_experts_; ++k) {
             buf[i * num_experts_ + k] =
-                (1.0 - lambda) * cur_row[k] + lambda * prev_row[k];
+                (1.0 - lambda) * buf[i * num_experts_ + k]
+                + lambda * buf[(i - 1) * num_experts_ + k];
             sum += buf[i * num_experts_ + k];
           }
           // Renormalize (numerical drift only; both inputs were already
@@ -1730,35 +1804,24 @@ void MixtureGBDT::Forward() {
           for (int k = 0; k < num_experts_; ++k) {
             buf[i * num_experts_ + k] *= inv_sum;
           }
-          // Advance prev_row to row i's UNSMOOTHED value (so row i+1 gets a
-          // clean Markov prior, not a doubly-smoothed one).
-          prev_row.swap(cur_row);
         }
       };
       markov_sweep(gate_proba_.data());
       markov_sweep(gate_proba_no_bias_.data());
     }
-    // prev_gate_proba_ is no longer carried across iterations; it remains
-    // sized for back-compat with the predict-time PredictWithPrevProba path
-    // which takes its prior from a caller-supplied argument anyway.
   }
 
-  // Snapshot expert predictions into sample-major expert_pred_sm_ so that
-  // E-step / yhat read [i*K + k] with sequential cache access, and so the
-  // M-step's diversity term sees pre-update f_j while experts train.
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    for (int k = 0; k < num_experts_; ++k) {
-      expert_pred_sm_[i * num_experts_ + k] = expert_score_ptrs_[k][i];
-    }
-  }
-
-  // Compute combined prediction: yhat[i] = sum_k gate_proba[i,k] * expert_pred_sm[i,k]
+  // Snapshot expert predictions and compute yhat in one pass. Keeping these
+  // as separate loops reread the full N x K snapshot immediately after
+  // writing it, adding a pure memory-bandwidth pass to every Forward().
   #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
   for (data_size_t i = 0; i < num_data_; ++i) {
     double sum = 0.0;
     for (int k = 0; k < num_experts_; ++k) {
-      sum += gate_proba_[i * num_experts_ + k] * expert_pred_sm_[i * num_experts_ + k];
+      const size_t idx = static_cast<size_t>(i) * num_experts_ + k;
+      const double pred = expert_score_ptrs_[k][i];
+      expert_pred_sm_[idx] = pred;
+      sum += gate_proba_[idx] * pred;
     }
     yhat_[i] = sum;
   }
@@ -1775,12 +1838,6 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
   std::vector<double>& gate_proba = gate_proba_valid_[valid_idx];
   std::vector<double>& yhat = yhat_valid_[valid_idx];
 
-  // Get expert predictions on validation data
-  for (int k = 0; k < num_experts_; ++k) {
-    int64_t out_len;
-    experts_[k]->GetPredictAt(data_idx, expert_pred.data() + k * num_valid, &out_len);
-  }
-
   // Get gate raw predictions on validation data (class-major order).
   // Persistent per-valid-set scratch — no zero-copy accessor exists for
   // valid scores, but at least the N_valid x K allocation is hoisted.
@@ -1791,10 +1848,8 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
   // Apply softmax per sample with expert bias and temperature scaling
   // gate_raw is in class-major order: gate_raw[k * num_valid + i]
   // gate_proba is in sample-major order: gate_proba[i * num_experts_ + k]
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_valid; ++i) {
-    // Stack buffer for K ≤ 64 — avoids a heap alloc per sample per iteration
-    // (same pattern as EStep / MStepGate).
+  #pragma omp parallel num_threads(OMP_NUM_THREADS())
+  {
     double scores_buf[64];
     std::vector<double> scores_heap;
     double* scores;
@@ -1804,52 +1859,48 @@ void MixtureGBDT::ForwardValid(int valid_idx) {
       scores_heap.resize(num_experts_);
       scores = scores_heap.data();
     }
-    for (int k = 0; k < num_experts_; ++k) {
-      scores[k] = (gate_raw[k * num_valid + i] + expert_bias_[k]) / gate_temperature_;
+    #pragma omp for schedule(static)
+    for (data_size_t i = 0; i < num_valid; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        scores[k] = (gate_raw[k * num_valid + i] + expert_bias_[k])
+                    / gate_temperature_;
+      }
+      Softmax(scores, num_experts_, gate_proba.data() + i * num_experts_);
     }
-    Softmax(scores, num_experts_, gate_proba.data() + i * num_experts_);
   }
 
-  // Markov mode: same single-pass forward sweep as Forward(); see audit
-  // note there. No iteration-axis state is carried in prev_gate_proba_valid_;
-  // each call computes the time-axis Markov prior fresh from this iter's
-  // gate_proba.
+  // Markov mode: same single-pass forward sweep as Forward().
   if (use_markov_) {
     const double lambda = config_->mixture_smoothing_lambda;
     if (lambda > 0.0 && num_valid > 1) {
-      std::vector<double> prev_row(num_experts_);
-      // Reused across rows — see the markov_sweep note in Forward().
-      std::vector<double> cur_row(num_experts_);
-      for (int k = 0; k < num_experts_; ++k) {
-        prev_row[k] = gate_proba[k];
-      }
-      for (data_size_t i = 1; i < num_valid; ++i) {
-        for (int k = 0; k < num_experts_; ++k) {
-          cur_row[k] = gate_proba[i * num_experts_ + k];
-        }
+      for (data_size_t i = num_valid - 1; i >= 1; --i) {
         double sum = 0.0;
         for (int k = 0; k < num_experts_; ++k) {
           gate_proba[i * num_experts_ + k] =
-              (1.0 - lambda) * cur_row[k] + lambda * prev_row[k];
+              (1.0 - lambda) * gate_proba[i * num_experts_ + k]
+              + lambda * gate_proba[(i - 1) * num_experts_ + k];
           sum += gate_proba[i * num_experts_ + k];
         }
         const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
         for (int k = 0; k < num_experts_; ++k) {
           gate_proba[i * num_experts_ + k] *= inv_sum;
         }
-        prev_row.swap(cur_row);
       }
     }
   }
 
-  // Compute combined prediction: yhat[i] = sum_k gate_proba[i,k] * expert_pred[k][i]
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_valid; ++i) {
-    double sum = 0.0;
-    for (int k = 0; k < num_experts_; ++k) {
-      sum += gate_proba[i * num_experts_ + k] * expert_pred[k * num_valid + i];
+  // Only one N-sized expert scratch is needed: validation metrics consume
+  // yhat, never the full N x K expert matrix. Fetch one expert at a time and
+  // accumulate it directly into yhat.
+  std::fill(yhat.begin(), yhat.end(), 0.0);
+  for (int k = 0; k < num_experts_; ++k) {
+    int64_t expert_out_len;
+    experts_[k]->GetPredictAt(data_idx, expert_pred.data(), &expert_out_len);
+    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+    for (data_size_t i = 0; i < num_valid; ++i) {
+      yhat[i] += gate_proba[static_cast<size_t>(i) * num_experts_ + k]
+                 * expert_pred[i];
     }
-    yhat[i] = sum;
   }
 }
 
@@ -1914,10 +1965,8 @@ void MixtureGBDT::EStep() {
   // (i, k) pair are measurable at N·K per iteration).
   const int mode_kind = (mode == "gate_only") ? 1 : (mode == "loss_only") ? 2 : 0;
 
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    // Stack buffer for K ≤ 64 — avoids a heap alloc per sample per iteration
-    // (same pattern as MStepGate).
+  #pragma omp parallel num_threads(OMP_NUM_THREADS())
+  {
     double scores_buf[64];
     std::vector<double> scores_heap;
     double* scores;
@@ -1928,17 +1977,19 @@ void MixtureGBDT::EStep() {
       scores = scores_heap.data();
     }
 
-    for (int k = 0; k < num_experts_; ++k) {
-      double score = 0.0;
+    #pragma omp for schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        double score = 0.0;
 
-      if (mode_kind == 1) {
+        if (mode_kind == 1) {
         // Prior π_k(x) = bias-free softmax of gate logits. The load-balance
         // bias is a routing nudge (DeepSeek), not a probabilistic prior;
         // mixing it into the responsibility softmax forces the gate to
         // learn to undo bias each iter — defeats the point.
         const double gate_prob = gate_proba_no_bias_[i * num_experts_ + k];
         score = std::log(gate_prob + kMixtureEpsilon);
-      } else if (mode_kind == 2) {
+        } else if (mode_kind == 2) {
         const double expert_p = expert_pred_sm_[i * num_experts_ + k];
         const double loss = ComputePointwiseLoss(labels[i], expert_p);
         if (estimate_var) {
@@ -1946,7 +1997,7 @@ void MixtureGBDT::EStep() {
         } else {
           score = -alpha * loss;
         }
-      } else {
+        } else {
         // em mode: log π_k(x) + log p(y | x, f_k, scale_k); π_k is bias-free
         // (see gate_only branch above for rationale).
         const double gate_prob = gate_proba_no_bias_[i * num_experts_ + k];
@@ -1958,12 +2009,14 @@ void MixtureGBDT::EStep() {
         } else {
           score = std::log(gate_prob + kMixtureEpsilon) - alpha * loss;
         }
+        }
+
+        scores[k] = score - load_penalty[k];
       }
 
-      scores[k] = score - load_penalty[k];
+      Softmax(scores, num_experts_,
+              responsibilities_.data() + i * num_experts_);
     }
-
-    Softmax(scores, num_experts_, responsibilities_.data() + i * num_experts_);
   }
 }
 
@@ -1980,16 +2033,20 @@ void MixtureGBDT::UpdateExpertVariances() {
   const int loss_kind = (e_step_loss_type_ == "l1") ? 1
                         : (e_step_loss_type_ == "quantile") ? 2 : 0;
   const int num_threads = OMP_NUM_THREADS();
-  std::vector<std::vector<double>> tl_num(num_threads,
-                                          std::vector<double>(num_experts_, 0.0));
-  std::vector<std::vector<double>> tl_den(num_threads,
-                                          std::vector<double>(num_experts_, 0.0));
+  const size_t one_plane = static_cast<size_t>(num_threads) * num_experts_;
+  if (expert_variance_thread_scratch_.size() != 2 * one_plane) {
+    expert_variance_thread_scratch_.resize(2 * one_plane);
+  }
+  std::fill(expert_variance_thread_scratch_.begin(),
+            expert_variance_thread_scratch_.end(), 0.0);
 
   #pragma omp parallel num_threads(num_threads)
   {
     const int tid = omp_get_thread_num();
-    auto& num_acc_t = tl_num[tid];
-    auto& den_acc_t = tl_den[tid];
+    double* num_acc_t = expert_variance_thread_scratch_.data()
+                        + static_cast<size_t>(tid) * num_experts_;
+    double* den_acc_t = expert_variance_thread_scratch_.data() + one_plane
+                        + static_cast<size_t>(tid) * num_experts_;
     #pragma omp for schedule(static)
     for (data_size_t i = 0; i < num_data_; ++i) {
       const double y = static_cast<double>(labels[i]);
@@ -2020,18 +2077,18 @@ void MixtureGBDT::UpdateExpertVariances() {
     }
   }
 
-  std::vector<double> num_acc(num_experts_, 0.0);
-  std::vector<double> den_acc(num_experts_, 0.0);
-  for (int t = 0; t < num_threads; ++t) {
-    for (int k = 0; k < num_experts_; ++k) {
-      num_acc[k] += tl_num[t][k];
-      den_acc[k] += tl_den[t][k];
-    }
-  }
-
   for (int k = 0; k < num_experts_; ++k) {
-    if (den_acc[k] > kMixtureEpsilon) {
-      expert_variance_[k] = std::max(num_acc[k] / den_acc[k], kMixtureEpsilon);
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (int t = 0; t < num_threads; ++t) {
+      numerator += expert_variance_thread_scratch_[
+          static_cast<size_t>(t) * num_experts_ + k];
+      denominator += expert_variance_thread_scratch_[
+          one_plane + static_cast<size_t>(t) * num_experts_ + k];
+    }
+    if (denominator > kMixtureEpsilon) {
+      expert_variance_[k] = std::max(
+          numerator / denominator, kMixtureEpsilon);
     }
     // else: keep previous estimate; den ~ 0 means no samples are routed to k
   }
@@ -2073,11 +2130,8 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
   }
 
   double total = 0.0;
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) reduction(+:total)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    double max_term = -std::numeric_limits<double>::infinity();
-    // Stack buffer for K ≤ 64 — this loop runs over all N rows on every
-    // post-warmup iteration (same pattern as EStep).
+  #pragma omp parallel num_threads(OMP_NUM_THREADS()) reduction(+:total)
+  {
     double terms_buf[64];
     std::vector<double> terms_heap;
     double* terms;
@@ -2087,7 +2141,10 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
       terms_heap.resize(num_experts_);
       terms = terms_heap.data();
     }
-    for (int k = 0; k < num_experts_; ++k) {
+    #pragma omp for schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      double max_term = -std::numeric_limits<double>::infinity();
+      for (int k = 0; k < num_experts_; ++k) {
       // Prior π_k(x) is bias-free, matching the E-step. ELBO is the model
       // log-likelihood; the routing-side bias is not part of the model.
       const double pi  = gate_proba_no_bias_[i * num_experts_ + k];
@@ -2110,28 +2167,45 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
                      + log_norm[k] - inv_scale[k] * loss;
       terms[k] = t;
       if (t > max_term) max_term = t;
+      }
+      double sum_exp = 0.0;
+      for (int k = 0; k < num_experts_; ++k) {
+        sum_exp += std::exp(terms[k] - max_term);
+      }
+      total += max_term + std::log(sum_exp + kMixtureEpsilon);
     }
-    double sum_exp = 0.0;
-    for (int k = 0; k < num_experts_; ++k) {
-      sum_exp += std::exp(terms[k] - max_term);
-    }
-    total += max_term + std::log(sum_exp + kMixtureEpsilon);
   }
   return total;
 }
 
 void MixtureGBDT::UpdateExpertLoad() {
   // Compute current load per expert (mean responsibility)
-  std::fill(expert_load_.begin(), expert_load_.end(), 0.0);
+  const int num_threads = OMP_NUM_THREADS();
+  const size_t scratch_size = static_cast<size_t>(num_threads) * num_experts_;
+  if (expert_load_thread_scratch_.size() != scratch_size) {
+    expert_load_thread_scratch_.resize(scratch_size);
+  }
+  std::fill(expert_load_thread_scratch_.begin(),
+            expert_load_thread_scratch_.end(), 0.0);
 
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    for (int k = 0; k < num_experts_; ++k) {
-      expert_load_[k] += responsibilities_[i * num_experts_ + k];
+  #pragma omp parallel num_threads(num_threads)
+  {
+    double* local = expert_load_thread_scratch_.data()
+                    + static_cast<size_t>(omp_get_thread_num()) * num_experts_;
+    #pragma omp for schedule(static)
+    for (data_size_t i = 0; i < num_data_; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        local[k] += responsibilities_[i * num_experts_ + k];
+      }
     }
   }
 
   for (int k = 0; k < num_experts_; ++k) {
-    expert_load_[k] /= num_data_;  // Normalize to [0, 1], should sum to 1
+    double total = 0.0;
+    for (int t = 0; t < num_threads; ++t) {
+      total += expert_load_thread_scratch_[static_cast<size_t>(t) * num_experts_ + k];
+    }
+    expert_load_[k] = total / num_data_;  // Normalize to [0, 1], sums to 1
   }
 
   // Log for debugging
@@ -2424,17 +2498,6 @@ void MixtureGBDT::UpdateExpertBias() {
   // softmax, making the gate's learning effectively a no-op late in training.
   const double bias_decay_rate = 0.02;
 
-  // Compute actual load per expert (mean responsibility)
-  std::vector<double> actual_load(num_experts_, 0.0);
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    for (int k = 0; k < num_experts_; ++k) {
-      actual_load[k] += responsibilities_[i * num_experts_ + k];
-    }
-  }
-  for (int k = 0; k < num_experts_; ++k) {
-    actual_load[k] /= num_data_;  // Normalize to [0, 1]
-  }
-
   // Bidirectional update with decay:
   //   - underloaded (load < min_usage): push bias up to recover
   //   - healthy (load >= min_usage): exponentially decay bias toward 0
@@ -2442,8 +2505,8 @@ void MixtureGBDT::UpdateExpertBias() {
   // both experts are above min_usage, neither bias is forced anywhere — they
   // simply decay back to whatever the gate's own logits naturally produce.
   for (int k = 0; k < num_experts_; ++k) {
-    if (actual_load[k] < min_usage) {
-      const double load_diff = min_usage - actual_load[k];
+    if (expert_load_[k] < min_usage) {
+      const double load_diff = min_usage - expert_load_[k];
       expert_bias_[k] += bias_update_rate * load_diff;
     } else {
       expert_bias_[k] *= (1.0 - bias_decay_rate);
@@ -2455,7 +2518,7 @@ void MixtureGBDT::UpdateExpertBias() {
     std::string load_str = "";
     std::string bias_str = "";
     for (int k = 0; k < num_experts_; ++k) {
-      load_str += std::to_string(actual_load[k]).substr(0, 5) + " ";
+      load_str += std::to_string(expert_load_[k]).substr(0, 5) + " ";
       bias_str += std::to_string(expert_bias_[k]).substr(0, 6) + " ";
     }
     Log::Debug("MixtureGBDT: Expert loads = [%s], bias = [%s]",
@@ -2998,30 +3061,38 @@ void MixtureGBDT::RefitExpertsAndGate() {
       int64_t out_len;
       const double* gate_raw = gate_->GetTrainingScore(&out_len);
 
-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-      for (data_size_t i = 0; i < num_data_; ++i) {
+      #pragma omp parallel num_threads(OMP_NUM_THREADS())
+      {
         double scores_buf[64];
         double p_buf[64];
-        double* scores = (num_experts_ <= 64) ? scores_buf
-                                              : new double[num_experts_];
-        double* p = (num_experts_ <= 64) ? p_buf : new double[num_experts_];
-        for (int k = 0; k < num_experts_; ++k) {
-          scores[k] = gate_raw[k * num_data_ + i] * inv_T;
-        }
-        Softmax(scores, num_experts_, p);
-        for (int k = 0; k < num_experts_; ++k) {
-          const size_t idx = static_cast<size_t>(i) + static_cast<size_t>(k) * num_data_;
-          const double r = responsibilities_[i * num_experts_ + k];
-          const double base_grad = (p[k] - r) * inv_T;
-          const double reg_grad = dirichlet_lambda * (p[k] - uniform_prob) * inv_T;
-          g[idx] = static_cast<score_t>(base_grad + reg_grad);
-          h[idx] = static_cast<score_t>(
-              std::max((friedman_factor * p[k] * (1.0 - p[k]) + dirichlet_lambda) * inv_T2,
-                       kMixtureEpsilon));
-        }
+        std::vector<double> heap_buf;
+        double* scores = scores_buf;
+        double* p = p_buf;
         if (num_experts_ > 64) {
-          delete[] scores;
-          delete[] p;
+          heap_buf.resize(2 * static_cast<size_t>(num_experts_));
+          scores = heap_buf.data();
+          p = heap_buf.data() + num_experts_;
+        }
+        #pragma omp for schedule(static)
+        for (data_size_t i = 0; i < num_data_; ++i) {
+          for (int k = 0; k < num_experts_; ++k) {
+            scores[k] = gate_raw[k * num_data_ + i] * inv_T;
+          }
+          Softmax(scores, num_experts_, p);
+          for (int k = 0; k < num_experts_; ++k) {
+            const size_t idx = static_cast<size_t>(i)
+                               + static_cast<size_t>(k) * num_data_;
+            const double r = responsibilities_[
+                static_cast<size_t>(i) * num_experts_ + k];
+            const double base_grad = (p[k] - r) * inv_T;
+            const double reg_grad =
+                dirichlet_lambda * (p[k] - uniform_prob) * inv_T;
+            g[idx] = static_cast<score_t>(base_grad + reg_grad);
+            h[idx] = static_cast<score_t>(
+                std::max((friedman_factor * p[k] * (1.0 - p[k])
+                              + dirichlet_lambda) * inv_T2,
+                         kMixtureEpsilon));
+          }
         }
       }
     };
@@ -3179,49 +3250,50 @@ void MixtureGBDT::MStepGate() {
   for (int g = 0; g < config_->mixture_gate_iters_per_round; ++g) {
     // (d) holds via the live pointer: the previous TrainOneIter mutated the
     // score buffer gate_raw_no_bias points into.
-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-    for (data_size_t i = 0; i < num_data_; ++i) {
-      // Per-sample bias-free softmax. Stack buffer for K ≤ 64 to avoid the
-      // per-iter heap thrash of `std::vector<double> p(num_experts_)`.
+    const bool reuse_forward_prob = (g == 0 && !use_markov_);
+    #pragma omp parallel num_threads(OMP_NUM_THREADS())
+    {
       double scores_buf[64];
       double p_buf[64];
-      double* scores = (num_experts_ <= 64) ? scores_buf
-                                            : new double[num_experts_];
-      double* p = (num_experts_ <= 64) ? p_buf : new double[num_experts_];
-
-      for (int k = 0; k < num_experts_; ++k) {
-        scores[k] = gate_raw_no_bias[k * num_data_ + i] * inv_T;
-      }
-      Softmax(scores, num_experts_, p);
-
-      for (int k = 0; k < num_experts_; ++k) {
-        size_t idx = i + k * num_data_;  // Gate uses class-major order
-        const double r = responsibilities_[i * num_experts_ + k];
-
-        // Chain-rule-correct gradient on z (logit-space). Both base CE and
-        // Dirichlet shrinkage are scaled by 1/T.
-        const double base_grad = (p[k] - r) * inv_T;
-        const double reg_grad =
-            dirichlet_lambda * (p[k] - uniform_prob) * inv_T;
-
-        gate_grad[idx] = static_cast<score_t>(base_grad + reg_grad);
-
-        // Diagonal Hessian: softmax CE on the K-redundant softmax has
-        //   K/(K-1) · p(1-p) / T²
-        // (the Friedman factor from the standard multiclass objective). The
-        // Dirichlet term's exact diagonal Hessian is λ p(1-p)/T² which would
-        // vanish at corners and explode the Newton step there; we replace it
-        // with a constant λ/T² damping. Both are floored at kMixtureEpsilon
-        // for numerical safety.
-        gate_hess[idx] = static_cast<score_t>(
-            std::max((friedman_factor * p[k] * (1.0 - p[k]) + dirichlet_lambda)
-                         * inv_T2,
-                     kMixtureEpsilon));
-      }
-
+      std::vector<double> heap_buf;
+      double* scores = scores_buf;
+      double* p_scratch = p_buf;
       if (num_experts_ > 64) {
-        delete[] scores;
-        delete[] p;
+        heap_buf.resize(2 * static_cast<size_t>(num_experts_));
+        scores = heap_buf.data();
+        p_scratch = heap_buf.data() + num_experts_;
+      }
+      #pragma omp for schedule(static)
+      for (data_size_t i = 0; i < num_data_; ++i) {
+        const double* p;
+        if (reuse_forward_prob) {
+          // Forward() already computed softmax(z/T), and neither expert
+          // training nor the E-step mutates gate logits. Markov mode cannot
+          // reuse it because that buffer was subsequently time-smoothed.
+          p = gate_proba_no_bias_.data()
+              + static_cast<size_t>(i) * num_experts_;
+        } else {
+          for (int k = 0; k < num_experts_; ++k) {
+            scores[k] = gate_raw_no_bias[k * num_data_ + i] * inv_T;
+          }
+          Softmax(scores, num_experts_, p_scratch);
+          p = p_scratch;
+        }
+
+        for (int k = 0; k < num_experts_; ++k) {
+          const size_t idx = static_cast<size_t>(i)
+                             + static_cast<size_t>(k) * num_data_;
+          const double r = responsibilities_[
+              static_cast<size_t>(i) * num_experts_ + k];
+          const double base_grad = (p[k] - r) * inv_T;
+          const double reg_grad =
+              dirichlet_lambda * (p[k] - uniform_prob) * inv_T;
+          gate_grad[idx] = static_cast<score_t>(base_grad + reg_grad);
+          gate_hess[idx] = static_cast<score_t>(
+              std::max((friedman_factor * p[k] * (1.0 - p[k])
+                            + dirichlet_lambda) * inv_T2,
+                       kMixtureEpsilon));
+        }
       }
     }
 
@@ -3584,11 +3656,16 @@ bool MixtureGBDT::TrainOneIter(const score_t* gradients, const score_t* hessians
       EStepExpertChoice();
     } else {
       EStep();
-      UpdateExpertLoad();
     }
 
     // Apply time-series smoothing if enabled
     SmoothResponsibilities();
+
+    // Compute the post-smoothing load once. It is both the prior used by the
+    // next E-step's auxiliary penalty and the current load used by bias
+    // balancing; scanning responsibilities separately for each consumer
+    // doubled this O(N*K) pass when smoothing was disabled.
+    UpdateExpertLoad();
 
     // Update expert bias for loss-free load balancing
     UpdateExpertBias();
@@ -3942,7 +4019,6 @@ void MixtureGBDT::Predict(const double* features, double* output,
   // C API's parallel predict loop, so per-call heap allocations are pure
   // per-row overhead.
   double stack_buf[3 * 64];
-  std::vector<double> heap_buf;
   double* expert_preds;
   double* gate_raw;
   double* gate_prob;
@@ -3951,7 +4027,9 @@ void MixtureGBDT::Predict(const double* features, double* output,
     gate_raw = stack_buf + num_experts_;
     gate_prob = stack_buf + 2 * num_experts_;
   } else {
-    heap_buf.resize(3 * static_cast<size_t>(num_experts_));
+    static thread_local std::vector<double> heap_buf;
+    const size_t required = 3 * static_cast<size_t>(num_experts_);
+    if (heap_buf.size() < required) heap_buf.resize(required);
     expert_preds = heap_buf.data();
     gate_raw = heap_buf.data() + num_experts_;
     gate_prob = heap_buf.data() + 2 * num_experts_;
@@ -3983,7 +4061,6 @@ void MixtureGBDT::PredictByMap(const std::unordered_map<int, double>& features, 
   // Stack buffers for K ≤ 64 — same per-row rationale as Predict() above;
   // this is the per-row path for map-based (sparse single-row) prediction.
   double stack_buf[3 * 64];
-  std::vector<double> heap_buf;
   double* expert_preds;
   double* gate_raw;
   double* gate_prob;
@@ -3992,7 +4069,9 @@ void MixtureGBDT::PredictByMap(const std::unordered_map<int, double>& features, 
     gate_raw = stack_buf + num_experts_;
     gate_prob = stack_buf + 2 * num_experts_;
   } else {
-    heap_buf.resize(3 * static_cast<size_t>(num_experts_));
+    static thread_local std::vector<double> heap_buf;
+    const size_t required = 3 * static_cast<size_t>(num_experts_);
+    if (heap_buf.size() < required) heap_buf.resize(required);
     expert_preds = heap_buf.data();
     gate_raw = heap_buf.data() + num_experts_;
     gate_prob = heap_buf.data() + 2 * num_experts_;
@@ -4019,28 +4098,27 @@ void MixtureGBDT::PredictRawByMap(const std::unordered_map<int, double>& feature
 }
 
 void MixtureGBDT::PredictRegime(const double* features, int* output) const {
-  // Stack buffers for K <= 64 — called once per row from the C API loop.
-  double stack_buf[2 * 64];
-  std::vector<double> heap_buf;
+  // argmax(softmax((z+b)/T)) == argmax(z+b) for positive T. Avoid K exp()
+  // calls, normalization, and a second K-sized buffer on every row.
+  double stack_buf[64];
   double* gate_raw;
-  double* gate_prob;
   if (num_experts_ <= 64) {
     gate_raw = stack_buf;
-    gate_prob = stack_buf + num_experts_;
   } else {
-    heap_buf.resize(2 * static_cast<size_t>(num_experts_));
+    static thread_local std::vector<double> heap_buf;
+    if (heap_buf.size() < static_cast<size_t>(num_experts_)) {
+      heap_buf.resize(num_experts_);
+    }
     gate_raw = heap_buf.data();
-    gate_prob = heap_buf.data() + num_experts_;
   }
   gate_->PredictRaw(features, gate_raw, &NoEarlyStopInstance());
-  ComputeGateProbForInference(gate_raw, gate_prob);
 
-  // Find argmax
   int best_k = 0;
-  double best_p = gate_prob[0];
+  double best_score = gate_raw[0] + expert_bias_[0];
   for (int k = 1; k < num_experts_; ++k) {
-    if (gate_prob[k] > best_p) {
-      best_p = gate_prob[k];
+    const double score = gate_raw[k] + expert_bias_[k];
+    if (score > best_score) {
+      best_score = score;
       best_k = k;
     }
   }
@@ -4049,12 +4127,14 @@ void MixtureGBDT::PredictRegime(const double* features, int* output) const {
 
 void MixtureGBDT::PredictRegimeProba(const double* features, double* output) const {
   double gate_raw_buf[64];
-  std::vector<double> heap_buf;
   double* gate_raw;
   if (num_experts_ <= 64) {
     gate_raw = gate_raw_buf;
   } else {
-    heap_buf.resize(num_experts_);
+    static thread_local std::vector<double> heap_buf;
+    if (heap_buf.size() < static_cast<size_t>(num_experts_)) {
+      heap_buf.resize(num_experts_);
+    }
     gate_raw = heap_buf.data();
   }
   gate_->PredictRaw(features, gate_raw, &NoEarlyStopInstance());
@@ -4067,22 +4147,63 @@ void MixtureGBDT::PredictExpertPred(const double* features, double* output) cons
   }
 }
 
+void MixtureGBDT::PredictWithGateProba(const double* features,
+                                       const double* gate_proba,
+                                       double* output) const {
+  double sum = 0.0;
+  for (int k = 0; k < num_experts_; ++k) {
+    double expert_pred;
+    experts_[k]->Predict(features, &expert_pred, &NoEarlyStopInstance());
+    sum += gate_proba[k] * expert_pred;
+  }
+  *output = sum;
+}
+
+void MixtureGBDT::ApplyMarkovSmoothing(int32_t num_rows,
+                                        double* probabilities) const {
+  if (!use_markov_ || num_rows <= 1) return;
+  const double lambda = config_->mixture_smoothing_lambda;
+  if (lambda <= 0.0) return;
+
+  // Work backwards so row i-1 is still the unsmoothed gate output when row i
+  // consumes it. This exactly matches Forward()'s one-step prior and needs no
+  // second N x K buffer.
+  for (int32_t i = num_rows - 1; i >= 1; --i) {
+    double sum = 0.0;
+    const size_t cur_off = static_cast<size_t>(i) * num_experts_;
+    const size_t prev_off = static_cast<size_t>(i - 1) * num_experts_;
+    for (int k = 0; k < num_experts_; ++k) {
+      probabilities[cur_off + k] =
+          (1.0 - lambda) * probabilities[cur_off + k]
+          + lambda * probabilities[prev_off + k];
+      sum += probabilities[cur_off + k];
+    }
+    const double inv_sum = 1.0 / std::max(sum, kMixtureEpsilon);
+    for (int k = 0; k < num_experts_; ++k) {
+      probabilities[cur_off + k] *= inv_sum;
+    }
+  }
+}
+
 void MixtureGBDT::PredictWithPrevProba(const double* features, const double* prev_proba,
                                         double* output) const {
   const PredictionEarlyStopInstance* early_stop_ptr = &NoEarlyStopInstance();
 
-  // Get expert predictions
-  std::vector<double> expert_preds(num_experts_);
+  // One per-thread allocation for this legacy single-row entry point.
+  static thread_local std::vector<double> buffers;
+  const size_t required = 3 * static_cast<size_t>(num_experts_);
+  if (buffers.size() < required) buffers.resize(required);
+  double* expert_preds = buffers.data();
+  double* gate_raw = expert_preds + num_experts_;
+  double* gate_prob = gate_raw + num_experts_;
+
   for (int k = 0; k < num_experts_; ++k) {
     experts_[k]->Predict(features, &expert_preds[k], early_stop_ptr);
   }
 
   // Get current gate probabilities
-  std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRaw(features, gate_raw.data(), early_stop_ptr);
-
-  std::vector<double> gate_prob(num_experts_);
-  ComputeGateProbForInference(gate_raw.data(), gate_prob.data());
+  gate_->PredictRaw(features, gate_raw, early_stop_ptr);
+  ComputeGateProbForInference(gate_raw, gate_prob);
 
   // Blend with prev_proba if provided and in Markov mode
   if (use_markov_ && prev_proba != nullptr) {
@@ -4111,9 +4232,17 @@ void MixtureGBDT::PredictWithPrevProba(const double* features, const double* pre
 void MixtureGBDT::PredictRegimeProbaWithPrevProba(const double* features, const double* prev_proba,
                                                    double* output) const {
   // Get current gate probabilities
-  std::vector<double> gate_raw(num_experts_);
-  gate_->PredictRaw(features, gate_raw.data(), &NoEarlyStopInstance());
-  ComputeGateProbForInference(gate_raw.data(), output);
+  double stack_buf[64];
+  double* gate_raw = stack_buf;
+  if (num_experts_ > 64) {
+    static thread_local std::vector<double> heap_buf;
+    if (heap_buf.size() < static_cast<size_t>(num_experts_)) {
+      heap_buf.resize(num_experts_);
+    }
+    gate_raw = heap_buf.data();
+  }
+  gate_->PredictRaw(features, gate_raw, &NoEarlyStopInstance());
+  ComputeGateProbForInference(gate_raw, output);
 
   // Blend with prev_proba if provided and in Markov mode
   if (use_markov_ && prev_proba != nullptr) {
@@ -4313,17 +4442,12 @@ void MixtureGBDT::AddValidDataset(const Dataset* valid_data,
   data_size_t num_valid = valid_data->num_data();
   size_t nk_valid = static_cast<size_t>(num_valid) * num_experts_;
 
-  // Allocate validation buffers for this dataset
-  expert_pred_valid_.emplace_back(nk_valid, 0.0);
+  // Allocate validation buffers for this dataset. Expert predictions are
+  // consumed one expert at a time, so their scratch is N rather than N*K.
+  expert_pred_valid_.emplace_back(num_valid, 0.0);
   gate_proba_valid_.emplace_back(nk_valid, 0.0);
   gate_raw_valid_.emplace_back(nk_valid, 0.0);
   yhat_valid_.emplace_back(num_valid, 0.0);
-
-  // Initialize Markov buffers if needed
-  if (use_markov_) {
-    const double uniform_prob = 1.0 / num_experts_;
-    prev_gate_proba_valid_.emplace_back(nk_valid, uniform_prob);
-  }
 
   // Add validation data to each expert and gate (they will manage their own ScoreUpdaters)
   if (use_progressive_ && !seed_phase_complete_) {
@@ -4387,22 +4511,7 @@ bool MixtureGBDT::SaveModelToIfElse(int num_iteration, const char* filename) con
   return false;
 }
 
-bool MixtureGBDT::SaveModelToFile(int start_iteration, int num_iterations,
-                                   int feature_importance_type, const char* filename) const {
-  std::string model_str = SaveModelToString(start_iteration, num_iterations, feature_importance_type);
-  if (model_str.empty()) {
-    return false;
-  }
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    return false;
-  }
-  file << model_str;
-  return true;
-}
-
-std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iterations,
-                                            int feature_importance_type) const {
+std::string MixtureGBDT::SaveMixtureHeader() const {
   std::stringstream ss;
   // Full round-trip precision for the scalar header values. Tree blocks are
   // serialized at full precision by GBDT::SaveModelToString, but the default
@@ -4446,6 +4555,40 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   }
   ss << "\n";
 
+  return ss.str();
+}
+
+bool MixtureGBDT::SaveModelToFile(int start_iteration, int num_iterations,
+                                   int feature_importance_type, const char* filename) const {
+  std::ofstream file(filename);
+  if (!file.is_open()) return false;
+
+  const int gate_start = (start_iteration > 0)
+      ? start_iteration * gate_iters_per_round_ : start_iteration;
+  const int gate_num = (num_iterations > 0)
+      ? num_iterations * gate_iters_per_round_ : num_iterations;
+
+  // Stream components one at a time. Building the aggregate string here
+  // doubled peak memory for large models and copied every byte once more.
+  file << SaveMixtureHeader();
+  file << "[gate_model]\n";
+  file << gate_->SaveModelToString(
+      gate_start, gate_num, feature_importance_type);
+  file << "\n";
+  for (int k = 0; k < num_experts_; ++k) {
+    file << "[expert_model_" << k << "]\n";
+    GBDT* component = (use_progressive_ && !seed_phase_complete_ && seed_expert_)
+        ? seed_expert_.get() : experts_[k].get();
+    file << component->SaveModelToString(
+        start_iteration, num_iterations, feature_importance_type);
+    file << "\n";
+  }
+  return static_cast<bool>(file);
+}
+
+std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iterations,
+                                            int feature_importance_type) const {
+
   // Gate model. The gate accumulates gate_iters_per_round_ GBDT iterations
   // per MoE iteration, so an iteration RANGE expressed in MoE units must be
   // scaled before it is applied to the gate — otherwise a truncated save
@@ -4462,7 +4605,7 @@ std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iteratio
   // stream's internal buffer and copied the aggregate once more in
   // ss.str(); appending component strings scoped one at a time keeps the
   // peak at ~one model plus a single component.
-  std::string result = ss.str();
+  std::string result = SaveMixtureHeader();
   result += "[gate_model]\n";
   {
     std::string gate_str =
@@ -4805,6 +4948,27 @@ std::vector<std::string> MixtureGBDT::FeatureNames() const {
 
 int MixtureGBDT::LabelIdx() const {
   return label_idx_;
+}
+
+int64_t MixtureGBDT::TotalNumLeaves() const {
+  auto component_leaves = [](const GBDT* model) {
+    int64_t total = 0;
+    for (int t = 0; t < model->NumberOfTotalModel(); ++t) {
+      total += model->GetNumLeavesForTree(t);
+    }
+    return total;
+  };
+
+  int64_t total = gate_ ? component_leaves(gate_.get()) : 0;
+  if (use_progressive_ && !seed_phase_complete_ && seed_expert_) {
+    total += static_cast<int64_t>(num_experts_)
+             * component_leaves(seed_expert_.get());
+  } else {
+    for (const auto& expert : experts_) {
+      total += component_leaves(expert.get());
+    }
+  }
+  return total;
 }
 
 int MixtureGBDT::NumberOfTotalModel() const {

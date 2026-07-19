@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 import lightgbm_moe as lgb
+from lightgbm_moe.auto_k import _count_leaves_from_model_str
 
 
 def make_toy_regression_data(n_samples=500, n_features=10, n_regimes=2, random_state=42):
@@ -179,6 +180,58 @@ class TestMixturePrediction:
 
         assert bst.is_mixture() is True
         assert bst.num_experts() == 3
+
+    def test_native_leaf_count_matches_serialized_model(self, trained_mixture_model):
+        """Auto-K's native leaf count is identical to the old text scan."""
+        bst, _ = trained_mixture_model
+        assert bst._mixture_num_leaves() == _count_leaves_from_model_str(bst.model_to_string())
+
+
+class TestMixtureMarkovPrediction:
+    """Test the fused native Markov prediction paths."""
+
+    @pytest.fixture
+    def markov_model(self):
+        X, y, _ = make_toy_regression_data(n_samples=180, random_state=19)
+        params = {
+            "boosting": "mixture",
+            "mixture_enable": True,
+            "mixture_num_experts": 3,
+            "mixture_r_smoothing": "markov",
+            "mixture_smoothing_lambda": 0.35,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 8,
+            "num_threads": 1,
+        }
+        return lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=12), X
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_markov_probabilities_match_native_one_step_recurrence(self, markov_model, dtype):
+        bst, X = markov_model
+        X = X.astype(dtype)
+        base = bst.predict_regime_proba(X)
+        expected = base.copy()
+        expected[1:] = 0.65 * base[1:] + 0.35 * base[:-1]
+        expected[1:] /= expected[1:].sum(axis=1, keepdims=True)
+
+        actual = bst.predict_regime_proba_markov(X)
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+    def test_fused_markov_prediction_matches_component_result(self, markov_model):
+        bst, X = markov_model
+        expected = np.einsum(
+            "ij,ij->i",
+            bst.predict_regime_proba_markov(X),
+            bst.predict_expert_pred(X),
+        )
+        np.testing.assert_allclose(bst.predict_markov(X), expected, rtol=1e-12, atol=1e-12)
+
+    def test_empty_markov_prediction(self, markov_model):
+        bst, X = markov_model
+        empty = X[:0]
+        assert bst.predict_regime_proba_markov(empty).shape == (0, 3)
+        assert bst.predict_markov(empty).shape == (0,)
 
 
 class TestMixtureSaveLoad:

@@ -346,7 +346,7 @@ def train(
     for result in evaluation_result_list:
         booster.best_score[result.dataset_name][result.metric_name] = result.metric_value
     if not keep_training_booster:
-        booster.model_from_string(booster.model_to_string()).free_dataset()
+        booster._compact_for_prediction()
     return booster
 
 

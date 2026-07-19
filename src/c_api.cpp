@@ -2097,6 +2097,21 @@ int LGBM_BoosterLoadModelFromString(
   API_END();
 }
 
+int LGBM_BoosterCreateForPrediction(BoosterHandle handle,
+                                     int start_iteration,
+                                     int num_iteration,
+                                     int feature_importance_type,
+                                     BoosterHandle* out) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  std::string model = ref_booster->SaveModelToString(
+      start_iteration, num_iteration, feature_importance_type);
+  auto ret = std::unique_ptr<Booster>(new Booster(nullptr));
+  ret->LoadModelFromString(model.c_str());
+  *out = ret.release();
+  API_END();
+}
+
 int LGBM_BoosterGetLoadedParam(
   BoosterHandle handle,
   int64_t buffer_len,
@@ -2842,6 +2857,29 @@ int LGBM_BoosterSaveModelToString(BoosterHandle handle,
   API_END();
 }
 
+int LGBM_BoosterSaveModelToStringAlloc(BoosterHandle handle,
+                                        int start_iteration,
+                                        int num_iteration,
+                                        int feature_importance_type,
+                                        int64_t* out_len,
+                                        char** out_str) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  std::string model = ref_booster->SaveModelToString(
+      start_iteration, num_iteration, feature_importance_type);
+  *out_len = static_cast<int64_t>(model.size()) + 1;
+  std::unique_ptr<char[]> buffer(new char[static_cast<size_t>(*out_len)]);
+  std::memcpy(buffer.get(), model.c_str(), static_cast<size_t>(*out_len));
+  *out_str = buffer.release();
+  API_END();
+}
+
+int LGBM_BoosterFreeModelString(char* model_str) {
+  API_BEGIN();
+  delete[] model_str;
+  API_END();
+}
+
 int LGBM_BoosterDumpModel(BoosterHandle handle,
                           int start_iteration,
                           int num_iteration,
@@ -2973,6 +3011,19 @@ int LGBM_BoosterGetNumExperts(BoosterHandle handle, int* out_num_experts) {
   API_END();
 }
 
+int LGBM_BoosterGetMixtureNumLeaves(BoosterHandle handle,
+                                     int64_t* out_num_leaves) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(
+      ref_booster->GetBoosting());
+  if (mixture == nullptr) {
+    Log::Fatal("LGBM_BoosterGetMixtureNumLeaves can only be used with MoE models");
+  }
+  *out_num_leaves = mixture->TotalNumLeaves();
+  API_END();
+}
+
 int LGBM_BoosterIsMixture(BoosterHandle handle, int* out_is_mixture) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
@@ -3087,6 +3138,75 @@ int LGBM_BoosterPredictRegimeProba(BoosterHandle handle,
     total = static_cast<int64_t>(nrow) * (mixture != nullptr ? mixture->NumExperts() : 0);
   }
   *out_len = total;
+  API_END();
+}
+
+int LGBM_BoosterPredictRegimeProbaMarkov(BoosterHandle handle,
+                                          const void* data,
+                                          int data_type,
+                                          int32_t nrow,
+                                          int32_t ncol,
+                                          int is_row_major,
+                                          const char* parameter,
+                                          int64_t* out_len,
+                                          double* out_result) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  auto get_row = MoERowAccessor(data, nrow, ncol, data_type, is_row_major);
+  ref_booster->PredictMoERows(
+      nrow, ncol, parameter, "LGBM_BoosterPredictRegimeProbaMarkov",
+      [&get_row, out_result](const LightGBM::MixtureGBDT* mixture, int32_t i,
+                             double* scratch) {
+        const double* row = get_row(i, scratch);
+        mixture->PredictRegimeProba(
+            row, out_result + static_cast<size_t>(i) * mixture->NumExperts());
+      });
+  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(
+      ref_booster->GetBoosting());
+  mixture->ApplyMarkovSmoothing(nrow, out_result);
+  *out_len = static_cast<int64_t>(nrow) * mixture->NumExperts();
+  API_END();
+}
+
+int LGBM_BoosterPredictMarkov(BoosterHandle handle,
+                               const void* data,
+                               int data_type,
+                               int32_t nrow,
+                               int32_t ncol,
+                               int is_row_major,
+                               const char* parameter,
+                               int64_t* out_len,
+                               double* out_result) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  auto mixture = dynamic_cast<const LightGBM::MixtureGBDT*>(
+      ref_booster->GetBoosting());
+  if (mixture == nullptr) {
+    Log::Fatal("LGBM_BoosterPredictMarkov can only be used with MoE models");
+  }
+  const int num_experts = mixture->NumExperts();
+  std::vector<double> gate_proba(
+      static_cast<size_t>(nrow) * num_experts);
+  auto get_row = MoERowAccessor(data, nrow, ncol, data_type, is_row_major);
+  ref_booster->PredictMoERows(
+      nrow, ncol, parameter, "LGBM_BoosterPredictMarkov(gate)",
+      [&get_row, &gate_proba](const LightGBM::MixtureGBDT* model, int32_t i,
+                              double* scratch) {
+        const double* row = get_row(i, scratch);
+        model->PredictRegimeProba(
+            row, gate_proba.data() + static_cast<size_t>(i) * model->NumExperts());
+      });
+  mixture->ApplyMarkovSmoothing(nrow, gate_proba.data());
+  ref_booster->PredictMoERows(
+      nrow, ncol, parameter, "LGBM_BoosterPredictMarkov(experts)",
+      [&get_row, &gate_proba, out_result](
+          const LightGBM::MixtureGBDT* model, int32_t i, double* scratch) {
+        const double* row = get_row(i, scratch);
+        model->PredictWithGateProba(
+            row, gate_proba.data() + static_cast<size_t>(i) * model->NumExperts(),
+            out_result + i);
+      });
+  *out_len = nrow;
   API_END();
 }
 
