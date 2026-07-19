@@ -5353,9 +5353,13 @@ class Booster:
             out_result = np.empty((nrow, num_experts), dtype=np.float64)
             # First sample: use base probabilities
             out_result[0] = base_proba[0]
-            # Subsequent samples: blend with previous
+            # Subsequent samples: blend with previous. The recurrence is
+            # inherently sequential; reuse one scratch row instead of
+            # allocating several temporaries per row.
+            blended = np.empty(num_experts, dtype=np.float64)
             for i in range(1, nrow):
-                blended = (1.0 - lambda_val) * base_proba[i] + lambda_val * out_result[i - 1]
+                np.multiply(base_proba[i], 1.0 - lambda_val, out=blended)
+                blended += lambda_val * out_result[i - 1]
                 blended /= blended.sum()  # Renormalize
                 out_result[i] = blended
             return out_result
@@ -5403,18 +5407,26 @@ class Booster:
         if not self.is_mixture():
             raise LightGBMError("predict_markov can only be used with MoE models")
 
+        # Convert the input ONCE and pass the resulting ndarray to both
+        # sub-calls: their own _moe_data_to_array becomes a no-op on an
+        # already-contiguous array. Passing the raw input instead would
+        # materialize the N x F matrix twice (DataFrame conversion in
+        # particular is a full copy each time).
+        data_array = self._moe_data_to_array(data)
+
         # Get expert predictions
         expert_preds = self.predict_expert_pred(
-            data, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
+            data_array, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
         )  # (nrow, n_experts)
 
         # Get Markov-smoothed regime probabilities
         regime_proba = self.predict_regime_proba_markov(
-            data, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
+            data_array, start_iteration=start_iteration, num_iteration=num_iteration, **kwargs
         )  # (nrow, n_experts)
 
-        # Weighted sum: prediction = sum_k(proba[k] * expert[k])
-        return (regime_proba * expert_preds).sum(axis=1)
+        # Weighted sum: prediction = sum_k(proba[k] * expert[k]) without
+        # materializing the intermediate N x K product array.
+        return np.einsum("ij,ij->i", regime_proba, expert_preds)
 
     def _extract_gate_model_string(self) -> str:
         """Extract gate model section from MoE model string.
