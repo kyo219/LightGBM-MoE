@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
@@ -686,109 +687,115 @@ void MixtureGBDT::InitResponsibilities() {
   BreakUniformSymmetryIfNeeded();
 }
 
-void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
-                                                     bool include_label) {
-  // Balanced K-Means with optional label dimension.
-  // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment.
-  //
-  // Algorithm:
-  // 1. Initialize centroids using K-means++
-  // 2. Iterate: assign samples to nearest centroid
-  // 3. Balance: ensure each cluster has exactly N/K samples (greedy)
-  //
-  // include_label=true:  cluster on (features ⊕ label) — biased toward y
-  // include_label=false: cluster on features only — true regime discovery
-  //
-  // Feature values are read via Dataset::FeatureIterator, which returns the
-  // *bin* index for each (feature, sample) pair. The previous implementation
-  // used Dataset::raw_index(f), which is null whenever the dataset wasn't
-  // created with keep_raw_data=true (the LightGBM default is false). With
-  // raw features unavailable, the code emitted a warning and silently fell
-  // back to labels-only clustering — the "K-means on features" mode was
-  // never actually K-means on features for the typical user. Bin indices
-  // are an int discretization of the continuous features (typically 256
-  // bins), which is sufficient resolution for K-means seeding of K experts
-  // and is available regardless of keep_raw_data. The z-score
-  // normalization below absorbs the per-feature scale of the bins.
+namespace {
 
-  const int K = num_experts_;
-  const data_size_t N = num_data_;
-  const int max_iters = 20;
+// Compact design matrix for the K-Means / GMM initializers.
+//
+// Feature values come from Dataset::FeatureIterator as bin indices, i.e.
+// small integers bounded by FeatureNumBin(f). Materializing them as a dense
+// N x D double matrix costs 8 bytes per element (~5.3 GB per fit at
+// 177k rows x 3.7k features) and scales with the number of concurrent fits.
+// Bin indices fit in 1-2 bytes and the z-score normalization only needs the
+// per-dimension mean / std, so the matrix is stored in the narrowest integer
+// type that fits and normalized on the fly: (v - mean[d]) * inv_std[d].
+// The label column (when present) stays as a separate double vector (N x 8B).
+template <typename BinT>
+struct CompactBinMatrix {
+  std::vector<BinT> bins;       // N x num_features, row-major bin indices
+  std::vector<double> label;    // N label values when the label is a column
+  std::vector<double> mean;     // D
+  std::vector<double> inv_std;  // D
+  int num_features = 0;
+  int D = 0;
 
-  const int num_features = train_data_->num_features();
-  const int D = num_features + (include_label ? 1 : 0);
-  if (D == 0) {
-    Log::Warning("MixtureGBDT: Cannot run Balanced K-Means with 0 dimensions, "
-                 "falling back to uniform responsibilities");
-    const double uniform_r = 1.0 / num_experts_;
-    for (data_size_t i = 0; i < N; ++i) {
-      for (int k = 0; k < num_experts_; ++k) {
-        responsibilities_[i * num_experts_ + k] = uniform_r;
-      }
-    }
-    return;
+  inline double Raw(data_size_t i, int d) const {
+    return d < num_features
+               ? static_cast<double>(
+                     bins[static_cast<size_t>(i) * num_features + d])
+               : label[i];
   }
-
-  std::vector<double> X(static_cast<size_t>(N) * D);
-  std::vector<double> feat_mean(D, 0.0);
-  // Accumulators start at 0; the old init of 1.0 leaked into the variance
-  // sum and inflated every per-dim std by sqrt(1/N) worth of bias.
-  std::vector<double> feat_std(D, 0.0);
-
-  std::vector<BinIterator*> iters(num_features, nullptr);
-  for (int f = 0; f < num_features; ++f) {
-    iters[f] = train_data_->FeatureIterator(f);
+  inline double Get(data_size_t i, int d) const {
+    return (Raw(i, d) - mean[d]) * inv_std[d];
   }
+};
 
+template <typename BinT>
+CompactBinMatrix<BinT> BuildCompactBinMatrix(const Dataset* train_data,
+                                             const label_t* labels,
+                                             bool include_label,
+                                             data_size_t N) {
+  CompactBinMatrix<BinT> m;
+  m.num_features = train_data->num_features();
+  m.D = m.num_features + (include_label ? 1 : 0);
+  m.bins.resize(static_cast<size_t>(N) * m.num_features);
+  if (include_label) m.label.resize(N);
+
+  std::vector<BinIterator*> iters(m.num_features, nullptr);
+  for (int f = 0; f < m.num_features; ++f) {
+    iters[f] = train_data->FeatureIterator(f);
+  }
   for (data_size_t i = 0; i < N; ++i) {
-    for (int f = 0; f < num_features; ++f) {
-      const double v = static_cast<double>(iters[f]->RawGet(i));
-      X[i * D + f] = v;
-      feat_mean[f] += v;
+    for (int f = 0; f < m.num_features; ++f) {
+      m.bins[static_cast<size_t>(i) * m.num_features + f] =
+          static_cast<BinT>(iters[f]->RawGet(i));
     }
     if (include_label) {
-      X[i * D + num_features] = static_cast<double>(labels[i]);
-      feat_mean[num_features] += X[i * D + num_features];
+      m.label[i] = static_cast<double>(labels[i]);
     }
   }
-
   for (BinIterator* p : iters) {
     delete p;
   }
 
-  // Compute means
-  for (int d = 0; d < D; ++d) {
-    feat_mean[d] /= N;
-  }
-
-  // Compute standard deviations
+  m.mean.assign(m.D, 0.0);
+  std::vector<double> stddev(m.D, 0.0);
   for (data_size_t i = 0; i < N; ++i) {
-    for (int d = 0; d < D; ++d) {
-      double diff = X[i * D + d] - feat_mean[d];
-      feat_std[d] += diff * diff;
+    for (int d = 0; d < m.D; ++d) {
+      m.mean[d] += m.Raw(i, d);
     }
   }
-  for (int d = 0; d < D; ++d) {
-    feat_std[d] = std::sqrt(feat_std[d] / N);
-    if (feat_std[d] < 1e-10) feat_std[d] = 1.0;  // Avoid division by zero
+  for (int d = 0; d < m.D; ++d) {
+    m.mean[d] /= N;
   }
-
-  // Normalize features (z-score)
   for (data_size_t i = 0; i < N; ++i) {
-    for (int d = 0; d < D; ++d) {
-      X[i * D + d] = (X[i * D + d] - feat_mean[d]) / feat_std[d];
+    for (int d = 0; d < m.D; ++d) {
+      const double diff = m.Raw(i, d) - m.mean[d];
+      stddev[d] += diff * diff;
     }
   }
+  m.inv_std.assign(m.D, 1.0);
+  for (int d = 0; d < m.D; ++d) {
+    const double s = std::sqrt(stddev[d] / N);
+    // Constant dimensions get scale 1 to avoid division by zero
+    m.inv_std[d] = (s < 1e-10) ? 1.0 : 1.0 / s;
+  }
+  return m;
+}
+
+// Widest bin index the dataset uses decides the storage type.
+inline int MaxFeatureNumBin(const Dataset* train_data) {
+  int max_num_bin = 0;
+  for (int f = 0; f < train_data->num_features(); ++f) {
+    max_num_bin = std::max(max_num_bin, train_data->FeatureNumBin(f));
+  }
+  return max_num_bin;
+}
+
+template <typename BinT>
+void BalancedKMeansImpl(const CompactBinMatrix<BinT>& X, int K,
+                        data_size_t N, int max_iters, uint32_t seed,
+                        int num_experts, double* responsibilities) {
+  const int D = X.D;
 
   // Initialize centroids using K-means++
   std::vector<double> centroids(static_cast<size_t>(K) * D, 0.0);
-  std::mt19937 rng(config_->seed);
+  std::mt19937 rng(seed);
 
   // First centroid: random sample
   std::uniform_int_distribution<data_size_t> sample_dist(0, N - 1);
   data_size_t first_idx = sample_dist(rng);
   for (int d = 0; d < D; ++d) {
-    centroids[0 * D + d] = X[first_idx * D + d];
+    centroids[0 * D + d] = X.Get(first_idx, d);
   }
 
   // Remaining centroids: K-means++ (proportional to squared distance)
@@ -799,7 +806,7 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
     for (data_size_t i = 0; i < N; ++i) {
       double dist_sq = 0.0;
       for (int d = 0; d < D; ++d) {
-        double diff = X[i * D + d] - centroids[(k - 1) * D + d];
+        double diff = X.Get(i, d) - centroids[(k - 1) * D + d];
         dist_sq += diff * diff;
       }
       min_dist_sq[i] = std::min(min_dist_sq[i], dist_sq);
@@ -819,7 +826,7 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
       }
     }
     for (int d = 0; d < D; ++d) {
-      centroids[k * D + d] = X[next_idx * D + d];
+      centroids[k * D + d] = X.Get(next_idx, d);
     }
   }
 
@@ -834,7 +841,7 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
       for (int k = 0; k < K; ++k) {
         double dist_sq = 0.0;
         for (int d = 0; d < D; ++d) {
-          double diff = X[i * D + d] - centroids[k * D + d];
+          double diff = X.Get(i, d) - centroids[k * D + d];
           dist_sq += diff * diff;
         }
         distances[i * K + k] = dist_sq;
@@ -901,7 +908,7 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
     for (data_size_t i = 0; i < N; ++i) {
       int k = assignments[i];
       for (int d = 0; d < D; ++d) {
-        new_centroids[k * D + d] += X[i * D + d];
+        new_centroids[k * D + d] += X.Get(i, d);
       }
       counts[k]++;
     }
@@ -938,9 +945,9 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
     int assigned_k = assignments[i];
     for (int k = 0; k < K; ++k) {
       if (k == assigned_k) {
-        responsibilities_[i * num_experts_ + k] = main_r + base_r;
+        responsibilities[i * num_experts + k] = main_r + base_r;
       } else {
-        responsibilities_[i * num_experts_ + k] = base_r;
+        responsibilities[i * num_experts + k] = base_r;
       }
     }
   }
@@ -958,90 +965,11 @@ void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
   Log::Info("MixtureGBDT: Balanced K-Means cluster sizes = [%s]", count_str.c_str());
 }
 
-void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
-                                          bool include_label) {
-  // Gaussian Mixture Model initialization
-  // Reference: Classical MoE (Jacobs et al., 1991)
-  //
-  // Algorithm:
-  // 1. Initialize with K-means centroids
-  // 2. EM iterations:
-  //    E-step: compute posterior probabilities (responsibilities)
-  //    M-step: update means, variances, mixing coefficients
-  // 3. Final posteriors become the initial responsibilities
-  //
-  // Feature values are read via Dataset::FeatureIterator (bin indices), the
-  // same fix used for InitResponsibilitiesBalancedKMeans — see that
-  // function for the rationale on why raw_index() was wrong by default.
-
-  const int K = num_experts_;
-  const data_size_t N = num_data_;
-  const int max_iters = 30;  // EM iterations
-  const double min_variance = 1e-6;  // Prevent collapse
-
-  const int num_features = train_data_->num_features();
-  const int D = num_features + (include_label ? 1 : 0);
-  if (D == 0) {
-    Log::Warning("MixtureGBDT: Cannot run GMM with 0 dimensions, falling "
-                 "back to uniform responsibilities");
-    const double uniform_r = 1.0 / num_experts_;
-    for (data_size_t i = 0; i < N; ++i) {
-      for (int k = 0; k < num_experts_; ++k) {
-        responsibilities_[i * num_experts_ + k] = uniform_r;
-      }
-    }
-    return;
-  }
-
-  std::vector<double> X(static_cast<size_t>(N) * D);
-
-  std::vector<BinIterator*> iters(num_features, nullptr);
-  for (int f = 0; f < num_features; ++f) {
-    iters[f] = train_data_->FeatureIterator(f);
-  }
-
-  for (data_size_t i = 0; i < N; ++i) {
-    for (int f = 0; f < num_features; ++f) {
-      X[i * D + f] = static_cast<double>(iters[f]->RawGet(i));
-    }
-    if (include_label) {
-      X[i * D + num_features] = static_cast<double>(labels[i]);
-    }
-  }
-
-  for (BinIterator* p : iters) {
-    delete p;
-  }
-
-  // Compute global mean and std for normalization
-  std::vector<double> global_mean(D, 0.0);
-  std::vector<double> global_std(D, 0.0);
-
-  for (data_size_t i = 0; i < N; ++i) {
-    for (int d = 0; d < D; ++d) {
-      global_mean[d] += X[i * D + d];
-    }
-  }
-  for (int d = 0; d < D; ++d) {
-    global_mean[d] /= N;
-  }
-  for (data_size_t i = 0; i < N; ++i) {
-    for (int d = 0; d < D; ++d) {
-      double diff = X[i * D + d] - global_mean[d];
-      global_std[d] += diff * diff;
-    }
-  }
-  for (int d = 0; d < D; ++d) {
-    global_std[d] = std::sqrt(global_std[d] / N);
-    if (global_std[d] < 1e-10) global_std[d] = 1.0;
-  }
-
-  // Normalize
-  for (data_size_t i = 0; i < N; ++i) {
-    for (int d = 0; d < D; ++d) {
-      X[i * D + d] = (X[i * D + d] - global_mean[d]) / global_std[d];
-    }
-  }
+template <typename BinT>
+void GMMInitImpl(const CompactBinMatrix<BinT>& X, int K, data_size_t N,
+                 int max_iters, double min_variance, int num_experts,
+                 double* responsibilities) {
+  const int D = X.D;
 
   // Initialize GMM parameters using quantile-based seeding
   // (sort by first feature or label, then place centroids at quantile positions)
@@ -1055,14 +983,14 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
   std::iota(sorted_idx.begin(), sorted_idx.end(), 0);
   std::sort(sorted_idx.begin(), sorted_idx.end(),
             [&X, D](data_size_t a, data_size_t b) {
-              return X[a * D + D - 1] < X[b * D + D - 1];
+              return X.Get(a, D - 1) < X.Get(b, D - 1);
             });
 
   // Place initial means at quantile positions
   for (int k = 0; k < K; ++k) {
     data_size_t quantile_idx = sorted_idx[(k * N + N / 2) / K];
     for (int d = 0; d < D; ++d) {
-      means[k * D + d] = X[quantile_idx * D + d];
+      means[k * D + d] = X.Get(quantile_idx, d);
       variances[k * D + d] = 1.0;  // Initial variance = 1 (normalized data)
     }
   }
@@ -1082,7 +1010,7 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
         double log_p = std::log(weights[k] + 1e-300);
         for (int d = 0; d < D; ++d) {
           double var_k = std::max(variances[k * D + d], min_variance);
-          double diff = X[i * D + d] - means[k * D + d];
+          double diff = X.Get(i, d) - means[k * D + d];
           log_p -= 0.5 * std::log(2.0 * M_PI * var_k);
           log_p -= 0.5 * diff * diff / var_k;
         }
@@ -1112,7 +1040,7 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
         double g = gamma[i * K + k];
         N_k[k] += g;
         for (int d = 0; d < D; ++d) {
-          new_means[k * D + d] += g * X[i * D + d];
+          new_means[k * D + d] += g * X.Get(i, d);
         }
       }
     }
@@ -1129,7 +1057,7 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
       for (int k = 0; k < K; ++k) {
         double g = gamma[i * K + k];
         for (int d = 0; d < D; ++d) {
-          double diff = X[i * D + d] - new_means[k * D + d];
+          double diff = X.Get(i, d) - new_means[k * D + d];
           new_variances[k * D + d] += g * diff * diff;
         }
       }
@@ -1175,15 +1103,15 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
   for (data_size_t i = 0; i < N; ++i) {
     for (int k = 0; k < K; ++k) {
       // Ensure minimum responsibility
-      responsibilities_[i * num_experts_ + k] = std::max(gamma[i * K + k], 0.01 / K);
+      responsibilities[i * num_experts + k] = std::max(gamma[i * K + k], 0.01 / K);
     }
     // Renormalize
     double sum = 0.0;
     for (int k = 0; k < K; ++k) {
-      sum += responsibilities_[i * num_experts_ + k];
+      sum += responsibilities[i * num_experts + k];
     }
     for (int k = 0; k < K; ++k) {
-      responsibilities_[i * num_experts_ + k] /= sum;
+      responsibilities[i * num_experts + k] /= sum;
     }
   }
 
@@ -1195,6 +1123,120 @@ void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
   }
   Log::Info("MixtureGBDT: GMM mixing weights = [%s]", weight_str.c_str());
 }
+
+}  // anonymous namespace
+
+void MixtureGBDT::InitResponsibilitiesBalancedKMeans(const label_t* labels,
+                                                     bool include_label) {
+  // Balanced K-Means with optional label dimension.
+  // Reference: MoEfication (ACL 2022) uses Balanced K-Means for expert assignment.
+  //
+  // Algorithm:
+  // 1. Initialize centroids using K-means++
+  // 2. Iterate: assign samples to nearest centroid
+  // 3. Balance: ensure each cluster has exactly N/K samples (greedy)
+  //
+  // include_label=true:  cluster on (features + label) - biased toward y
+  // include_label=false: cluster on features only - true regime discovery
+  //
+  // Feature values are read via Dataset::FeatureIterator, which returns the
+  // *bin* index for each (feature, sample) pair. The previous implementation
+  // used Dataset::raw_index(f), which is null whenever the dataset wasn't
+  // created with keep_raw_data=true (the LightGBM default is false). With
+  // raw features unavailable, the code emitted a warning and silently fell
+  // back to labels-only clustering - the "K-means on features" mode was
+  // never actually K-means on features for the typical user. Bin indices
+  // are an int discretization of the continuous features (typically 256
+  // bins), which is sufficient resolution for K-means seeding of K experts
+  // and is available regardless of keep_raw_data. The z-score
+  // normalization below absorbs the per-feature scale of the bins.
+
+  const int K = num_experts_;
+  const data_size_t N = num_data_;
+  const int max_iters = 20;
+
+  const int num_features = train_data_->num_features();
+  const int D = num_features + (include_label ? 1 : 0);
+  if (D == 0) {
+    Log::Warning("MixtureGBDT: Cannot run Balanced K-Means with 0 dimensions, "
+                 "falling back to uniform responsibilities");
+    const double uniform_r = 1.0 / num_experts_;
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] = uniform_r;
+      }
+    }
+    return;
+  }
+
+  const uint32_t seed = static_cast<uint32_t>(config_->seed);
+  const int max_num_bin = MaxFeatureNumBin(train_data_);
+  if (max_num_bin <= 256) {
+    BalancedKMeansImpl(
+        BuildCompactBinMatrix<uint8_t>(train_data_, labels, include_label, N),
+        K, N, max_iters, seed, num_experts_, responsibilities_.data());
+  } else if (max_num_bin <= 65536) {
+    BalancedKMeansImpl(
+        BuildCompactBinMatrix<uint16_t>(train_data_, labels, include_label, N),
+        K, N, max_iters, seed, num_experts_, responsibilities_.data());
+  } else {
+    BalancedKMeansImpl(
+        BuildCompactBinMatrix<uint32_t>(train_data_, labels, include_label, N),
+        K, N, max_iters, seed, num_experts_, responsibilities_.data());
+  }
+}
+
+void MixtureGBDT::InitResponsibilitiesGMM(const label_t* labels,
+                                          bool include_label) {
+  // Gaussian Mixture Model initialization
+  // Reference: Classical MoE (Jacobs et al., 1991)
+  //
+  // Algorithm:
+  // 1. Initialize with quantile-seeded centroids
+  // 2. EM iterations:
+  //    E-step: compute posterior probabilities (responsibilities)
+  //    M-step: update means, variances, mixing coefficients
+  // 3. Final posteriors become the initial responsibilities
+  //
+  // Feature values are read via Dataset::FeatureIterator (bin indices), the
+  // same fix used for InitResponsibilitiesBalancedKMeans - see that
+  // function for the rationale on why raw_index() was wrong by default.
+
+  const int K = num_experts_;
+  const data_size_t N = num_data_;
+  const int max_iters = 30;  // EM iterations
+  const double min_variance = 1e-6;  // Prevent collapse
+
+  const int num_features = train_data_->num_features();
+  const int D = num_features + (include_label ? 1 : 0);
+  if (D == 0) {
+    Log::Warning("MixtureGBDT: Cannot run GMM with 0 dimensions, falling "
+                 "back to uniform responsibilities");
+    const double uniform_r = 1.0 / num_experts_;
+    for (data_size_t i = 0; i < N; ++i) {
+      for (int k = 0; k < num_experts_; ++k) {
+        responsibilities_[i * num_experts_ + k] = uniform_r;
+      }
+    }
+    return;
+  }
+
+  const int max_num_bin = MaxFeatureNumBin(train_data_);
+  if (max_num_bin <= 256) {
+    GMMInitImpl(
+        BuildCompactBinMatrix<uint8_t>(train_data_, labels, include_label, N),
+        K, N, max_iters, min_variance, num_experts_, responsibilities_.data());
+  } else if (max_num_bin <= 65536) {
+    GMMInitImpl(
+        BuildCompactBinMatrix<uint16_t>(train_data_, labels, include_label, N),
+        K, N, max_iters, min_variance, num_experts_, responsibilities_.data());
+  } else {
+    GMMInitImpl(
+        BuildCompactBinMatrix<uint32_t>(train_data_, labels, include_label, N),
+        K, N, max_iters, min_variance, num_experts_, responsibilities_.data());
+  }
+}
+
 
 void MixtureGBDT::InitResponsibilitiesTreeHierarchical(const label_t* labels) {
   // Hierarchical clustering initialization based on label distribution
