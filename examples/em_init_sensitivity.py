@@ -36,6 +36,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -50,6 +51,7 @@ OUT_DIR.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 # Data — same regime-switching synthetic as regime_evolution_example.py
 # ---------------------------------------------------------------------------
+
 
 def make_data(n=800, seed=0):
     """Feature-determined regime: any feature-aware init *should* be able to
@@ -68,11 +70,13 @@ def make_data(n=800, seed=0):
     # 3 regimes via feature-driven thresholds (terciles of `score`).
     thr = np.quantile(score, [1.0 / 3, 2.0 / 3])
     regime = np.searchsorted(thr, score)  # 0, 1, or 2
-    coeffs = np.array([
-        [+2.0, +0.0, -1.0, +0.5, +0.0],
-        [-2.0, +1.0, +0.0, +0.0, +0.5],
-        [+0.0, -1.5, +1.5, +0.0, -0.5],
-    ])
+    coeffs = np.array(
+        [
+            [+2.0, +0.0, -1.0, +0.5, +0.0],
+            [-2.0, +1.0, +0.0, +0.0, +0.5],
+            [+0.0, -1.5, +1.5, +0.0, -0.5],
+        ]
+    )
     y = (X * coeffs[regime]).sum(axis=1) + 0.15 * rng.normal(size=n)
     return X, y, regime
 
@@ -80,6 +84,7 @@ def make_data(n=800, seed=0):
 # ---------------------------------------------------------------------------
 # ARI (no sklearn dependency)
 # ---------------------------------------------------------------------------
+
 
 def adjusted_rand_score(a, b):
     """Hubert-Arabie ARI from contingency table — minimal numpy impl."""
@@ -89,7 +94,7 @@ def adjusted_rand_score(a, b):
     ka = a.max() + 1
     kb = b.max() + 1
     cont = np.zeros((ka, kb), dtype=np.int64)
-    for x, y in zip(a, b):
+    for x, y in zip(a, b, strict=True):
         cont[x, y] += 1
 
     def comb2(v):
@@ -110,6 +115,7 @@ def adjusted_rand_score(a, b):
 # One training run
 # ---------------------------------------------------------------------------
 
+
 def train_one(X, y, init_scheme, n_rounds=120, seed=42):
     rec = RegimeEvolutionRecorder(every=5, max_snapshots=25)
     params = {
@@ -124,8 +130,7 @@ def train_one(X, y, init_scheme, n_rounds=120, seed=42):
         "seed": seed,
         "deterministic": True,
     }
-    m = lgb.train(params, lgb.Dataset(X, label=y),
-                  num_boost_round=n_rounds, callbacks=[rec])
+    m = lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=n_rounds, callbacks=[rec])
     yhat = m.predict(X)
     rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
 
@@ -154,6 +159,7 @@ def train_one(X, y, init_scheme, n_rounds=120, seed=42):
 # Driver
 # ---------------------------------------------------------------------------
 
+
 def main():
     INITS = ["uniform", "random", "quantile", "kmeans_features", "gmm"]
     X, y, true_regime = make_data()
@@ -164,10 +170,12 @@ def main():
         try:
             r = train_one(X, y, init)
             results.append(r)
-            print(f"  {init:>16s}  RMSE={r['rmse']:.4f}  "
-                  f"final_entropy={r['final_entropy']:.3f}  "
-                  f"load=[{', '.join(f'{l:.2f}' for l in r['final_load'])}]  "
-                  f"init→final unchanged={r['init_unchanged']*100:.1f}%")
+            print(
+                f"  {init:>16s}  RMSE={r['rmse']:.4f}  "
+                f"final_entropy={r['final_entropy']:.3f}  "
+                f"load=[{', '.join(f'{ld:.2f}' for ld in r['final_load'])}]  "
+                f"init→final unchanged={r['init_unchanged'] * 100:.1f}%"
+            )
         except Exception as exc:
             print(f"  {init:>16s}  FAILED: {exc}")
 
@@ -194,35 +202,38 @@ def main():
     for r in results:
         ari = adjusted_rand_score(r["final_argmax"], true_regime)
         ari_init = adjusted_rand_score(r["init_argmax"], true_regime)
-        print(f"  {r['init']:>16s}  init={ari_init:.3f}  final={ari:.3f}  "
-              f"Δ={ari-ari_init:+.3f}")
+        print(f"  {r['init']:>16s}  init={ari_init:.3f}  final={ari:.3f}  Δ={ari - ari_init:+.3f}")
 
     # ---- Plot: side-by-side regime tapes ---------------------------------
-    fig, axes = plt.subplots(len(results), 1,
-                             figsize=(11, 1.6 * len(results)),
-                             sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(len(results), 1, figsize=(11, 1.6 * len(results)), sharex=True, constrained_layout=True)
     if len(results) == 1:
         axes = [axes]
 
     K = 3
     cmap = plt.get_cmap("tab10", K)
     from matplotlib.colors import BoundaryNorm, ListedColormap
+
     listed = ListedColormap(cmap(np.arange(K)))
     norm = BoundaryNorm(np.arange(K + 1) - 0.5, ncolors=K)
 
-    for ax, r in zip(axes, results):
+    for ax, r in zip(axes, results, strict=True):
         am = r["recorder"].regime_argmax()
-        ax.imshow(am, aspect="auto", interpolation="nearest",
-                  cmap=listed, norm=norm,
-                  extent=(0, am.shape[1], am.shape[0] - 0.5, -0.5))
-        ax.set_title(f"{r['init']}  RMSE={r['rmse']:.3f}  "
-                     f"H_final={r['final_entropy']:.2f}  "
-                     f"unchanged={r['init_unchanged']*100:.0f}%",
-                     fontsize=9)
+        ax.imshow(
+            am,
+            aspect="auto",
+            interpolation="nearest",
+            cmap=listed,
+            norm=norm,
+            extent=(0, am.shape[1], am.shape[0] - 0.5, -0.5),
+        )
+        ax.set_title(
+            f"{r['init']}  RMSE={r['rmse']:.3f}  "
+            f"H_final={r['final_entropy']:.2f}  "
+            f"unchanged={r['init_unchanged'] * 100:.0f}%",
+            fontsize=9,
+        )
         ax.set_yticks([0, am.shape[0] - 1])
-        ax.set_yticklabels([f"iter={r['recorder'].iterations[0]}",
-                            f"iter={r['recorder'].iterations[-1]}"],
-                           fontsize=8)
+        ax.set_yticklabels([f"iter={r['recorder'].iterations[0]}", f"iter={r['recorder'].iterations[-1]}"], fontsize=8)
     axes[-1].set_xlabel("time / sample index")
     fig.suptitle("EM init sensitivity — final RMSE / regime tape per init")
 

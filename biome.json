@@ -11,7 +11,8 @@
             "!build",
             "!external_libs",
             "!lightgbm-python",
-            "!lightgbm_r"
+            "!lightgbm_r",
+            "!bench_results"
         ]
     },
     "formatter": {

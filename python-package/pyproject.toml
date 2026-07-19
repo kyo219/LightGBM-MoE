@@ -187,6 +187,11 @@ select = [
 raises-extend-require-match-for = ["*Exception", "*Error"]
 
 [tool.ruff.lint.per-file-ignores]
+"bench_results/*" = [
+    # benchmark artifacts / one-off splice scripts: prints and loose docstrings are fine
+    "T201",
+    "D",
+]
 ".ci/create-nuget.py" = [
     # (flake8-print) flake8-print
     "T201"

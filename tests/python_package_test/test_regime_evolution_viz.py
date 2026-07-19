@@ -9,10 +9,10 @@ import pytest
 import lightgbm_moe as lgb
 from lightgbm_moe import RegimeEvolutionRecorder
 
-
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                    #
 # --------------------------------------------------------------------------- #
+
 
 def _two_regime_data(n=300, seed=0):
     """Toy time-series with a deterministic 2-regime structure."""
@@ -43,6 +43,7 @@ def _train_with_recorder(X, y, recorder, params=None, num_boost_round=20):
 # get_responsibilities binding                                                #
 # --------------------------------------------------------------------------- #
 
+
 class TestGetResponsibilitiesBinding:
     def test_returns_valid_stochastic_matrix(self):
         X, y = _two_regime_data()
@@ -55,10 +56,11 @@ class TestGetResponsibilitiesBinding:
         _train_with_recorder(X, y, cb, num_boost_round=5)
 
         assert len(captured) == 5
-        for it, r in captured:
+        for _it, r in captured:
             assert r.shape == (300, 2)
             np.testing.assert_allclose(r.sum(axis=1), 1.0, atol=1e-9)
-            assert (r >= 0).all() and (r <= 1).all()
+            assert (r >= 0).all()
+            assert (r <= 1).all()
 
     def test_raises_for_non_mixture(self):
         rng = np.random.default_rng(0)
@@ -66,7 +68,8 @@ class TestGetResponsibilitiesBinding:
         y = rng.normal(size=100)
         m = lgb.train(
             {"objective": "regression", "verbose": -1},
-            lgb.Dataset(X, label=y), num_boost_round=5,
+            lgb.Dataset(X, label=y),
+            num_boost_round=5,
         )
         with pytest.raises(lgb.basic.LightGBMError):
             m.get_responsibilities()
@@ -85,6 +88,7 @@ class TestGetResponsibilitiesBinding:
 # --------------------------------------------------------------------------- #
 # Recorder behavior                                                           #
 # --------------------------------------------------------------------------- #
+
 
 class TestRecorderCapture:
     def test_every_n_snapshots(self):
@@ -117,9 +121,7 @@ class TestRecorderCapture:
         InitResponsibilities (kmeans_features in this case)."""
         X, y = _two_regime_data()
         rec = RegimeEvolutionRecorder(every=1)
-        _train_with_recorder(X, y, rec,
-                             params={"mixture_warmup_iters": 3},
-                             num_boost_round=5)
+        _train_with_recorder(X, y, rec, params={"mixture_warmup_iters": 3}, num_boost_round=5)
         # During warmup r should match the *init* — the same stochastic matrix
         # for iters 0, 1, 2. After warmup it diverges.
         r0 = rec.snapshots[0][1]
@@ -141,6 +143,7 @@ class TestRecorderCapture:
 # Derived metrics                                                             #
 # --------------------------------------------------------------------------- #
 
+
 class TestDerivedMetrics:
     def setup_method(self):
         X, y = _two_regime_data()
@@ -151,7 +154,8 @@ class TestDerivedMetrics:
     def test_regime_argmax_shape_and_range(self):
         am = self.rec.regime_argmax()
         assert am.shape == (self.rec.num_snapshots, 300)
-        assert am.min() >= 0 and am.max() <= 1  # K=2
+        assert am.min() >= 0  # K=2
+        assert am.max() <= 1
 
     def test_expert_load_sums_to_one_per_snapshot(self):
         load = self.rec.expert_load()
@@ -165,7 +169,8 @@ class TestDerivedMetrics:
     def test_flip_rate_shape(self):
         fr = self.rec.flip_rate()
         assert fr.shape == (self.rec.num_snapshots - 1,)
-        assert (fr >= 0).all() and (fr <= 1).all()
+        assert (fr >= 0).all()
+        assert (fr <= 1).all()
 
     def test_empty_recorder_raises(self):
         rec = RegimeEvolutionRecorder()
@@ -176,6 +181,7 @@ class TestDerivedMetrics:
 # --------------------------------------------------------------------------- #
 # Mode resolution                                                             #
 # --------------------------------------------------------------------------- #
+
 
 class TestModeResolution:
     def test_explicit_mode_overrides_auto(self):
@@ -206,6 +212,7 @@ class TestModeResolution:
 # plot() — smoke tests (matplotlib in non-interactive backend)                #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.fixture(scope="module")
 def trained_recorder():
     matplotlib = pytest.importorskip("matplotlib")
@@ -213,9 +220,10 @@ def trained_recorder():
     X, y = _two_regime_data()
     rec = RegimeEvolutionRecorder(every=4)
     _train_with_recorder(
-        X, y, rec,
-        params={"mixture_r_smoothing": "markov",
-                "mixture_smoothing_lambda": 0.3},
+        X,
+        y,
+        rec,
+        params={"mixture_r_smoothing": "markov", "mixture_smoothing_lambda": 0.3},
         num_boost_round=20,
     )
     return rec, y

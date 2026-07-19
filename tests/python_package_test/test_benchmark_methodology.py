@@ -26,6 +26,17 @@ import sys
 import numpy as np
 import pytest
 
+# benchmark.py / comparative_study.py import the full bench stack at module
+# level; these tests only run where that stack is installed (they exercise
+# the benchmark methodology, not the library). Skip cleanly elsewhere —
+# without this guard, test COLLECTION dies with ModuleNotFoundError in the
+# wheel-test CI environments.
+pytest.importorskip("optuna")
+pytest.importorskip("matplotlib")
+pytest.importorskip("shap")
+pytest.importorskip("sklearn")
+pytest.importorskip("scipy")
+
 _EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 sys.path.insert(0, _EXAMPLES)
 
@@ -38,10 +49,8 @@ def _has_cache(name):
     return os.path.exists(os.path.join(_CACHE, name))
 
 
-requires_vix = pytest.mark.skipif(not _has_cache("vix_VIX.csv"),
-                                  reason="vix cache not present")
-requires_sp500 = pytest.mark.skipif(not _has_cache("sp500_GSPC.csv"),
-                                    reason="sp500 cache not present")
+requires_vix = pytest.mark.skipif(not _has_cache("vix_VIX.csv"), reason="vix cache not present")
+requires_sp500 = pytest.mark.skipif(not _has_cache("sp500_GSPC.csv"), reason="sp500 cache not present")
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +86,10 @@ def test_fred_style_alignment_ar():
     growth = np.sin(np.arange(300) * 0.7) + np.linspace(0, 1, 300)
     lag_max = 4
     n = len(growth) - lag_max
-    lags = np.column_stack([growth[lag_max - k - 1: lag_max - k - 1 + n]
-                            for k in range(lag_max)])
+    lags = np.column_stack([growth[lag_max - k - 1 : lag_max - k - 1 + n] for k in range(lag_max)])
     y = growth[lag_max:]
     # lag k=0 must be the value immediately before the target
-    assert np.allclose(lags[:, 0], growth[lag_max - 1: lag_max - 1 + n])
+    assert np.allclose(lags[:, 0], growth[lag_max - 1 : lag_max - 1 + n])
     assert np.allclose(y[:-1], lags[1:, 0])
 
 
@@ -129,7 +137,8 @@ def test_synthetic_generators_seed_contract(gen):
     X1, y1, _ = gen(seed=42)
     X2, y2, _ = gen(seed=42)
     X3, y3, _ = gen(seed=43)
-    assert np.allclose(X1, X2) and np.allclose(y1, y2)
+    assert np.allclose(X1, X2)
+    assert np.allclose(y1, y2)
     assert not np.allclose(y1, y3)
 
 
@@ -139,8 +148,7 @@ def test_generators_do_not_touch_global_rng():
     bm.generate_synthetic_data(seed=7)
     bm.generate_hmm_data(seed=7)
     got = np.random.rand(4)
-    assert np.allclose(got, expected), (
-        "data generators mutated the global numpy RNG state")
+    assert np.allclose(got, expected), "data generators mutated the global numpy RNG state"
 
 
 # ---------------------------------------------------------------------------
@@ -148,8 +156,8 @@ def test_generators_do_not_touch_global_rng():
 # ---------------------------------------------------------------------------
 def _load_study_module():
     import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "comparative_study", os.path.join(_EXAMPLES, "comparative_study.py"))
+
+    spec = importlib.util.spec_from_file_location("comparative_study", os.path.join(_EXAMPLES, "comparative_study.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -170,13 +178,15 @@ def test_chronological_split_disjoint_ordered(study):
     X = np.arange(100).reshape(-1, 1).astype(float)
     y = np.arange(100).astype(float)
     Xs, ys, Xh, yh = study.chronological_split(X, y, 0.2)
-    assert len(Xh) == 20 and len(Xs) == 80
+    assert len(Xh) == 20
+    assert len(Xs) == 80
     # holdout is strictly the chronological tail
     assert ys.max() < yh.min()
 
 
 def test_cv_gap_embargo(study):
     from sklearn.model_selection import TimeSeriesSplit
+
     tscv = TimeSeriesSplit(n_splits=5, gap=study.CV_GAP)
     X = np.zeros((200, 1))
     for tr, va in tscv.split(X):

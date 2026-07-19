@@ -26,13 +26,13 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python-package"))
 
+import matplotlib  # noqa: E402
+
 import lightgbm_moe as lgb  # noqa: E402
 from lightgbm_moe import RegimeEvolutionRecorder  # noqa: E402
 
-import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-
 
 N_TRAIN = 1500
 N_FEATURES = 5
@@ -85,8 +85,7 @@ def run_one(name: str, init: str, refit: bool, X, y, out_dir: str) -> tuple[floa
         params["mixture_refit_decay_rate"] = 0.0
         params["mixture_refit_trigger"] = "always"
     rec = RegimeEvolutionRecorder(every=2, max_snapshots=40)
-    bst = lgb.train(params, lgb.Dataset(X, label=y),
-                    num_boost_round=NUM_BOOST_ROUND, callbacks=[rec])
+    bst = lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=NUM_BOOST_ROUND, callbacks=[rec])
     pred = bst.predict(X)
     rmse = float(np.sqrt(np.mean((pred - y) ** 2)))
 
@@ -119,9 +118,9 @@ def main():
 
     cfgs = [
         ("init-random_refit-off", "random", False),
-        ("init-random_refit-on",  "random", True),
-        ("init-gmm_refit-off",    "gmm",    False),
-        ("init-gmm_refit-on",     "gmm",    True),
+        ("init-random_refit-on", "random", True),
+        ("init-gmm_refit-off", "gmm", False),
+        ("init-gmm_refit-on", "gmm", True),
     ]
     results = []
     for name, init, refit in cfgs:

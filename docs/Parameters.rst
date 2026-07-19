@@ -1392,11 +1392,9 @@ Mixture-of-Experts Parameters
 
 -  ``mixture_enable`` :raw-html:`<a id="mixture_enable" title="Permalink to this parameter" href="#mixture_enable">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
 
-   -  set this to ``true`` to enable Mixture-of-Experts (MoE) mode
+   -  informational flag written into saved mixture model headers; it does **not** enable MoE mode
 
-   -  when enabled, LightGBM trains K expert GBDTs and 1 gate GBDT
-
-   -  the final prediction is a weighted combination of expert predictions
+   -  MoE training is enabled by setting ``boosting=mixture`` — setting only ``mixture_enable=true`` trains a plain GBDT and a warning is emitted
 
 -  ``mixture_num_experts`` :raw-html:`<a id="mixture_num_experts" title="Permalink to this parameter" href="#mixture_num_experts">&#x1F517;&#xFE0E;</a>`, default = ``4``, type = int, constraints: ``mixture_num_experts >= 2``
 
@@ -1418,7 +1416,7 @@ Mixture-of-Experts Parameters
 
    -  number of gate training iterations per boosting round
 
--  ``mixture_init`` :raw-html:`<a id="mixture_init" title="Permalink to this parameter" href="#mixture_init">&#x1F517;&#xFE0E;</a>`, default = ``uniform``, type = enum, options: ``uniform``, ``quantile``, ``random``, ``balanced_kmeans``, ``gmm``, ``tree_hierarchical``
+-  ``mixture_init`` :raw-html:`<a id="mixture_init" title="Permalink to this parameter" href="#mixture_init">&#x1F517;&#xFE0E;</a>`, default = ``uniform``, type = enum, options: ``uniform``, ``quantile``, ``random``, ``balanced_kmeans``, ``kmeans_features``, ``gmm``, ``gmm_features``, ``tree_hierarchical``
 
    -  initialization method for expert responsibilities
 
@@ -1428,19 +1426,35 @@ Mixture-of-Experts Parameters
 
    -  ``random``: randomly assign samples to experts
 
-   -  ``balanced_kmeans``: use Balanced K-Means clustering on features (recommended)
+   -  ``balanced_kmeans``: use Balanced K-Means clustering on features + label
 
-   -  ``gmm``: use Gaussian Mixture Model for soft clustering (theoretical EM alignment)
+   -  ``kmeans_features``: Balanced K-Means on raw features only (regime discovery in X-space)
+
+   -  ``gmm``: use Gaussian Mixture Model on features + label (theoretical EM alignment)
+
+   -  ``gmm_features``: GMM on raw features only (recommended when the regime is a function of X)
 
    -  ``tree_hierarchical``: train a deep tree, then hierarchically cluster leaves by mean y
 
 -  ``mixture_e_step_alpha`` :raw-html:`<a id="mixture_e_step_alpha" title="Permalink to this parameter" href="#mixture_e_step_alpha">&#x1F517;&#xFE0E;</a>`, default = ``1.0``, type = double, constraints: ``mixture_e_step_alpha >= 0.0``
 
-   -  alpha parameter for E-step responsibility calculation
+   -  alpha parameter for E-step responsibility calculation (legacy fixed-temperature mode)
 
    -  controls the balance between gate probability and expert fit
 
    -  higher values give more weight to expert fit (likelihood)
+
+   -  ignored when ``mixture_estimate_variance=true`` — alpha is then derived from the per-expert estimated variance
+
+-  ``mixture_estimate_variance`` :raw-html:`<a id="mixture_estimate_variance" title="Permalink to this parameter" href="#mixture_estimate_variance">&#x1F517;&#xFE0E;</a>`, default = ``true``, type = bool
+
+   -  whether to estimate per-expert noise variance σ_k² from responsibility-weighted residuals each iteration
+
+   -  when true, the E-step score becomes ``log π_k − 0.5·log(σ_k²) − (y−f_k)²/(2σ_k²)`` (proper Gaussian MoE EM, Jordan-Jacobs)
+
+   -  when false, falls back to the legacy ``log gate − alpha·loss`` temperature hack with a fixed shared alpha
+
+   -  enabling this is required for ELBO tracking to be meaningful
 
 -  ``mixture_e_step_loss`` :raw-html:`<a id="mixture_e_step_loss" title="Permalink to this parameter" href="#mixture_e_step_loss">&#x1F517;&#xFE0E;</a>`, default = ``auto``, type = enum, options: ``l2``, ``l1``, ``quantile``, ``auto``
 
@@ -1507,6 +1521,122 @@ Mixture-of-Experts Parameters
    -  this allows experts to differentiate before competitive EM begins
 
    -  0 means no warmup (may cause expert collapse)
+
+-  ``mixture_refit_leaves`` :raw-html:`<a id="mixture_refit_leaves" title="Permalink to this parameter" href="#mixture_refit_leaves">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
+
+   -  enable leaf-value refit on each E-step (LightGBM-MoE v0.7)
+
+   -  when ``true``, the per-EM-round update refits leaf values of every
+
+   -  default ``false`` keeps the v0.6.0 append-only behavior bit-identical
+
+   -  **early stopping caveat**: refit mutates past trees in place, so the model
+
+   -  see issue #37 for the design rationale
+
+-  ``mixture_refit_decay_rate`` :raw-html:`<a id="mixture_refit_decay_rate" title="Permalink to this parameter" href="#mixture_refit_decay_rate">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_refit_decay_rate <= 1.0``
+
+   -  decay rate for leaf-value refit blending: ``new_v = decay * old_v + (1-decay) * fit_v``
+
+   -  ``0.0`` (default) replaces leaf values fully with the Newton-step fit;
+
+   -  mirrors LightGBM core's ``refit_decay_rate`` semantics; isolated to
+
+-  ``mixture_refit_l2_reg`` :raw-html:`<a id="mixture_refit_l2_reg" title="Permalink to this parameter" href="#mixture_refit_l2_reg">&#x1F517;&#xFE0E;</a>`, default = ``1e-3``, type = double, constraints: ``mixture_refit_l2_reg >= 0.0``
+
+   -  L2 regularization for the leaf-value Newton step during refit
+
+   -  ``new_v = -shrinkage * (Σ r·g) / (Σ r·h + l2_reg)``
+
+   -  small positive default keeps leaves bounded when ``Σ r·h → 0`` on
+
+-  ``mixture_refit_trigger`` :raw-html:`<a id="mixture_refit_trigger" title="Permalink to this parameter" href="#mixture_refit_trigger">&#x1F517;&#xFE0E;</a>`, default = ``always``, type = enum, options: ``always``, ``elbo``, ``every_n``
+
+   -  which iterations should fire the leaf-refit pass when
+
+   -  ``always``: refit every post-warmup iter (highest cost, most faithful EM)
+
+   -  ``elbo``: only refit when the most recent ELBO log showed a >5% drop —
+
+   -  ``every_n``: refit every ``mixture_refit_every_n`` iters past warmup
+
+-  ``mixture_refit_every_n`` :raw-html:`<a id="mixture_refit_every_n" title="Permalink to this parameter" href="#mixture_refit_every_n">&#x1F517;&#xFE0E;</a>`, default = ``10``, type = int, constraints: ``mixture_refit_every_n > 0``
+
+   -  period (in EM iterations) for the ``every_n`` refit trigger
+
+   -  ignored when ``mixture_refit_trigger != "every_n"``
+
+-  ``mixture_elbo_drop_threshold`` :raw-html:`<a id="mixture_elbo_drop_threshold" title="Permalink to this parameter" href="#mixture_elbo_drop_threshold">&#x1F517;&#xFE0E;</a>`, default = ``0.01``, type = double, constraints: ``mixture_elbo_drop_threshold >= 0.0``
+
+   -  drop threshold for the ``elbo`` refit trigger. Fires refit when the
+
+   -  lowered from the v0.7 hard-coded 0.05 because the cost asymmetry favors
+
+   -  ignored when ``mixture_refit_trigger != "elbo"``
+
+-  ``mixture_elbo_plateau_threshold`` :raw-html:`<a id="mixture_elbo_plateau_threshold" title="Permalink to this parameter" href="#mixture_elbo_plateau_threshold">&#x1F517;&#xFE0E;</a>`, default = ``0.001``, type = double, constraints: ``mixture_elbo_plateau_threshold >= 0.0``
+
+   -  plateau threshold for the ``elbo`` refit trigger. Fires refit when
+
+   -  healthy Optuna-tuned configs do not drop ELBO; they plateau at sub-optimal
+
+   -  set to ``0`` to disable plateau detection (drop-only behavior, v0.7-like)
+
+   -  ignored when ``mixture_refit_trigger != "elbo"``
+
+-  ``mixture_elbo_window`` :raw-html:`<a id="mixture_elbo_window" title="Permalink to this parameter" href="#mixture_elbo_window">&#x1F517;&#xFE0E;</a>`, default = ``10``, type = int, constraints: ``mixture_elbo_window >= 2``
+
+   -  sliding-window size (in iterations) for the ELBO history used by the
+
+   -  larger window → more stable plateau detection, slower to react;
+
+   -  ignored when ``mixture_refit_trigger != "elbo"``
+
+-  ``mixture_elbo_min_iter_for_plateau`` :raw-html:`<a id="mixture_elbo_min_iter_for_plateau" title="Permalink to this parameter" href="#mixture_elbo_min_iter_for_plateau">&#x1F517;&#xFE0E;</a>`, default = ``20``, type = int, constraints: ``mixture_elbo_min_iter_for_plateau >= 0``
+
+   -  minimum number of post-warmup iterations before plateau detection can
+
+   -  warmup-adjacent ELBO is noisy (gate logits are still equilibrating to
+
+   -  drop detection is unaffected by this — it can fire as soon as the
+
+   -  ignored when ``mixture_refit_trigger != "elbo"``
+
+-  ``mixture_regrow_oldest_trees`` :raw-html:`<a id="mixture_regrow_oldest_trees" title="Permalink to this parameter" href="#mixture_regrow_oldest_trees">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
+
+   -  enable partition re-grow during refit fires (LightGBM-MoE v0.8)
+
+   -  when ``true`` AND ``mixture_refit_leaves=true``, each refit fire
+
+   -  leaf refit (v0.7) only updates ``v_k^{(s)}`` (leaf values) with
+
+   -  default ``false`` keeps v0.7 behavior bit-identical
+
+   -  auto-disabled at Init when ``mixture_gate_type='leaf_reuse'``
+
+   -  see issue #41 / docs/v0.8/partition_regrow_design.md
+
+-  ``mixture_regrow_per_fire`` :raw-html:`<a id="mixture_regrow_per_fire" title="Permalink to this parameter" href="#mixture_regrow_per_fire">&#x1F517;&#xFE0E;</a>`, default = ``1``, type = int, constraints: ``mixture_regrow_per_fire > 0``
+
+   -  number of oldest trees to regrow per refit fire (per expert and,
+
+   -  ignored when ``mixture_regrow_oldest_trees=false``
+
+-  ``mixture_regrow_min_remaining`` :raw-html:`<a id="mixture_regrow_min_remaining" title="Permalink to this parameter" href="#mixture_regrow_min_remaining">&#x1F517;&#xFE0E;</a>`, default = ``5``, type = int, constraints: ``mixture_regrow_min_remaining >= 0``
+
+   -  floor on the number of trees that must remain after regrow.
+
+   -  ignored when ``mixture_regrow_oldest_trees=false``
+
+-  ``mixture_regrow_mode`` :raw-html:`<a id="mixture_regrow_mode" title="Permalink to this parameter" href="#mixture_regrow_mode">&#x1F517;&#xFE0E;</a>`, default = ``replace``, type = enum, options: ``replace``, ``delete``
+
+   -  how to handle the regrown slot:
+
+   -  ``replace`` (default): rebuild a new tree at the same slot via
+
+   -  ``delete``: remove the tree entirely; ensemble shrinks by
+
+   -  ignored when ``mixture_regrow_oldest_trees=false``
 
 -  ``mixture_gate_max_depth`` :raw-html:`<a id="mixture_gate_max_depth" title="Permalink to this parameter" href="#mixture_gate_max_depth">&#x1F517;&#xFE0E;</a>`, default = ``3``, type = int, constraints: ``mixture_gate_max_depth > 0``
 
@@ -1576,13 +1706,23 @@ Mixture-of-Experts Parameters
 
 -  ``mixture_gate_entropy_lambda`` :raw-html:`<a id="mixture_gate_entropy_lambda" title="Permalink to this parameter" href="#mixture_gate_entropy_lambda">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_gate_entropy_lambda <= 1.0``
 
-   -  entropy regularization coefficient for gate output
+   -  Dirichlet-shrinkage coefficient for gate output (legacy parameter
 
-   -  encourages gate to produce more uncertain (uniform) predictions
+   -  name kept for back-compat; the implementation does not use the
+
+   -  entropy gradient d(-H)/dz, which would vanish near simplex corners
+
+   -  and so be a weak anti-collapse signal — instead it uses
+
+   -  grad = lambda * (p - 1/K) which corresponds to a Dirichlet shrinkage
+
+   -  with target (r + lambda/K) / (1 + lambda); behaviour is unchanged
+
+   -  encourages gate to produce more uncertain (near-uniform) predictions
 
    -  helps prevent premature expert collapse where gate assigns all samples to one expert
 
-   -  higher values produce more uniform gate probabilities
+   -  higher values pull gate probabilities harder toward 1/K (uniform)
 
    -  0.0 means no regularization (default)
 
@@ -1612,6 +1752,26 @@ Mixture-of-Experts Parameters
 
    -  recommended range: 0.1-0.5
 
+-  ``mixture_gate_type`` :raw-html:`<a id="mixture_gate_type" title="Permalink to this parameter" href="#mixture_gate_type">&#x1F517;&#xFE0E;</a>`, default = ``gbdt``, type = enum, options: ``gbdt``, ``none``, ``leaf_reuse``
+
+   -  gate model type for Mixture-of-Experts routing
+
+   -  ``gbdt``: full multiclass GBDT gate, trained every iteration (default)
+
+   -  ``none``: no gate model. E-step uses loss_only mode, routing uses responsibilities
+
+   -  ``leaf_reuse``: derive routing from expert tree leaf statistics,
+
+   -  gate GBDT retrained periodically for inference only
+
+-  ``mixture_gate_retrain_interval`` :raw-html:`<a id="mixture_gate_retrain_interval" title="Permalink to this parameter" href="#mixture_gate_retrain_interval">&#x1F517;&#xFE0E;</a>`, default = ``10``, type = int, constraints: ``mixture_gate_retrain_interval >= 1``
+
+   -  how often to retrain the gate GBDT when mixture_gate_type=leaf_reuse
+
+   -  the gate GBDT is needed for inference on new data
+
+   -  higher = faster training, lower = better inference routing
+
 -  ``mixture_expert_dropout_rate`` :raw-html:`<a id="mixture_expert_dropout_rate" title="Permalink to this parameter" href="#mixture_expert_dropout_rate">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_expert_dropout_rate < 1.0``
 
    -  dropout rate for experts during training
@@ -1627,6 +1787,40 @@ Mixture-of-Experts Parameters
    -  recommended range: 0.1-0.3
 
    -  note: at least one expert is always kept (never drops all experts)
+
+-  ``mixture_dropout_schedule`` :raw-html:`<a id="mixture_dropout_schedule" title="Permalink to this parameter" href="#mixture_dropout_schedule">&#x1F517;&#xFE0E;</a>`, default = ``constant``, type = enum, options: ``constant``, ``linear``, ``cosine``
+
+   -  dropout rate schedule over training
+
+   -  ``constant``: fixed dropout_rate throughout (default, backward compatible)
+
+   -  ``linear``: linearly ramp from dropout_rate_min to dropout_rate_max
+
+   -  ``cosine``: cosine ramp from dropout_rate_min to dropout_rate_max
+
+-  ``mixture_dropout_rate_min`` :raw-html:`<a id="mixture_dropout_rate_min" title="Permalink to this parameter" href="#mixture_dropout_rate_min">&#x1F517;&#xFE0E;</a>`, default = ``0.0``, type = double, constraints: ``0.0 <= mixture_dropout_rate_min < 1.0``
+
+   -  minimum dropout rate (start of schedule, used when mixture_dropout_schedule != constant)
+
+-  ``mixture_dropout_rate_max`` :raw-html:`<a id="mixture_dropout_rate_max" title="Permalink to this parameter" href="#mixture_dropout_rate_max">&#x1F517;&#xFE0E;</a>`, default = ``0.3``, type = double, constraints: ``0.0 <= mixture_dropout_rate_max < 1.0``
+
+   -  maximum dropout rate (end of schedule, used when mixture_dropout_schedule != constant)
+
+-  ``mixture_adaptive_lr`` :raw-html:`<a id="mixture_adaptive_lr" title="Permalink to this parameter" href="#mixture_adaptive_lr">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
+
+   -  enable adaptive per-expert learning rate scaling
+
+   -  tracks each expert's loss trend and adjusts gradient scale:
+
+   -  experts with improving loss get lower scale, stagnating experts get higher scale
+
+-  ``mixture_adaptive_lr_window`` :raw-html:`<a id="mixture_adaptive_lr_window" title="Permalink to this parameter" href="#mixture_adaptive_lr_window">&#x1F517;&#xFE0E;</a>`, default = ``20``, type = int, constraints: ``1 <= mixture_adaptive_lr_window <= 100``
+
+   -  window size (iterations) for tracking per-expert loss trend
+
+-  ``mixture_adaptive_lr_max`` :raw-html:`<a id="mixture_adaptive_lr_max" title="Permalink to this parameter" href="#mixture_adaptive_lr_max">&#x1F517;&#xFE0E;</a>`, default = ``2.0``, type = double, constraints: ``1.0 < mixture_adaptive_lr_max <= 5.0``
+
+   -  maximum learning rate multiplier (min is 1/max)
 
 -  ``mixture_routing_mode`` :raw-html:`<a id="mixture_routing_mode" title="Permalink to this parameter" href="#mixture_routing_mode">&#x1F517;&#xFE0E;</a>`, default = ``token_choice``, type = enum, options: ``token_choice``, ``expert_choice``
 

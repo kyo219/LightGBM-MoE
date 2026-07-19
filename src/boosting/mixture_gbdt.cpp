@@ -28,6 +28,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace LightGBM {
@@ -2178,8 +2179,7 @@ void MixtureGBDT::SelectTopSamplesPerExpert() {
         scores_idx.begin(),
         scores_idx.begin() + C,
         scores_idx.end(),
-        [](const auto& a, const auto& b) { return a.first > b.first; }
-    );
+        [](const auto& a, const auto& b) { return a.first > b.first; });
 
     // Mark selected samples
     for (int c = 0; c < C; ++c) {

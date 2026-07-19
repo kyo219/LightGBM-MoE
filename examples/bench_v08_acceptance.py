@@ -58,22 +58,21 @@ import lightgbm_moe as lgb
 # Reuse the same dataset generators as the v0.7 bench
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from benchmark import (  # noqa: E402
-    generate_synthetic_data,
     generate_fred_gdp_data,
+    generate_hmm_data,
     generate_sp500_basic_data,
     generate_sp500_data,
+    generate_synthetic_data,
     generate_vix_data,
-    generate_hmm_data,
 )
 
-
 DATASET_GENERATORS = {
-    "synthetic":   lambda seed: generate_synthetic_data(seed=seed),
-    "fred_gdp":    lambda seed: generate_fred_gdp_data(seed=seed),
+    "synthetic": lambda seed: generate_synthetic_data(seed=seed),
+    "fred_gdp": lambda seed: generate_fred_gdp_data(seed=seed),
     "sp500_basic": lambda seed: generate_sp500_basic_data(seed=seed),
-    "sp500":       lambda seed: generate_sp500_data(seed=seed),
-    "vix":         lambda seed: generate_vix_data(seed=seed),
-    "hmm":         lambda seed: generate_hmm_data(seed=seed),
+    "sp500": lambda seed: generate_sp500_data(seed=seed),
+    "vix": lambda seed: generate_vix_data(seed=seed),
+    "hmm": lambda seed: generate_hmm_data(seed=seed),
 }
 
 
@@ -184,7 +183,8 @@ def evaluate_cv(X, y, params, n_splits: int, num_boost_round: int):
         try:
             t0 = time.perf_counter()
             model = lgb.train(
-                params, train,
+                params,
+                train,
                 num_boost_round=num_boost_round,
                 valid_sets=[valid],
                 callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
@@ -200,16 +200,17 @@ def evaluate_cv(X, y, params, n_splits: int, num_boost_round: int):
     return rmses, times
 
 
-def bench_dataset(name: str, X, y, v06_best: Dict[str, Any],
-                  n_splits: int, num_boost_round: int) -> Dict[str, Any]:
+def bench_dataset(name: str, X, y, v06_best: Dict[str, Any], n_splits: int, num_boost_round: int) -> Dict[str, Any]:
     print(f"\n=== {name} ===  N={len(y)}  F={X.shape[1]}", flush=True)
-    print(f"  v0.6 best config: K={v06_best.get('mixture_num_experts')}, "
-          f"init={v06_best.get('mixture_init')}, "
-          f"gate={v06_best.get('mixture_gate_type')}, "
-          f"div={v06_best.get('mixture_diversity_lambda', 0):.3f}", flush=True)
+    print(
+        f"  v0.6 best config: K={v06_best.get('mixture_num_experts')}, "
+        f"init={v06_best.get('mixture_init')}, "
+        f"gate={v06_best.get('mixture_gate_type')}, "
+        f"div={v06_best.get('mixture_diversity_lambda', 0):.3f}",
+        flush=True,
+    )
 
-    out: Dict[str, Any] = {"name": name, "v06_best": dict(v06_best),
-                           "variants": {}}
+    out: Dict[str, Any] = {"name": name, "v06_best": dict(v06_best), "variants": {}}
     for v in VARIANTS:
         params = {**base_static_params(), **v06_best, **v["params"]}
         rmses, times = evaluate_cv(X, y, params, n_splits, num_boost_round)
@@ -224,19 +225,17 @@ def bench_dataset(name: str, X, y, v06_best: Dict[str, Any],
             "time_mean": time_mean,
             "n_folds": len(rmses),
         }
-        print(f"  {v['name']:<22s} rmse={rmse_mean:.4f} ± {rmse_std:.4f}  "
-              f"fold_time={time_mean:.2f}s", flush=True)
+        print(f"  {v['name']:<22s} rmse={rmse_mean:.4f} ± {rmse_std:.4f}  fold_time={time_mean:.2f}s", flush=True)
     return out
 
 
 def render_md(results: Dict[str, Any]) -> str:
     lines = []
-    lines.append(f"# v0.8 acceptance bench")
+    lines.append("# v0.8 acceptance bench")
     lines.append("")
     lines.append(f"- Timestamp: `{results['timestamp']}`")
     lines.append(f"- v0.6 best params source: `{results['v06_json']}`")
-    lines.append(f"- num_boost_round: {results['num_boost_round']}, "
-                 f"n_splits: {results['n_splits']}")
+    lines.append(f"- num_boost_round: {results['num_boost_round']}, n_splits: {results['n_splits']}")
     lines.append("")
     lines.append("## Per-config: v0.7 vs v0.8 variants on the same v0.6 winning configs")
     lines.append("")
@@ -247,8 +246,7 @@ def render_md(results: Dict[str, Any]) -> str:
     for ds_name, ds in results["datasets"].items():
         row = [ds_name]
         off = ds["variants"].get("off", {}).get("rmse_mean", float("nan"))
-        for vname in ["off", "v07_elbo", "v08_elbo", "v08_elbo_regrow",
-                       "v08_always_regrow", "v08_delete_ablation"]:
+        for vname in ["off", "v07_elbo", "v08_elbo", "v08_elbo_regrow", "v08_always_regrow", "v08_delete_ablation"]:
             v = ds["variants"].get(vname, {})
             r = v.get("rmse_mean", float("nan"))
             s = v.get("rmse_std", float("nan"))
@@ -268,8 +266,7 @@ def render_md(results: Dict[str, Any]) -> str:
     lines.append("|---|---|---|---|---|---|---|")
     for ds_name, ds in results["datasets"].items():
         row = [ds_name]
-        for vname in ["off", "v07_elbo", "v08_elbo", "v08_elbo_regrow",
-                       "v08_always_regrow", "v08_delete_ablation"]:
+        for vname in ["off", "v07_elbo", "v08_elbo", "v08_elbo_regrow", "v08_always_regrow", "v08_delete_ablation"]:
             v = ds["variants"].get(vname, {})
             t = v.get("time_mean", float("nan"))
             row.append(f"{t:.2f}")
@@ -278,21 +275,28 @@ def render_md(results: Dict[str, Any]) -> str:
     lines.append("## Summary")
     lines.append("")
     n_total = len(results["datasets"])
+
     def count_better(name):
         return sum(
-            1 for ds in results["datasets"].values()
+            1
+            for ds in results["datasets"].values()
             if ds["variants"].get(name, {}).get("rmse_mean", float("inf"))
-               < ds["variants"].get("off", {}).get("rmse_mean", float("inf")) - 1e-6
+            < ds["variants"].get("off", {}).get("rmse_mean", float("inf")) - 1e-6
         )
+
     def count_match(name):
         return sum(
-            1 for ds in results["datasets"].values()
-            if abs(ds["variants"].get(name, {}).get("rmse_mean", float("inf"))
-                   - ds["variants"].get("off", {}).get("rmse_mean", float("inf"))) < 1e-6
+            1
+            for ds in results["datasets"].values()
+            if abs(
+                ds["variants"].get(name, {}).get("rmse_mean", float("inf"))
+                - ds["variants"].get("off", {}).get("rmse_mean", float("inf"))
+            )
+            < 1e-6
         )
+
     lines.append(f"Across {n_total} datasets:")
-    for vname in ["v07_elbo", "v08_elbo", "v08_elbo_regrow",
-                   "v08_always_regrow", "v08_delete_ablation"]:
+    for vname in ["v07_elbo", "v08_elbo", "v08_elbo_regrow", "v08_always_regrow", "v08_delete_ablation"]:
         b = count_better(vname)
         m = count_match(vname)
         w = n_total - b - m
@@ -302,17 +306,15 @@ def render_md(results: Dict[str, Any]) -> str:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--v06-json",
-                   default="bench_results/study_500_3way_20260502_200635.json")
+    p.add_argument("--v06-json", default="bench_results/study_500_3way_20260502_200635.json")
     p.add_argument("--rounds", type=int, default=100)
     p.add_argument("--splits", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--datasets", type=str,
-                   default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm")
+    p.add_argument("--datasets", type=str, default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm")
     p.add_argument("--out", type=str, default=None)
     args = p.parse_args()
 
-    print(f"v0.8 acceptance bench")
+    print("v0.8 acceptance bench")
     print(f"v0.6 best params from: {args.v06_json}")
     print(f"rounds={args.rounds}  splits={args.splits}  seed={args.seed}")
 
@@ -339,8 +341,7 @@ def main():
         X = np.asarray(gen_out[0])
         y = np.asarray(gen_out[1])
         cfg = dict(v06_bests[name])
-        results["datasets"][name] = bench_dataset(
-            name, X, y, cfg, args.splits, args.rounds)
+        results["datasets"][name] = bench_dataset(name, X, y, cfg, args.splits, args.rounds)
 
     ts = results["timestamp"]
     out_json = args.out or f"bench_results/bench_v08_acceptance_{ts}.json"

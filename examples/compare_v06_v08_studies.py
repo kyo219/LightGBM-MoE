@@ -25,7 +25,6 @@ import json
 import sys
 from typing import Any, Dict
 
-
 V08_FEATURE_KEYS = [
     "mixture_refit_leaves",
     "mixture_refit_trigger",
@@ -72,8 +71,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("v06_json", help="v0.6 study JSON (baseline)")
     p.add_argument("v08_json", help="v0.8 study JSON (with v0.8 params searchable)")
-    p.add_argument("--out", type=str, default=None,
-                   help="output markdown path (default: stdout)")
+    p.add_argument("--out", type=str, default=None, help="output markdown path (default: stdout)")
     args = p.parse_args()
 
     v06 = json.load(open(args.v06_json))
@@ -118,21 +116,23 @@ def main():
                 summary["v08_tie"] += 1
             delta_abs = f"{d:+.4f}"
             delta_pct = f"{dp:+.2f}%"
-        lines.append(
-            f"| `{ds}` | {fmt_rmse(ra, sa)} | {fmt_rmse(rb, sb)} | {delta_abs} | {delta_pct} | {verdict} |"
-        )
+        lines.append(f"| `{ds}` | {fmt_rmse(ra, sa)} | {fmt_rmse(rb, sb)} | {delta_abs} | {delta_pct} | {verdict} |")
     n = len(common_datasets)
     lines.append("")
-    lines.append(f"**Summary**: {summary['v08_strict_win']}/{n} strict win, "
-                 f"{summary['v08_tie']}/{n} tie, {summary['v08_loss']}/{n} loss.")
+    lines.append(
+        f"**Summary**: {summary['v08_strict_win']}/{n} strict win, "
+        f"{summary['v08_tie']}/{n} tie, {summary['v08_loss']}/{n} loss."
+    )
     lines.append("")
     lines.append("(*Strict win* = v0.8 best is more than 1 std (per-fold) below v0.6 best.)\n")
 
     # === Section 2: v0.8-specific params in winning configs ===
     lines.append("## 2. Did the v0.8 winning config use the new knobs?\n")
-    lines.append("Per dataset, value of each v0.8-specific param in the v0.8 `best_params`. "
-                 "`—` = the param was not in best_params (Optuna didn't sample it for the winning trial, "
-                 "e.g. because `mixture_refit_leaves=False` short-circuited the conditional sub-tree).\n")
+    lines.append(
+        "Per dataset, value of each v0.8-specific param in the v0.8 `best_params`. "
+        "`—` = the param was not in best_params (Optuna didn't sample it for the winning trial, "
+        "e.g. because `mixture_refit_leaves=False` short-circuited the conditional sub-tree).\n"
+    )
     lines.append("| Dataset | refit_leaves | refit_trigger | regrow | regrow_per_fire | regrow_mode | init |")
     lines.append("|---|---|---|---|---|---|---|")
     for ds in common_datasets:
@@ -151,16 +151,23 @@ def main():
 
     # === Section 3: search-space utilization (categorical_value_stats) ===
     lines.append("## 3. Search-space utilization across v0.8 trials\n")
-    lines.append("From the per-categorical stats already computed by `comparative_study.py`. "
-                 "Shows how often each value appeared in trials and the mean RMSE conditional on that value.\n")
+    lines.append(
+        "From the per-categorical stats already computed by `comparative_study.py`. "
+        "Shows how often each value appeared in trials and the mean RMSE conditional on that value.\n"
+    )
     for ds in common_datasets:
         b = get_moe(v08, ds)
         stats = b.get("categorical_stats", {})
         if not stats:
             continue
         lines.append(f"### `{ds}`\n")
-        for param in ("mixture_refit_leaves", "mixture_regrow_oldest_trees",
-                      "mixture_refit_trigger", "mixture_regrow_mode", "mixture_init"):
+        for param in (
+            "mixture_refit_leaves",
+            "mixture_regrow_oldest_trees",
+            "mixture_refit_trigger",
+            "mixture_regrow_mode",
+            "mixture_init",
+        ):
             if param not in stats:
                 continue
             per = stats[param].get("per_value", {})
@@ -168,8 +175,10 @@ def main():
                 continue
             lines.append(f"- `{param}`: ")
             for val, s in per.items():
-                lines.append(f"  - `{val}` (n={s.get('n')}): "
-                             f"mean RMSE = {s.get('mean')}, std = {s.get('std')}, min = {s.get('min')}")
+                lines.append(
+                    f"  - `{val}` (n={s.get('n')}): "
+                    f"mean RMSE = {s.get('mean')}, std = {s.get('std')}, min = {s.get('min')}"
+                )
         lines.append("")
 
     # === Section 4: fanova importance ===

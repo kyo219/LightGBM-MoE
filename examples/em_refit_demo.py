@@ -37,7 +37,6 @@ import numpy as np
 
 import lightgbm_moe as lgb
 
-
 N_TRAIN = 600
 N_VALID = 200
 N_FEATURES = 5
@@ -110,9 +109,11 @@ def train_with_responsibility_log(params: dict, X_train, y_train, X_valid, y_val
     train_data = lgb.Dataset(X_train, label=y_train)
     valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
     bst = lgb.train(
-        params, train_data,
+        params,
+        train_data,
         num_boost_round=N_BOOST_ROUND,
-        valid_sets=[valid_data], valid_names=["valid"],
+        valid_sets=[valid_data],
+        valid_names=["valid"],
         callbacks=[cb],
     )
     return bst, snapshots, rmse_train, rmse_valid
@@ -125,10 +126,7 @@ def frob_distance_from_init(snapshots):
     iters = np.array([it for it, _ in snapshots])
     r_init = snapshots[0][1]
     norm_init = float(np.linalg.norm(r_init))
-    dists = np.array([
-        float(np.linalg.norm(r - r_init)) / max(norm_init, 1e-9)
-        for _, r in snapshots
-    ])
+    dists = np.array([float(np.linalg.norm(r - r_init)) / max(norm_init, 1e-9) for _, r in snapshots])
     return iters, dists
 
 
@@ -147,17 +145,21 @@ def main():
     t0 = time.perf_counter()
     bst_off, snap_off, rmse_t_off, rmse_v_off = train_with_responsibility_log(
         dict(base_params(), mixture_refit_leaves=False),
-        X_train, y_train, X_valid, y_valid,
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
     )
     t_off = time.perf_counter() - t0
 
     # (b) v0.7 refit on, full replace per iter
     t0 = time.perf_counter()
     bst_on, snap_on, rmse_t_on, rmse_v_on = train_with_responsibility_log(
-        dict(base_params(), mixture_refit_leaves=True,
-             mixture_refit_decay_rate=0.0,
-             mixture_refit_trigger="always"),
-        X_train, y_train, X_valid, y_valid,
+        dict(base_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.0, mixture_refit_trigger="always"),
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
     )
     t_on = time.perf_counter() - t0
 
@@ -167,27 +169,36 @@ def main():
     print()
     print(f"{'metric':<36} {'refit=off':>12} {'refit=on':>12} {'Δ':>10}")
     print("-" * 72)
-    print(f"{'final train RMSE':<36} {rmse_t_off[-1]:>12.4f} {rmse_t_on[-1]:>12.4f} "
-          f"{rmse_t_on[-1]-rmse_t_off[-1]:>+10.4f}")
-    print(f"{'final valid RMSE':<36} {rmse_v_off[-1]:>12.4f} {rmse_v_on[-1]:>12.4f} "
-          f"{rmse_v_on[-1]-rmse_v_off[-1]:>+10.4f}")
-    print(f"{'max ||r_t − r_init||_F (norm)':<36} {dist_off.max():>12.4f} "
-          f"{dist_on.max():>12.4f} {dist_on.max()-dist_off.max():>+10.4f}")
-    print(f"{'wall time (s)':<36} {t_off:>12.2f} {t_on:>12.2f} "
-          f"{t_on-t_off:>+10.2f}")
+    print(
+        f"{'final train RMSE':<36} {rmse_t_off[-1]:>12.4f} {rmse_t_on[-1]:>12.4f} "
+        f"{rmse_t_on[-1] - rmse_t_off[-1]:>+10.4f}"
+    )
+    print(
+        f"{'final valid RMSE':<36} {rmse_v_off[-1]:>12.4f} {rmse_v_on[-1]:>12.4f} "
+        f"{rmse_v_on[-1] - rmse_v_off[-1]:>+10.4f}"
+    )
+    print(
+        f"{'max ||r_t − r_init||_F (norm)':<36} {dist_off.max():>12.4f} "
+        f"{dist_on.max():>12.4f} {dist_on.max() - dist_off.max():>+10.4f}"
+    )
+    print(f"{'wall time (s)':<36} {t_off:>12.2f} {t_on:>12.2f} {t_on - t_off:>+10.2f}")
     print("=" * 72)
     print()
     if dist_on.max() > dist_off.max() + 0.05:
         print("[OK] refit-on escaped the r_init basin — see plot for trajectory.")
     else:
-        print("[WARN] refit-on did NOT escape r_init meaningfully on this seed. "
-              "Try a larger num_boost_round or a different init seed.")
+        print(
+            "[WARN] refit-on did NOT escape r_init meaningfully on this seed. "
+            "Try a larger num_boost_round or a different init seed."
+        )
 
     # Optional plot
     try:
         import matplotlib  # noqa: F401
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
         fig, axes = plt.subplots(1, 2, figsize=(11, 4))
         axes[0].plot(iters_off, dist_off, label="refit=off (v0.6)", lw=2)
         axes[0].plot(iters_on, dist_on, label="refit=on (v0.7)", lw=2)

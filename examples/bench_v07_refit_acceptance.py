@@ -37,9 +37,9 @@ import numpy as np
 # Ensure we import the dev sources, not the installed package.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python-package"))
 
-import lightgbm_moe as lgb  # noqa: E402
+from benchmark import generate_hmm_data, generate_synthetic_data  # noqa: E402
 
-from benchmark import generate_synthetic_data, generate_hmm_data  # noqa: E402
+import lightgbm_moe as lgb  # noqa: E402
 
 
 def base_moe_params() -> Dict[str, Any]:
@@ -66,15 +66,12 @@ def base_moe_params() -> Dict[str, Any]:
     }
 
 
-def run_one(params: Dict[str, Any], X_train, y_train, X_valid, y_valid,
-            num_boost_round: int) -> Dict[str, Any]:
+def run_one(params: Dict[str, Any], X_train, y_train, X_valid, y_valid, num_boost_round: int) -> Dict[str, Any]:
     """Train a booster, return RMSE/timing/ELBO trajectory."""
     train_data = lgb.Dataset(X_train, label=y_train)
     valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
     t0 = time.perf_counter()
-    bst = lgb.train(params, train_data,
-                    num_boost_round=num_boost_round,
-                    valid_sets=[valid_data], valid_names=["valid"])
+    bst = lgb.train(params, train_data, num_boost_round=num_boost_round, valid_sets=[valid_data], valid_names=["valid"])
     train_s = time.perf_counter() - t0
     pred_t = bst.predict(X_train)
     pred_v = bst.predict(X_valid)
@@ -97,67 +94,99 @@ def bench_dataset(name: str, X, y, num_boost_round: int) -> Dict[str, Any]:
     print(f"\n=== {name} ===  (N={len(y)}, F={X.shape[1]}, rounds={num_boost_round})")
     X_train, y_train, X_valid, y_valid = split_train_valid(X, y)
 
-    out: Dict[str, Any] = {"name": name, "n_train": len(y_train),
-                           "n_valid": len(y_valid), "n_features": X.shape[1]}
+    out: Dict[str, Any] = {"name": name, "n_train": len(y_train), "n_valid": len(y_valid), "n_features": X.shape[1]}
 
     # (a) baseline: NO refit-related params
-    out["baseline"] = run_one(base_moe_params(), X_train, y_train, X_valid, y_valid,
-                              num_boost_round)
-    print(f"  baseline (refit omitted)        valid_rmse={out['baseline']['valid_rmse']:.4f}  "
-          f"time={out['baseline']['train_s']:.2f}s")
+    out["baseline"] = run_one(base_moe_params(), X_train, y_train, X_valid, y_valid, num_boost_round)
+    print(
+        f"  baseline (refit omitted)        valid_rmse={out['baseline']['valid_rmse']:.4f}  "
+        f"time={out['baseline']['train_s']:.2f}s"
+    )
 
     # (b) refit explicit OFF — should be bit-identical to baseline
     out["refit_off"] = run_one(
         dict(base_moe_params(), mixture_refit_leaves=False),
-        X_train, y_train, X_valid, y_valid, num_boost_round,
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        num_boost_round,
     )
-    print(f"  refit=False (explicit)          valid_rmse={out['refit_off']['valid_rmse']:.4f}  "
-          f"time={out['refit_off']['train_s']:.2f}s  "
-          f"hash_match={out['baseline']['predictions_hash'] == out['refit_off']['predictions_hash']}")
+    print(
+        f"  refit=False (explicit)          valid_rmse={out['refit_off']['valid_rmse']:.4f}  "
+        f"time={out['refit_off']['train_s']:.2f}s  "
+        f"hash_match={out['baseline']['predictions_hash'] == out['refit_off']['predictions_hash']}"
+    )
 
     # (c) refit ON, decay=1.0 — pass-through, also bit-identical to baseline
     out["refit_decay1"] = run_one(
         dict(base_moe_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=1.0),
-        X_train, y_train, X_valid, y_valid, num_boost_round,
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        num_boost_round,
     )
-    print(f"  refit=True decay=1.0            valid_rmse={out['refit_decay1']['valid_rmse']:.4f}  "
-          f"time={out['refit_decay1']['train_s']:.2f}s  "
-          f"hash_match={out['baseline']['predictions_hash'] == out['refit_decay1']['predictions_hash']}")
+    print(
+        f"  refit=True decay=1.0            valid_rmse={out['refit_decay1']['valid_rmse']:.4f}  "
+        f"time={out['refit_decay1']['train_s']:.2f}s  "
+        f"hash_match={out['baseline']['predictions_hash'] == out['refit_decay1']['predictions_hash']}"
+    )
 
     # (d) refit ON, decay=0.5 — partial refit
     out["refit_decay05"] = run_one(
         dict(base_moe_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.5),
-        X_train, y_train, X_valid, y_valid, num_boost_round,
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        num_boost_round,
     )
-    print(f"  refit=True decay=0.5            valid_rmse={out['refit_decay05']['valid_rmse']:.4f}  "
-          f"time={out['refit_decay05']['train_s']:.2f}s")
+    print(
+        f"  refit=True decay=0.5            valid_rmse={out['refit_decay05']['valid_rmse']:.4f}  "
+        f"time={out['refit_decay05']['train_s']:.2f}s"
+    )
 
     # (e) refit ON, decay=0.0 — full Newton replace per iter (most aggressive)
     out["refit_decay0"] = run_one(
         dict(base_moe_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.0),
-        X_train, y_train, X_valid, y_valid, num_boost_round,
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        num_boost_round,
     )
-    print(f"  refit=True decay=0.0            valid_rmse={out['refit_decay0']['valid_rmse']:.4f}  "
-          f"time={out['refit_decay0']['train_s']:.2f}s")
+    print(
+        f"  refit=True decay=0.0            valid_rmse={out['refit_decay0']['valid_rmse']:.4f}  "
+        f"time={out['refit_decay0']['train_s']:.2f}s"
+    )
 
     # (f) trigger=elbo — only refits on ELBO drops (cheap)
     out["refit_elbo"] = run_one(
-        dict(base_moe_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.0,
-             mixture_refit_trigger="elbo"),
-        X_train, y_train, X_valid, y_valid, num_boost_round,
+        dict(base_moe_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.0, mixture_refit_trigger="elbo"),
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        num_boost_round,
     )
-    print(f"  refit=True trigger=elbo         valid_rmse={out['refit_elbo']['valid_rmse']:.4f}  "
-          f"time={out['refit_elbo']['train_s']:.2f}s")
+    print(
+        f"  refit=True trigger=elbo         valid_rmse={out['refit_elbo']['valid_rmse']:.4f}  "
+        f"time={out['refit_elbo']['train_s']:.2f}s"
+    )
 
     return out
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rounds", type=int, default=100,
-                        help="num_boost_round per variant (default 100)")
-    parser.add_argument("--out", type=str, default=None,
-                        help="output JSON path (default: bench_results/v0_7_refit_acceptance_<ts>.json)")
+    parser.add_argument("--rounds", type=int, default=100, help="num_boost_round per variant (default 100)")
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="output JSON path (default: bench_results/v0_7_refit_acceptance_<ts>.json)",
+    )
     args = parser.parse_args()
 
     os.makedirs("bench_results", exist_ok=True)
@@ -166,8 +195,7 @@ def main():
 
     print(f"v0.7 leaf-refit acceptance smoke bench  ({ts})")
     print(f"rounds_per_variant={args.rounds}")
-    results: Dict[str, Any] = {"timestamp": ts, "num_boost_round": args.rounds,
-                                "datasets": {}}
+    results: Dict[str, Any] = {"timestamp": ts, "num_boost_round": args.rounds, "datasets": {}}
 
     # Synthetic — internal generator, regime is observable from X_0
     X, y, _ = generate_synthetic_data(n_samples=2000, seed=42)
@@ -185,13 +213,14 @@ def main():
     print("-" * 78)
     for ds_name, ds in results["datasets"].items():
         base = ds["baseline"]
-        for variant in ["baseline", "refit_off", "refit_decay1",
-                         "refit_decay05", "refit_decay0", "refit_elbo"]:
+        for variant in ["baseline", "refit_off", "refit_decay1", "refit_decay05", "refit_decay0", "refit_elbo"]:
             r = ds[variant]
             d_pct = 100.0 * (r["valid_rmse"] - base["valid_rmse"]) / max(abs(base["valid_rmse"]), 1e-9)
             t_ratio = r["train_s"] / max(base["train_s"], 1e-9)
-            print(f"{ds_name:<14} {variant:<24} {r['valid_rmse']:>10.4f} "
-                  f"{d_pct:>+7.2f}% {r['train_s']:>9.2f} {t_ratio:>6.2f}×")
+            print(
+                f"{ds_name:<14} {variant:<24} {r['valid_rmse']:>10.4f} "
+                f"{d_pct:>+7.2f}% {r['train_s']:>9.2f} {t_ratio:>6.2f}×"
+            )
     print("=" * 78)
 
     # Acceptance assertions
@@ -201,12 +230,10 @@ def main():
         h_base = ds["baseline"]["predictions_hash"]
         h_off = ds["refit_off"]["predictions_hash"]
         h_dec1 = ds["refit_decay1"]["predictions_hash"]
-        match_off = (h_base == h_off)
-        match_dec1 = (h_base == h_dec1)
-        print(f"  [{ds_name}] refit=False bit-identical to baseline:        "
-              f"{'PASS' if match_off else 'FAIL'}")
-        print(f"  [{ds_name}] decay=1.0 bit-identical to baseline:          "
-              f"{'PASS' if match_dec1 else 'FAIL'}")
+        match_off = h_base == h_off
+        match_dec1 = h_base == h_dec1
+        print(f"  [{ds_name}] refit=False bit-identical to baseline:        {'PASS' if match_off else 'FAIL'}")
+        print(f"  [{ds_name}] decay=1.0 bit-identical to baseline:          {'PASS' if match_dec1 else 'FAIL'}")
         if not (match_off and match_dec1):
             all_ok = False
 

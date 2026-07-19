@@ -34,6 +34,7 @@ except ImportError:
 from .auto_k import select_num_experts
 from .diagnostics import diagnose_moe
 from .pruning import PrunedMoEModel, merge_experts, prune_experts
+
 try:
     from .viz import RegimeEvolutionRecorder
 except ImportError:

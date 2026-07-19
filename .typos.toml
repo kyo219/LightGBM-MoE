@@ -2,11 +2,17 @@ default.extend-ignore-re = [
   "/Ot",
   "mis-alignment",
   "mis-spelled",
+  "mis-scaled",
+  "mis-scaling",
+  "mis-sized",
   "posix-seh-rt",
 ]
 
 [default.extend-words]
 MAPE = "MAPE"
+TPE = "TPE"
+lik = "lik"
+Lik = "Lik"
 datas = "datas"
 indx = "indx"
 interprete = "interprete"
@@ -15,6 +21,9 @@ splitted = "splitted"
 
 [default.extend-identifiers]
 ERRORs = "ERRORs"
+PNGs = "PNGs"
+thr = "thr"
+ttest_ind = "ttest_ind"
 GAM = "GAM"
 ND24s = "ND24s"
 WARNINGs = "WARNINGs"

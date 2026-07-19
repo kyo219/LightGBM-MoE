@@ -439,10 +439,7 @@ class TestMixtureRefitLeaves:
         # the same fixed point as append-only — neither is the intended v0.7
         # behavior). A loose threshold (1e-3) is intentional: it tolerates
         # tiny numerical noise on small datasets but catches "refit didn't fire".
-        assert diff > 1e-3, (
-            f"refit_leaves=True with decay=0.0 should change predictions, "
-            f"got max abs diff = {diff:.2e}"
-        )
+        assert diff > 1e-3, f"refit_leaves=True with decay=0.0 should change predictions, got max abs diff = {diff:.2e}"
         # Sanity: still produces valid output.
         assert not np.any(np.isnan(refit_full.predict(X)))
 
@@ -458,50 +455,69 @@ class TestMixtureRefitLeaves:
         X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
 
         always = lgb.train(
-            dict(self._base_params(), mixture_refit_leaves=True,
-                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="always"),
+            dict(
+                self._base_params(),
+                mixture_refit_leaves=True,
+                mixture_refit_decay_rate=0.0,
+                mixture_refit_trigger="always",
+            ),
             lgb.Dataset(X, label=y),
             num_boost_round=20,
         )
         every1 = lgb.train(
-            dict(self._base_params(), mixture_refit_leaves=True,
-                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="every_n",
-                 mixture_refit_every_n=1),
+            dict(
+                self._base_params(),
+                mixture_refit_leaves=True,
+                mixture_refit_decay_rate=0.0,
+                mixture_refit_trigger="every_n",
+                mixture_refit_every_n=1,
+            ),
             lgb.Dataset(X, label=y),
             num_boost_round=20,
         )
         every5 = lgb.train(
-            dict(self._base_params(), mixture_refit_leaves=True,
-                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="every_n",
-                 mixture_refit_every_n=5),
+            dict(
+                self._base_params(),
+                mixture_refit_leaves=True,
+                mixture_refit_decay_rate=0.0,
+                mixture_refit_trigger="every_n",
+                mixture_refit_every_n=5,
+            ),
             lgb.Dataset(X, label=y),
             num_boost_round=20,
         )
         every_huge = lgb.train(
-            dict(self._base_params(), mixture_refit_leaves=True,
-                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="every_n",
-                 mixture_refit_every_n=10000),
+            dict(
+                self._base_params(),
+                mixture_refit_leaves=True,
+                mixture_refit_decay_rate=0.0,
+                mixture_refit_trigger="every_n",
+                mixture_refit_every_n=10000,
+            ),
             lgb.Dataset(X, label=y),
             num_boost_round=20,
         )
-        no_refit = lgb.train(self._base_params(), lgb.Dataset(X, label=y),
-                             num_boost_round=20)
+        no_refit = lgb.train(self._base_params(), lgb.Dataset(X, label=y), num_boost_round=20)
 
         # every_n=1 should be bit-identical to always — both fire on every
         # post-warmup iter, identical decay/l2_reg, identical seed.
         np.testing.assert_array_equal(
-            always.predict(X), every1.predict(X),
+            always.predict(X),
+            every1.predict(X),
             err_msg="every_n=1 should match always",
         )
         # every_n=5: fires at iters 5/10/15 within the 20-iter run → strict
         # subset of always's iters, so different state at the end.
-        assert np.abs(always.predict(X) - every5.predict(X)).max() > 1e-6, \
+        assert np.abs(always.predict(X) - every5.predict(X)).max() > 1e-6, (
             "every_n=5 fires fewer times than always — predictions should differ"
-        assert np.abs(no_refit.predict(X) - every5.predict(X)).max() > 1e-6, \
+        )
+        assert np.abs(no_refit.predict(X) - every5.predict(X)).max() > 1e-6, (
             "every_n=5 fires at least once past warmup — should differ from off"
+        )
         # every_n=10000: never fires within 20 iters → bit-identical to off.
         np.testing.assert_array_equal(
-            no_refit.predict(X), every_huge.predict(X),
+            no_refit.predict(X),
+            every_huge.predict(X),
             err_msg="every_n=10000 never triggers within 20 iters → matches refit-off",
         )
 
@@ -515,17 +531,21 @@ class TestMixtureRefitLeaves:
         X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
 
         elbo_trigger = lgb.train(
-            dict(self._base_params(), mixture_refit_leaves=True,
-                 mixture_refit_decay_rate=0.0, mixture_refit_trigger="elbo"),
+            dict(
+                self._base_params(),
+                mixture_refit_leaves=True,
+                mixture_refit_decay_rate=0.0,
+                mixture_refit_trigger="elbo",
+            ),
             lgb.Dataset(X, label=y),
             num_boost_round=20,
         )
-        no_refit = lgb.train(self._base_params(), lgb.Dataset(X, label=y),
-                             num_boost_round=20)
+        no_refit = lgb.train(self._base_params(), lgb.Dataset(X, label=y), num_boost_round=20)
         # If the elbo trigger never fires (clean monotone EM), predictions
         # are bit-identical to refit-off.
         np.testing.assert_array_equal(
-            elbo_trigger.predict(X), no_refit.predict(X),
+            elbo_trigger.predict(X),
+            no_refit.predict(X),
             err_msg=(
                 "elbo trigger should be quiet on a well-behaved synthetic "
                 "where ELBO improves monotonically — predictions should match "
@@ -544,15 +564,19 @@ class TestMixtureRefitLeaves:
         """
         X, y, _ = make_toy_regression_data(n_samples=300, random_state=7)
 
-        params_off = dict(self._base_params(),
-                          mixture_gate_type="leaf_reuse",
-                          mixture_refit_leaves=False,
-                          mixture_refit_decay_rate=0.0)
-        params_on = dict(self._base_params(),
-                         mixture_gate_type="leaf_reuse",
-                         mixture_refit_leaves=True,
-                         mixture_refit_decay_rate=0.0,
-                         mixture_refit_trigger="always")
+        params_off = dict(
+            self._base_params(),
+            mixture_gate_type="leaf_reuse",
+            mixture_refit_leaves=False,
+            mixture_refit_decay_rate=0.0,
+        )
+        params_on = dict(
+            self._base_params(),
+            mixture_gate_type="leaf_reuse",
+            mixture_refit_leaves=True,
+            mixture_refit_decay_rate=0.0,
+            mixture_refit_trigger="always",
+        )
         bst_off = lgb.train(params_off, lgb.Dataset(X, label=y), num_boost_round=20)
         bst_on = lgb.train(params_on, lgb.Dataset(X, label=y), num_boost_round=20)
 
@@ -560,9 +584,11 @@ class TestMixtureRefitLeaves:
         # is silently downgraded to false, so predictions are bit-identical
         # to the explicit off run.
         np.testing.assert_array_equal(
-            bst_off.predict(X), bst_on.predict(X),
-            err_msg=("leaf_reuse + refit_leaves=true should be auto-downgraded "
-                     "to refit_leaves=false; predictions diverged"),
+            bst_off.predict(X),
+            bst_on.predict(X),
+            err_msg=(
+                "leaf_reuse + refit_leaves=true should be auto-downgraded to refit_leaves=false; predictions diverged"
+            ),
         )
 
     def test_refit_with_validation_does_not_diverge(self):
@@ -576,19 +602,19 @@ class TestMixtureRefitLeaves:
         # Held-out set
         rng = np.random.RandomState(13)
         X_valid = rng.randn(100, X.shape[1])
-        y_valid = np.where(X_valid[:, 0] > 0, 2 * X_valid[:, 1], -3 * X_valid[:, 2] + 5) \
-            + rng.randn(100) * 0.5
+        y_valid = np.where(X_valid[:, 0] > 0, 2 * X_valid[:, 1], -3 * X_valid[:, 2] + 5) + rng.randn(100) * 0.5
 
         train_data = lgb.Dataset(X, label=y)
         valid_data = lgb.Dataset(X_valid, label=y_valid, reference=train_data)
 
-        params = dict(self._base_params(), mixture_refit_leaves=True,
-                      mixture_refit_decay_rate=0.0, metric="rmse")
+        params = dict(self._base_params(), mixture_refit_leaves=True, mixture_refit_decay_rate=0.0, metric="rmse")
         evals_result = {}
         bst = lgb.train(
-            params, train_data,
+            params,
+            train_data,
             num_boost_round=20,
-            valid_sets=[valid_data], valid_names=["valid"],
+            valid_sets=[valid_data],
+            valid_names=["valid"],
             callbacks=[lgb.record_evaluation(evals_result)],
         )
 
@@ -596,7 +622,9 @@ class TestMixtureRefitLeaves:
         last_iter_metric = evals_result["valid"]["rmse"][-1]
         recomputed = float(np.sqrt(np.mean((bst.predict(X_valid) - y_valid) ** 2)))
         np.testing.assert_allclose(
-            last_iter_metric, recomputed, rtol=1e-5,
+            last_iter_metric,
+            recomputed,
+            rtol=1e-5,
             err_msg=(
                 "Validation RMSE reported during training does not match a "
                 "fresh predict() — valid_score_updater_ likely fell out of "
