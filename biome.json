@@ -8,11 +8,14 @@
     "files": {
         "includes": [
             "**",
+            "!**/lib",
             "!build",
             "!external_libs",
             "!lightgbm-python",
             "!lightgbm_r",
-            "!bench_results"
+            "!bench_results",
+            "!.pixi",
+            "!R-package/docs"
         ]
     },
     "formatter": {
