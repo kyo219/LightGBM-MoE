@@ -109,7 +109,3 @@ repos:
           - narwhals>=1.15
           - pandas>=2.0
           - scikit-learn>=1.5.2
-  - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.26.1
-    hooks:
-      - id: zizmor
