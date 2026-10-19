@@ -275,4 +275,4 @@ def test_readme_tables_come_from_the_merged_summary(study, tmp_path):
         "| `synthetic` | 100 × 5 | 2.000 ± 0.000 | 1.900 ± 0.000 | **1.500 ± 0.000** | −25.0 % | **−21.1 %** |"
         in tables
     )
-    assert "| `mixture_refit_leaves` ON | 2 / 2 |" in tables
+    assert "| `mixture_refit_leaves` ON (effective, i.e. not `leaf_reuse`) | 2 / 2 |" in tables

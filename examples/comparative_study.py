@@ -1313,28 +1313,32 @@ def render_readme_tables(results: dict) -> str:
         def count(ps, pred) -> int:
             return sum(1 for p in ps if pred(p))
 
-        def tally(key: str) -> str:
+        def tally(key: str, prefix: str = "") -> str:
             vals: dict = {}
             for p in winners:
                 vals[str(p.get(key))] = vals.get(str(p.get(key)), 0) + 1
-            return ", ".join(f"{k} {v}" for k, v in sorted(vals.items(), key=lambda kv: -kv[1]))
+            return ", ".join(f"{prefix}{k} {v}" for k, v in sorted(vals.items(), key=lambda kv: (-kv[1], kv[0])))
+
+        # leaf_reuse auto-disables refit/regrow at Init, so only count where they actually ran.
+        def effective(knob: str):
+            return lambda p: p.get(knob, False) and p.get("mixture_gate_type") != "leaf_reuse"
 
         out += [
             f"\n**Winning MoE configs** ({n_w} = datasets × seeds)\n",
             "| Knob | Winners |",
             "|---|---|",
             f"| `mixture_diversity_lambda` > 0.02 | {count(winners, lambda p: p.get('mixture_diversity_lambda', 0) > 0.02)} / {n_w} |",
-            f"| `mixture_expert_dropout_rate` > 0 | {count(winners, lambda p: p.get('mixture_expert_dropout_rate', 0) > 0)} / {n_w} |",
-            f"| `mixture_load_balance_alpha` > 0 | {count(winners, lambda p: p.get('mixture_load_balance_alpha', 0) > 0)} / {n_w} |",
-            f"| `mixture_gate_entropy_lambda` > 0 (gated winners) | {count(gated, lambda p: p.get('mixture_gate_entropy_lambda', 0) > 0)} / {n_g} |",
+            f"| `mixture_expert_dropout_rate` > 0.02 | {count(winners, lambda p: p.get('mixture_expert_dropout_rate', 0) > 0.02)} / {n_w} |",
+            f"| `mixture_load_balance_alpha` > 0.02 | {count(winners, lambda p: p.get('mixture_load_balance_alpha', 0) > 0.02)} / {n_w} |",
+            f"| `mixture_gate_entropy_lambda` > 0.02 (gated winners) | {count(gated, lambda p: p.get('mixture_gate_entropy_lambda', 0) > 0.02)} / {n_g} |",
             f"| gate `T_init` > 1.5 (gated winners) | {count(gated, lambda p: p.get('mixture_gate_temperature_init', 1.0) > 1.5)} / {n_g} |",
-            f"| `mixture_refit_leaves` ON | {count(winners, lambda p: p.get('mixture_refit_leaves', False))} / {n_w} |",
-            f"| `mixture_regrow_oldest_trees` ON | {count(winners, lambda p: p.get('mixture_regrow_oldest_trees', False))} / {n_w} |",
+            f"| `mixture_refit_leaves` ON (effective, i.e. not `leaf_reuse`) | {count(winners, effective('mixture_refit_leaves'))} / {n_w} |",
+            f"| `mixture_regrow_oldest_trees` ON (effective) | {count(winners, effective('mixture_regrow_oldest_trees'))} / {n_w} |",
             f"| `mixture_hard_m_step` soft (False) | {count(winners, lambda p: not p.get('mixture_hard_m_step', True))} / {n_w} |",
             f"| `mixture_init` | {tally('mixture_init')} |",
             f"| `mixture_gate_type` | {tally('mixture_gate_type')} |",
             f"| `mixture_routing_mode` | {tally('mixture_routing_mode')} |",
-            f"| `mixture_num_experts` | {tally('mixture_num_experts')} |",
+            f"| `mixture_num_experts` | {tally('mixture_num_experts', 'K=')} |",
         ]
     return "\n".join(out) + "\n"
 
