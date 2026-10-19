@@ -140,9 +140,8 @@ void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
   // from expert-tree leaf statistics, but RefitExpertsAndGate only refits the
   // gate when gate_type=gbdt — refitting expert leaves while leaving the
   // gate's accumulated GBDT trees frozen produces an asymmetric update that
-  // empirically degrades vix by +7% under uniform init (see
-  // bench_results/bench_v07_per_config_uniform.md). Force refit off in this
-  // combination and warn once at Init.
+  // empirically degraded vix by +7% under uniform init in the v0.7 benches.
+  // Force refit off in this combination and warn once at Init.
   if (config_->mixture_refit_leaves && config_->mixture_gate_type == "leaf_reuse") {
     Log::Warning(
         "MixtureGBDT: mixture_refit_leaves=true is not supported with "

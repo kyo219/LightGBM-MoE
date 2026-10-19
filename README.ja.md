@@ -77,7 +77,7 @@ MoE の gating が勝つのは regime 構造のあるデータ — ただし**�
 
 ## ベンチマーク — holdout ファーストのスタディ (naive vs naive-ensemble vs MoE)
 
-> **方法論ノート (v0.8.1)。** この表は v0.8.1 以前のベンチマークを置き換えるものです。旧版には監査で見つかった 4 つの欠陥がありました: (1) ヘッドラインが「500 Optuna trial の CV スコア最小値」— 選択指標そのものであり、探索空間が大きいほど有利になる winner's-curse バイアス付き推定値; (2) early stopping が採点フォールドで検証していた; (3) `vix` の特徴量が全期間平均をリークしていた(平均回帰系列に対する lookahead であり、まさに gate が悪用する regime プロキシ); (4) `sp500`/`vix` のターゲットが 1 ステップずれていた。4 つとも修正済み。旧レポートは [`bench_results/study_500_report.md`](bench_results/study_500_report.md) に記録として残置。**旧 `vix` の勝ち(−6.9 %)はリーク由来として撤回した上で、修正後プロトコルで正当に取り直し(下記 −5.0 %)**。旧 `fred_gdp` の負けは、COVID 四半期を含む holdout を実際に評価したら勝ちに反転しました。
+> **方法論ノート (v0.8.1)。** この表は v0.8.1 以前のベンチマークを置き換えるものです。旧版には監査で見つかった 4 つの欠陥がありました: (1) ヘッドラインが「500 Optuna trial の CV スコア最小値」— 選択指標そのものであり、探索空間が大きいほど有利になる winner's-curse バイアス付き推定値; (2) early stopping が採点フォールドで検証していた; (3) `vix` の特徴量が全期間平均をリークしていた(平均回帰系列に対する lookahead であり、まさに gate が悪用する regime プロキシ); (4) `sp500`/`vix` のターゲットが 1 ステップずれていた。4 つとも修正済みで、旧結果は削除しました。**旧 `vix` の勝ち(−6.9 %)はリーク由来として撤回した上で、修正後プロトコルで正当に取り直し(下記 −5.0 %)**。旧 `fred_gdp` の負けは、COVID 四半期を含む holdout を実際に評価したら勝ちに反転しました。
 
 プロトコル: 各系列の末尾 20 % は **Optuna が一度も見ない chronological holdout**。ハイパーパラメータは先頭 80 % 上の expanding-window 時系列 CV(5 fold、1 ステップ embargo、early stopping は各訓練窓の末尾で行い採点フォールドでは行わない)で選択し、CV 勝者を 1 回だけ再学習して holdout を 1 回だけ採点。**500 Optuna trials** × (variant × dataset × seed)、MoE は全探索空間(`--moe-space wide`: `gmm_features`/`kmeans_features` を含む全 init、K ∈ 2–6、gate 温度アニーリング、entropy λ、expert dropout、load-balance α、refit/regrow)、3 seeds(synthetic/hmm はデータ再抽選、TPE とモデルも再シード)、holdout RMSE mean ± std で報告。seed ごとに決定的(`--n-jobs 1`)。ビルドとデータの provenance(git commit、lib sha256、データ sha256)は出力 JSON に記録。生データ: [`bench_results/wide_v081/`](bench_results/wide_v081/)。
 
@@ -200,7 +200,6 @@ LGBM_MOE_PACKAGE_DIR=/path/to/other/python-package \
 |---|---|
 | 全パラメータリファレンス (MoE core, Gate, Smoothing, Prediction APIs) | [docs/moe/parameters.md](docs/moe/parameters.md) |
 | Optuna 探索テンプレート | [docs/moe/optuna-recipes.md](docs/moe/optuna-recipes.md) |
-| 500-trial / 5-dataset ベンチマーク方法論と dataset 別推奨 | [docs/moe/benchmark.md](docs/moe/benchmark.md) |
 | Per-expert ハイパーパラメータと role-based レシピ | [docs/moe/per-expert-hp.md](docs/moe/per-expert-hp.md) |
 | Expert Choice routing | [docs/moe/advanced-routing.md](docs/moe/advanced-routing.md) |
 | Progressive training (EvoMoE) と gate temperature annealing | [docs/moe/advanced-progressive.md](docs/moe/advanced-progressive.md) |

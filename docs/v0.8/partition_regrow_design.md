@@ -315,8 +315,6 @@ v0.6 winning configs + v0.8 enabled, all 6 datasets:
   umbrella spec
 - PR [#42](https://github.com/kyo219/LightGBM-MoE/pull/42) — work item
   B (ELBO trigger fix, the trigger this fires from)
-- `bench_results/v0_7_acceptance_FINAL.md` — v0.7 baseline empirics
-  this design is meant to improve on
 - `docs/moe/architecture.md` §2.7 — v0.7 leaf refit derivation that A
   extends
 - PR [#40](https://github.com/kyo219/LightGBM-MoE/pull/40) — v0.7 leaf

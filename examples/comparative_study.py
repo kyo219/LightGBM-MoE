@@ -44,8 +44,9 @@ Usage:
     # 小規模 sanity check
     python examples/comparative_study.py --trials 50 --out bench_results/study_smoke.json
 
-    # 本番 500 trials × 2 variants × 6 datasets (deterministic)
-    python examples/comparative_study.py --trials 500 --out bench_results/study_500.json
+    # 本番: holdout プロトコル, wide MoE 空間, 3 seeds (seed ごとに deterministic)
+    python examples/comparative_study.py --trials 500 --seeds 42,43,44 \
+        --moe-space wide --out bench_results/study_wide.json
 """
 
 from __future__ import annotations
