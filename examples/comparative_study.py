@@ -566,7 +566,8 @@ def categorical_value_stats(trials: list[dict], param: str) -> dict:
             "runner_up": str(runner_up),
             "delta_mean": round(per_value[str(runner_up)]["mean"] - per_value[str(best_val)]["mean"], 4),
             "p_value": round(float(p_val), 6) if np.isfinite(p_val) else None,
-            "significant": (np.isfinite(p_val) and p_val < 0.01),
+            # plain bool: a numpy bool would be dumped as the string "False" (truthy) by json default=str
+            "significant": bool(np.isfinite(p_val) and p_val < 0.01),
         },
     }
 
