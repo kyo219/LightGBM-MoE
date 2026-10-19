@@ -70,11 +70,7 @@ MixtureGBDT::MixtureGBDT()
       es_first_metric_only_(false) {
 }
 
-MixtureGBDT::~MixtureGBDT() {
-  for (BinIterator* p : leaf_reuse_iters_) {
-    delete p;
-  }
-}
+MixtureGBDT::~MixtureGBDT() {}
 
 void MixtureGBDT::Init(const Config* config, const Dataset* train_data,
                        const ObjectiveFunction* objective_function,
@@ -740,13 +736,22 @@ CompactBinMatrix<BinT> BuildCompactBinMatrix(const Dataset* train_data,
   }
 
   if (include_label) {
-    double label_sum = 0.0;
-    #pragma omp parallel for num_threads(num_threads) schedule(static) reduction(+:label_sum)
-    for (data_size_t i = 0; i < N; ++i) {
-      const double value = static_cast<double>(labels[i]);
-      m.label[i] = value;
-      label_sum += value;
+    // Per-thread partials merged in thread order: an OMP reduction(+) combines
+    // in arrival order, which makes the float sum nondeterministic.
+    std::vector<double> label_partial(num_threads, 0.0);
+    #pragma omp parallel num_threads(num_threads)
+    {
+      double local = 0.0;
+      #pragma omp for schedule(static)
+      for (data_size_t i = 0; i < N; ++i) {
+        const double value = static_cast<double>(labels[i]);
+        m.label[i] = value;
+        local += value;
+      }
+      label_partial[omp_get_thread_num()] = local;
     }
+    double label_sum = 0.0;
+    for (double v : label_partial) label_sum += v;
     m.mean[m.num_features] = label_sum / N;
   }
 
@@ -2128,9 +2133,14 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
     }
   }
 
-  double total = 0.0;
-  #pragma omp parallel num_threads(OMP_NUM_THREADS()) reduction(+:total)
+  // Per-thread partials merged in thread order (not reduction(+), whose
+  // arrival-order combine makes the ELBO — and the refit trigger reading it —
+  // nondeterministic in the last bits).
+  const int num_threads = OMP_NUM_THREADS();
+  std::vector<double> partial(num_threads, 0.0);
+  #pragma omp parallel num_threads(num_threads)
   {
+    double total = 0.0;
     double terms_buf[64];
     std::vector<double> terms_heap;
     double* terms;
@@ -2173,7 +2183,10 @@ double MixtureGBDT::ComputeMarginalLogLikelihood() const {
       }
       total += max_term + std::log(sum_exp + kMixtureEpsilon);
     }
+    partial[omp_get_thread_num()] = total;
   }
+  double total = 0.0;
+  for (double v : partial) total += v;
   return total;
 }
 
@@ -3341,72 +3354,22 @@ void MixtureGBDT::MStepGateLeafReuse() {
   }
 
   const int num_leaves = routing_tree->num_leaves();
-  const int num_internal = num_leaves - 1;  // number of split nodes
-  const int num_features = train_data_->num_features();
-
-  // Build a flat lookup table BinIterator* indexed by inner_feat. Replaces a
-  // per-thread std::unordered_map lookup that previously fired on every node
-  // traversal — at 300 trials × 5 CV × 100 rounds × 2000 samples × tree depth
-  // the hash lookup dominated runtime (issue #16 follow-up).
-  //
-  // BinIterator::RawGet is a stateless read of bin_data_, so a single iterator
-  // per feature is shared safely across OMP threads. Iterators are also held
-  // as a class member (leaf_reuse_iters_) so they are allocated once per
-  // tree-shape change instead of per call.
-  if (static_cast<int>(leaf_reuse_iters_.size()) != num_features) {
-    for (BinIterator* p : leaf_reuse_iters_) {
-      delete p;
-    }
-    leaf_reuse_iters_.assign(num_features, nullptr);
-    leaf_reuse_iter_features_.clear();
-  }
-
-  // Track which features have iterators allocated, so only those are torn down
-  // when the tree shape changes. We rebuild on each call — cheap because the
-  // set of split features is small (≤ num_internal).
-  for (int inner_feat : leaf_reuse_iter_features_) {
-    delete leaf_reuse_iters_[inner_feat];
-    leaf_reuse_iters_[inner_feat] = nullptr;
-  }
-  leaf_reuse_iter_features_.clear();
-  for (int node = 0; node < num_internal; ++node) {
-    const int inner_feat = routing_tree->split_feature_inner(node);
-    if (leaf_reuse_iters_[inner_feat] == nullptr) {
-      leaf_reuse_iters_[inner_feat] = train_data_->FeatureIterator(inner_feat);
-      leaf_reuse_iter_features_.push_back(inner_feat);
-    }
-  }
 
   // Step 1: Get leaf index for each sample via bin-based tree traversal.
-  // Pre-cache split metadata in flat arrays so the inner loop touches only
-  // raw int reads (no virtual calls per node, no unordered_map lookups).
-  std::vector<BinIterator*> node_iter(num_internal);
-  std::vector<uint32_t> node_threshold(num_internal);
-  std::vector<int> node_left(num_internal);
-  std::vector<int> node_right(num_internal);
-  for (int node = 0; node < num_internal; ++node) {
-    node_iter[node] = leaf_reuse_iters_[routing_tree->split_feature_inner(node)];
-    node_threshold[node] = routing_tree->threshold_in_bin(node);
-    node_left[node] = routing_tree->left_child(node);
-    node_right[node] = routing_tree->right_child(node);
-  }
-
+  // Tree::PredictLeafIndices gives each thread its own BinIterators, Reset to
+  // the thread's first row, and routes with the tree's own decision function.
+  // An earlier version shared one iterator per feature across OMP threads on
+  // the assumption that RawGet is stateless. It is not for sparse bins:
+  // SparseBinIterator keeps a cursor, so threads raced on it and read bin 0
+  // for rows behind another thread's cursor — misrouted samples and run-to-run
+  // nondeterministic gate targets. It also compared group-level RawGet values
+  // against feature-level thresholds, which is wrong for EFB-bundled features,
+  // and ignored missing-value and categorical splits.
   if (static_cast<data_size_t>(sample_leaf_buf_.size()) != num_data_) {
     sample_leaf_buf_.resize(num_data_);
   }
   int* sample_leaf = sample_leaf_buf_.data();
-
-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
-  for (data_size_t i = 0; i < num_data_; ++i) {
-    int node = 0;
-    while (node >= 0) {
-      const uint32_t bin_val = node_iter[node]->RawGet(i);
-      node = (bin_val <= node_threshold[node])
-                 ? node_left[node]
-                 : node_right[node];
-    }
-    sample_leaf[i] = ~node;  // leaf index
-  }
+  routing_tree->PredictLeafIndices(train_data_, num_data_, sample_leaf);
 
   // Step 2: Aggregate responsibility distribution per leaf using a flat
   // [num_leaves * num_experts_] buffer (member-owned to avoid per-call allocs).

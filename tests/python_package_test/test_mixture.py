@@ -882,3 +882,50 @@ class TestMixtureIterationRange:
             "num_iteration=5 produced gate probabilities identical to the full "
             "model — start/num_iteration_predict appears to be ignored by the C side"
         )
+
+
+class TestLeafReuseGateDeterminism:
+    """leaf_reuse routes samples through an expert tree using bin data.
+
+    It once shared one BinIterator per feature across OMP threads; sparse-bin
+    iterators carry a cursor, so threads raced on it, misrouted rows and made
+    multi-threaded training nondeterministic. Sparse features force that path.
+    """
+
+    @staticmethod
+    def _train(num_threads, X, y):
+        params = {
+            "boosting": "mixture",
+            "mixture_num_experts": 3,
+            "mixture_gate_type": "leaf_reuse",
+            "mixture_hard_m_step": False,
+            "objective": "regression",
+            "verbose": -1,
+            "num_leaves": 15,
+            "min_data_in_leaf": 10,
+            "num_threads": num_threads,
+            "seed": 7,
+            # soft M-step weights hessians by r_ik, so histogram sums are only
+            # order-stable (bit-identical across runs) in deterministic mode
+            "deterministic": True,
+        }
+        bst = lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=30)
+        return bst.predict(X), bst.predict_regime_proba(X)
+
+    def test_threads_match_single_thread(self):
+        rng = np.random.RandomState(0)
+        n = 4000
+        X = rng.randn(n, 6)
+        X[rng.rand(n, 6) < 0.85] = 0.0  # ~85 % zeros → sparse bins
+        y = np.where(X[:, 0] > 0, 3 * X[:, 1], -2 * X[:, 2] + 1) + rng.randn(n) * 0.1
+
+        # Repeated multi-threaded runs must be bit-identical; vs. one thread only
+        # float summation order may differ (the race produced O(1) deviations).
+        pred_4, proba_4 = self._train(4, X, y)
+        for _ in range(3):
+            pred_again, proba_again = self._train(4, X, y)
+            np.testing.assert_array_equal(pred_again, pred_4)
+            np.testing.assert_array_equal(proba_again, proba_4)
+        pred_1, proba_1 = self._train(1, X, y)
+        np.testing.assert_allclose(pred_4, pred_1, rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(proba_4, proba_1, rtol=1e-9, atol=1e-12)
