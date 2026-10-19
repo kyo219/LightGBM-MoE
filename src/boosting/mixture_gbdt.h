@@ -591,16 +591,9 @@ class MixtureGBDT : public GBDTBase {
   std::vector<std::vector<data_size_t>> expert_sample_indices_;
   std::vector<data_size_t> all_data_indices_;
 
-  // MStepGateLeafReuse scratch / cache (#16 perf follow-up).
-  // - leaf_reuse_iters_: BinIterator* indexed by inner_feat for O(1) lookup.
-  //   Replaces the per-thread std::unordered_map that was the hot-path
-  //   bottleneck at 300+ Optuna trials with deep trees.
-  // - leaf_reuse_iter_features_: tracks which slots in leaf_reuse_iters_
-  //   currently own a heap-allocated iterator (for cleanup on tree-shape change).
-  // - sample_leaf_buf_, leaf_expert_sum_buf_, leaf_count_buf_: per-iteration
-  //   scratch buffers, retained across calls to avoid heap churn.
-  std::vector<class BinIterator*> leaf_reuse_iters_;
-  std::vector<int> leaf_reuse_iter_features_;
+  // MStepGateLeafReuse scratch: sample_leaf_buf_, leaf_expert_sum_buf_,
+  // leaf_count_buf_ are per-iteration buffers, retained across calls to avoid
+  // heap churn.
   std::vector<int> sample_leaf_buf_;
   std::vector<double> leaf_expert_sum_buf_;
   std::vector<int> leaf_count_buf_;
