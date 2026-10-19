@@ -246,6 +246,10 @@ def make_naive_lightgbm_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "boosting": "gbdt",
             "verbose": -1,
             "num_threads": 4,
+            # soft M-step hessians are r_ik-weighted, so multi-threaded histogram
+            # sums are order-sensitive; deterministic mode makes every trial
+            # bit-reproducible (applied to all variants for a like-for-like protocol)
+            "deterministic": True,
             "seed": cfg.seed,
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
@@ -289,6 +293,10 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "boosting": "gbdt",
             "verbose": -1,
             "num_threads": 4,
+            # soft M-step hessians are r_ik-weighted, so multi-threaded histogram
+            # sums are order-sensitive; deterministic mode makes every trial
+            # bit-reproducible (applied to all variants for a like-for-like protocol)
+            "deterministic": True,
             # `seed` is overridden per-member inside evaluate_ensemble_cv_timed;
             # this top-level value is not actually used by the ensemble.
             "seed": cfg.seed,
@@ -371,6 +379,10 @@ def make_moe_objective(
             "boosting": "mixture",
             "verbose": -1,
             "num_threads": 4,
+            # soft M-step hessians are r_ik-weighted, so multi-threaded histogram
+            # sums are order-sensitive; deterministic mode makes every trial
+            # bit-reproducible (applied to all variants for a like-for-like protocol)
+            "deterministic": True,
             "seed": cfg.seed,
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
