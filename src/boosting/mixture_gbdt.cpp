@@ -4588,7 +4588,6 @@ bool MixtureGBDT::SaveModelToFile(int start_iteration, int num_iterations,
 
 std::string MixtureGBDT::SaveModelToString(int start_iteration, int num_iterations,
                                             int feature_importance_type) const {
-
   // Gate model. The gate accumulates gate_iters_per_round_ GBDT iterations
   // per MoE iteration, so an iteration RANGE expressed in MoE units must be
   // scaled before it is applied to the gate — otherwise a truncated save
