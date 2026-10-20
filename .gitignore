@@ -486,3 +486,10 @@ dmypy.json
 
 # files created by release tasks
 /release-artifacts
+
+# comparative_study.py raw outputs: commit only study_summary.json, study_report.md and slice plots
+bench_results/**/study.json
+bench_results/**/run.log
+bench_results/**/run.pid
+bench_results/**/parts/*.json
+bench_results/**/parts/*.log

@@ -41,12 +41,14 @@ Determinism note (--n-jobs default=1):
     cross-run comparison.
 
 Usage:
-    # 小規模 sanity check
-    python examples/comparative_study.py --trials 50 --out bench_results/study_smoke.json
+    # 既定値 = README ヘッドラインのプロトコル (全 10 datasets × 3 seeds × 3 variants,
+    # wide MoE 空間, 500 trials)。(dataset, seed) ごとに 6 並列で回して 1 つに merge。
+    # merge は commit / lib sha256 / data sha256 / config が全 part で一致しないと拒否する。
+    python examples/comparative_study.py --parallel 6 --out bench_results/unified/study.json
 
-    # 本番: holdout プロトコル, wide MoE 空間, 3 seeds (seed ごとに deterministic)
-    python examples/comparative_study.py --trials 500 --seeds 42,43,44 \
-        --moe-space wide --out bench_results/study_wide.json
+    # 小規模 sanity check
+    python examples/comparative_study.py --trials 10 --seeds 42 \
+        --datasets synthetic,fred_gdp --out bench_results/smoke.json
 """
 
 from __future__ import annotations
@@ -244,6 +246,10 @@ def make_naive_lightgbm_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "boosting": "gbdt",
             "verbose": -1,
             "num_threads": 4,
+            # soft M-step hessians are r_ik-weighted, so multi-threaded histogram
+            # sums are order-sensitive; deterministic mode makes every trial
+            # bit-reproducible (applied to all variants for a like-for-like protocol)
+            "deterministic": True,
             "seed": cfg.seed,
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
@@ -287,6 +293,10 @@ def make_naive_ensemble_objective(X, y, cfg: BenchmarkConfig, trial_log: list):
             "boosting": "gbdt",
             "verbose": -1,
             "num_threads": 4,
+            # soft M-step hessians are r_ik-weighted, so multi-threaded histogram
+            # sums are order-sensitive; deterministic mode makes every trial
+            # bit-reproducible (applied to all variants for a like-for-like protocol)
+            "deterministic": True,
             # `seed` is overridden per-member inside evaluate_ensemble_cv_timed;
             # this top-level value is not actually used by the ensemble.
             "seed": cfg.seed,
@@ -369,6 +379,10 @@ def make_moe_objective(
             "boosting": "mixture",
             "verbose": -1,
             "num_threads": 4,
+            # soft M-step hessians are r_ik-weighted, so multi-threaded histogram
+            # sums are order-sensitive; deterministic mode makes every trial
+            # bit-reproducible (applied to all variants for a like-for-like protocol)
+            "deterministic": True,
             "seed": cfg.seed,
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 8, 128),
@@ -564,7 +578,8 @@ def categorical_value_stats(trials: list[dict], param: str) -> dict:
             "runner_up": str(runner_up),
             "delta_mean": round(per_value[str(runner_up)]["mean"] - per_value[str(best_val)]["mean"], 4),
             "p_value": round(float(p_val), 6) if np.isfinite(p_val) else None,
-            "significant": (np.isfinite(p_val) and p_val < 0.01),
+            # plain bool: a numpy bool would be dumped as the string "False" (truthy) by json default=str
+            "significant": bool(np.isfinite(p_val) and p_val < 0.01),
         },
     }
 
@@ -715,6 +730,12 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
         )
     lines.append("\n---\n")
 
+    readme_tables = render_readme_tables(results)
+    if readme_tables:
+        lines.append("## README tables (generated — paste verbatim)\n")
+        lines.append(readme_tables)
+        lines.append("\n---\n")
+
     # Headline: holdout metric (mean ± std across seeds)
     lines.append("## Headline: holdout RMSE (chronological tail, evaluated once per seed)\n")
     lines.append(
@@ -839,7 +860,7 @@ def render_markdown(results: dict, out_path: str, slice_paths: dict):
             sp = slice_paths.get(f"{run_tag}/{v}")
             if sp:
                 lines.append("\n#### E. Slice plot\n")
-                lines.append(f"![{run_tag}/{v}]({os.path.basename(sp)})\n")
+                lines.append(f"![{run_tag}/{v}]({os.path.relpath(sp, os.path.dirname(os.path.abspath(out_path)))})\n")
 
     # Overall recommendations summary
     lines.append("\n---\n\n## Overall recommendations\n")
@@ -1115,6 +1136,316 @@ def summarize_across_seeds(results: dict) -> dict:
     return summary
 
 
+# =============================================================================
+# Unified study: one build, one protocol, one output
+# =============================================================================
+# The headline study is a grid of independent (dataset, seed) jobs. `--parallel`
+# runs each job as its own child process (bit-identical to running them in one
+# process: every job reseeds its data, TPE sampler and models from the seed)
+# and `--merge` stitches the parts into one result. Merging refuses parts from
+# different builds or protocols — the v0.8.1 README table had been assembled
+# from runs at two different commits, which this makes impossible.
+REGIME_DATASETS = ["synthetic", "vix", "fred_gdp", "hmm"]
+CONTROL_DATASETS = list(OPENML_CONTROL_DATASETS)
+NOISE_FLOOR_DATASETS = ["sp500_basic", "sp500"]
+HEADLINE_VARIANTS = ("naive-lightgbm", "naive-ensemble", "moe")
+
+# Provenance fields that must be identical across merged parts.
+MERGE_PROVENANCE_KEYS = ("git_commit", "lib_sha256", "python", "numpy", "optuna", "platform", "data_cache")
+
+# Relative wall-time hints (v0.8.1 wide run) so the longest jobs start first.
+_JOB_COST_HINT = {
+    "houses": 9,
+    "wine_quality": 8,
+    "elevators": 6,
+    "cpu_act": 5,
+    "vix": 5,
+    "sp500": 5,
+    "sp500_basic": 5,
+    "synthetic": 4,
+    "hmm": 3,
+    "fred_gdp": 2,
+}
+
+
+def _slim(results: dict) -> dict:
+    """Study output minus the per-trial logs (the committed form)."""
+    out = {k: v for k, v in results.items() if k != "runs"}
+    out["runs"] = {
+        tag: {k: v for k, v in run.items() if not k.endswith("_trials")} for tag, run in results["runs"].items()
+    }
+    return out
+
+
+def write_outputs(results: dict, out_path: str):
+    """Full JSON (with trial logs), slim *_summary.json, and *_report.md."""
+    results["summary"] = summarize_across_seeds(results)
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    print(f"\nSaved JSON → {out_path}")
+    with open(out_path.replace(".json", "_summary.json"), "w") as f:
+        json.dump(_slim(results), f, indent=2, default=str)
+        f.write("\n")  # committed file; keep end-of-file-fixer happy
+    render_markdown(results, out_path.replace(".json", "_report.md"), results.get("slice_paths", {}))
+
+
+def merge_parts(paths: list[str]) -> dict:
+    """Merge per-(dataset, seed) study outputs into one result.
+
+    Every part must come from the same clean build (commit, lib sha256, data
+    sha256s, interpreter stack) and the same protocol (every config field but
+    datasets/seeds); otherwise SystemExit.
+    """
+    if not paths:
+        raise SystemExit("--merge: no part files given")
+    parts = []
+    for p in paths:
+        with open(p) as f:
+            parts.append(json.load(f))
+    ref_path, ref = paths[0], parts[0]
+    ref_cfg = {k: v for k, v in ref["config"].items() if k not in ("datasets", "seeds")}
+    runs: dict = {}
+    slice_paths: dict = {}
+    for p, d in zip(paths, parts, strict=True):
+        prov = d.get("provenance", {})
+        if prov.get("git_dirty"):
+            raise SystemExit(f"--merge: {p} was produced from a dirty tree; rerun from a clean commit")
+        for key in MERGE_PROVENANCE_KEYS:
+            if prov.get(key) != ref["provenance"].get(key):
+                raise SystemExit(
+                    f"--merge: provenance '{key}' of {p} differs from {ref_path} — parts must share one build"
+                )
+        cfg = {k: v for k, v in d["config"].items() if k not in ("datasets", "seeds")}
+        if cfg != ref_cfg:
+            diff = sorted(k for k in set(cfg) | set(ref_cfg) if cfg.get(k) != ref_cfg.get(k))
+            raise SystemExit(f"--merge: config of {p} differs from {ref_path} in {diff}")
+        for tag, run in d["runs"].items():
+            if tag in runs:
+                raise SystemExit(f"--merge: run {tag} appears in more than one part")
+            runs[tag] = run
+        part_dir = os.path.dirname(os.path.abspath(p))
+        for key, sp in d.get("slice_paths", {}).items():
+            slice_paths[key] = sp if os.path.isabs(sp) else os.path.join(part_dir, sp)
+
+    ds_order = {name: i for i, name in enumerate(DATASET_GENERATORS)}
+    ordered = sorted(runs.items(), key=lambda kv: (ds_order.get(kv[1]["dataset"], 99), kv[1]["seed"]))
+    datasets = sorted({r["dataset"] for r in runs.values()}, key=lambda n: ds_order.get(n, 99))
+    seeds = sorted({r["seed"] for r in runs.values()})
+    missing = [f"{ds}@s{s}" for ds in datasets for s in seeds if f"{ds}@s{s}" not in runs]
+    if missing:
+        print(f"WARNING: merged grid is incomplete, missing {missing}")
+    return {
+        "config": {**ref["config"], "datasets": datasets, "seeds": seeds},
+        "provenance": ref["provenance"],
+        "runs": dict(ordered),
+        "slice_paths": slice_paths,
+    }
+
+
+def _pct(a: float, b: float) -> str:
+    """Relative change a vs b, formatted like '−3.1 %'."""
+    d = (a / b - 1.0) * 100.0
+    return f"{'−' if d < 0 else '+'}{abs(d):.1f} %"
+
+
+def _fmt_rmse(mean: float, std: float) -> str:
+    digits = max(0, 3 - int(np.floor(np.log10(abs(mean)))))
+    return f"{mean:.{digits}f} ± {std:.{digits}f}"
+
+
+def _winner_trials(results: dict, variant: str = "moe") -> list[dict]:
+    """The CV-winning trial (the one scored on the holdout) of every run."""
+    winners = []
+    for run in results.get("runs", {}).values():
+        best = best_finite_trial(run.get(f"{variant}_trials", []))
+        if best is not None:
+            winners.append(best)
+    return winners
+
+
+def render_readme_tables(results: dict) -> str:
+    """README-ready markdown: results, compute cost and winning-knob tables.
+
+    Generated from one merged study so the README never mixes builds.
+    """
+    summary = results.get("summary", {})
+    if not all(v in summary.get(ds, {}) for ds in summary for v in HEADLINE_VARIANTS):
+        return ""
+    shapes = {}
+    for run in results.get("runs", {}).values():
+        n_rows = run["X_search_shape"][0] + run["n_holdout"]
+        shapes.setdefault(run["dataset"], f"{n_rows} × {run['X_search_shape'][1]}")
+
+    def results_table(names: list[str]) -> list[str]:
+        rows = [
+            "| Dataset | Shape | naive | ensemble | MoE | MoE vs naive | **MoE vs ensemble** |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for ds in names:
+            if ds not in summary:
+                continue
+            e = {v: summary[ds][v] for v in HEADLINE_VARIANTS}
+            if any(x.get("holdout_mean") is None for x in e.values()):
+                continue
+            n, ens, moe = (e[v]["holdout_mean"] for v in HEADLINE_VARIANTS)
+            cells = [_fmt_rmse(x["holdout_mean"], x.get("holdout_std", 0.0)) for x in e.values()]
+            best = min(range(3), key=lambda i: (n, ens, moe)[i])
+            cells[best] = f"**{cells[best]}**"
+            rows.append(
+                f"| `{ds}` | {shapes[ds]} | {cells[0]} | {cells[1]} | {cells[2]} "
+                f"| {_pct(moe, n)} | **{_pct(moe, ens)}** |"
+            )
+        return rows
+
+    def median_train_s(ds: str, variant: str) -> float:
+        vals = [
+            run[variant]["train_s_median"]
+            for run in results["runs"].values()
+            if run["dataset"] == ds and "train_s_median" in run.get(variant, {})
+        ]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    out = ["**Regime datasets**\n"] + results_table(REGIME_DATASETS)
+    out += ["\n**Non-regime control datasets**\n"] + results_table(CONTROL_DATASETS)
+    out += ["\n**Noise-floor datasets** (next-day returns)\n"] + results_table(NOISE_FLOOR_DATASETS)
+
+    out += [
+        "\n**Compute cost** (median train s/fold across trials, mean over seeds)\n",
+        "| Dataset | naive | ensemble | MoE | MoE / naive | MoE / ensemble |",
+        "|---|---|---|---|---|---|",
+    ]
+    for ds in summary:
+        n, ens, moe = (median_train_s(ds, v) for v in HEADLINE_VARIANTS)
+        out.append(f"| `{ds}` | {n:.3f} | {ens:.3f} | {moe:.3f} | {moe / n:.1f} × | {moe / ens:.1f} × |")
+
+    winners = [w["lgbm_params"] for w in _winner_trials(results)]
+    if winners:
+        gated = [p for p in winners if p.get("mixture_gate_type") in ("gbdt", "leaf_reuse")]
+        n_w, n_g = len(winners), len(gated)
+
+        def count(ps, pred) -> int:
+            return sum(1 for p in ps if pred(p))
+
+        def tally(key: str, prefix: str = "") -> str:
+            vals: dict = {}
+            for p in winners:
+                vals[str(p.get(key))] = vals.get(str(p.get(key)), 0) + 1
+            return ", ".join(f"{prefix}{k} {v}" for k, v in sorted(vals.items(), key=lambda kv: (-kv[1], kv[0])))
+
+        # leaf_reuse auto-disables refit/regrow at Init, so only count where they actually ran.
+        def effective(knob: str):
+            return lambda p: p.get(knob, False) and p.get("mixture_gate_type") != "leaf_reuse"
+
+        out += [
+            f"\n**Winning MoE configs** ({n_w} = datasets × seeds)\n",
+            "| Knob | Winners |",
+            "|---|---|",
+            f"| `mixture_diversity_lambda` > 0.02 | {count(winners, lambda p: p.get('mixture_diversity_lambda', 0) > 0.02)} / {n_w} |",
+            f"| `mixture_expert_dropout_rate` > 0.02 | {count(winners, lambda p: p.get('mixture_expert_dropout_rate', 0) > 0.02)} / {n_w} |",
+            f"| `mixture_load_balance_alpha` > 0.02 | {count(winners, lambda p: p.get('mixture_load_balance_alpha', 0) > 0.02)} / {n_w} |",
+            f"| `mixture_gate_entropy_lambda` > 0.02 (gated winners) | {count(gated, lambda p: p.get('mixture_gate_entropy_lambda', 0) > 0.02)} / {n_g} |",
+            f"| gate `T_init` > 1.5 (gated winners) | {count(gated, lambda p: p.get('mixture_gate_temperature_init', 1.0) > 1.5)} / {n_g} |",
+            f"| `mixture_refit_leaves` ON (effective, i.e. not `leaf_reuse`) | {count(winners, effective('mixture_refit_leaves'))} / {n_w} |",
+            f"| `mixture_regrow_oldest_trees` ON (effective) | {count(winners, effective('mixture_regrow_oldest_trees'))} / {n_w} |",
+            f"| `mixture_hard_m_step` soft (False) | {count(winners, lambda p: not p.get('mixture_hard_m_step', True))} / {n_w} |",
+            f"| `mixture_init` | {tally('mixture_init')} |",
+            f"| `mixture_gate_type` | {tally('mixture_gate_type')} |",
+            f"| `mixture_routing_mode` | {tally('mixture_routing_mode')} |",
+            f"| `mixture_num_experts` | {tally('mixture_num_experts', 'K=')} |",
+        ]
+    return "\n".join(out) + "\n"
+
+
+def _lib_is_stale() -> str | None:
+    """Return a reason string if the loaded lib is older than the C++ sources."""
+    lib = os.path.join(os.path.dirname(os.path.abspath(lgb.__file__)), "lib", "lib_lightgbm.so")
+    if not os.path.exists(lib):
+        return f"{lib} not found"
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    newest, newest_path = 0.0, ""
+    for sub in ("src", "include"):
+        for dirpath, _, files in os.walk(os.path.join(root, sub)):
+            for fn in files:
+                path = os.path.join(dirpath, fn)
+                if os.path.getmtime(path) > newest:
+                    newest, newest_path = os.path.getmtime(path), path
+    if os.path.getmtime(lib) < newest:
+        return f"{lib} is older than {os.path.relpath(newest_path, root)} — rebuild and copy the lib first"
+    return None
+
+
+def run_parallel(args, seeds: list[int], selected: list[str]) -> list[str]:
+    """Run every (dataset, seed) job as a child process, at most args.parallel at once.
+
+    Parts land in <out dir>/parts/; a part that already holds a finished run is
+    reused, so an interrupted study resumes where it stopped.
+    """
+    prov = collect_provenance()
+    if prov.get("git_dirty") and not args.allow_dirty:
+        raise SystemExit("working tree has uncommitted changes — commit first (or pass --allow-dirty)")
+    stale = _lib_is_stale()
+    if stale:
+        raise SystemExit(stale)
+
+    parts_dir = os.path.join(os.path.dirname(os.path.abspath(args.out)), "parts")
+    os.makedirs(parts_dir, exist_ok=True)
+    child_args = [
+        f"--trials={args.trials}",
+        f"--n-jobs={args.n_jobs}",
+        f"--rounds={args.rounds}",
+        f"--splits={args.splits}",
+        f"--holdout-frac={args.holdout_frac}",
+        f"--moe-refit-mode={args.moe_refit_mode}",
+        f"--moe-refit-decay={args.moe_refit_decay}",
+        f"--moe-space={args.moe_space}",
+    ]
+    if args.variants:
+        child_args.append(f"--variants={args.variants}")
+
+    jobs = sorted([(ds, s) for ds in selected for s in seeds], key=lambda j: (-_JOB_COST_HINT.get(j[0], 1), j[0], j[1]))
+    part_paths = [os.path.join(parts_dir, f"{ds}@s{s}.json") for ds, s in jobs]
+
+    def done(path: str) -> bool:
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            return bool(d.get("runs")) and d["provenance"].get("git_commit") == prov.get("git_commit")
+        except (OSError, ValueError, KeyError):
+            return False
+
+    def run_job(job, path):
+        ds, s = job
+        if done(path):
+            print(f"[{time.strftime('%H:%M:%S')}] reuse {ds}@s{s}", flush=True)
+            return 0
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            *child_args,
+            f"--datasets={ds}",
+            f"--seeds={s}",
+            f"--out={path}",
+        ]
+        print(f"[{time.strftime('%H:%M:%S')}] start {ds}@s{s}", flush=True)
+        t0 = time.perf_counter()
+        with open(path.replace(".json", ".log"), "w") as log:
+            rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False).returncode
+        print(
+            f"[{time.strftime('%H:%M:%S')}] {'done' if rc == 0 else f'FAILED rc={rc}'} {ds}@s{s} ({time.perf_counter() - t0:.0f}s)",
+            flush=True,
+        )
+        return rc
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+        rcs = list(pool.map(run_job, jobs, part_paths))
+    failed = [p for p, rc in zip(part_paths, rcs, strict=True) if rc != 0]
+    if failed:
+        raise SystemExit(f"{len(failed)} job(s) failed; see logs next to: {failed}")
+    return part_paths
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--trials", type=int, default=500)
@@ -1129,7 +1460,7 @@ def main():
     p.add_argument(
         "--seeds",
         type=str,
-        default="42",
+        default="42,43,44",
         help="comma-separated seeds; each seed redraws synthetic/hmm "
         "data AND reseeds the TPE sampler + models. Multi-seed "
         "runs report holdout mean±std — single-seed numbers "
@@ -1145,10 +1476,25 @@ def main():
     p.add_argument(
         "--datasets",
         type=str,
-        default="synthetic,fred_gdp,sp500_basic,sp500,vix,hmm",
+        default=",".join(DATASET_GENERATORS),
         help=f"Comma-separated subset of: {','.join(DATASET_GENERATORS.keys())}",
     )
     p.add_argument("--out", type=str, required=True)
+    p.add_argument(
+        "--parallel",
+        type=int,
+        default=0,
+        help="run each (dataset, seed) job as its own process, N at a time "
+        "(each trial uses 4 threads, so N=cores/4), then merge into --out. "
+        "Finished parts are reused, so a rerun resumes an interrupted study.",
+    )
+    p.add_argument("--allow-dirty", action="store_true", help="let --parallel run from a tree with uncommitted changes")
+    p.add_argument(
+        "--merge",
+        nargs="+",
+        metavar="PART",
+        help="merge existing part JSONs (same build + protocol required) into --out and exit",
+    )
     # v0.7 leaf-refit + v0.8 partition-regrow handling.
     #
     # "search" (v0.8 default): Optuna samples mixture_refit_leaves /
@@ -1175,7 +1521,7 @@ def main():
     p.add_argument(
         "--moe-space",
         choices=["standard", "wide"],
-        default="standard",
+        default="wide",
         help="MoE search space. 'wide' adds gmm_features/kmeans_features "
         "inits, K up to 6, gate temperature annealing, entropy "
         "lambda, expert dropout, load-balance alpha (~6 extra "
@@ -1190,14 +1536,22 @@ def main():
     )
     args = p.parse_args()
 
+    out_dir = os.path.dirname(args.out) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    if args.merge:
+        write_outputs(merge_parts(args.merge), args.out)
+        return
+
     seeds = [int(s.strip()) for s in args.seeds.split(",")]
     selected = [s.strip() for s in args.datasets.split(",")]
     unknown = [s for s in selected if s not in DATASET_GENERATORS]
     if unknown:
         raise SystemExit(f"Unknown dataset(s): {unknown}. Known: {list(DATASET_GENERATORS)}")
 
-    out_dir = os.path.dirname(args.out) or "."
-    os.makedirs(out_dir, exist_ok=True)
+    if args.parallel > 0:
+        write_outputs(merge_parts(run_parallel(args, seeds, selected)), args.out)
+        return
+
     slice_dir = out_dir
 
     results = {
@@ -1235,14 +1589,8 @@ def main():
             results["runs"][run_tag] = ds_out
             all_slice_paths.update(sp)
 
-    results["summary"] = summarize_across_seeds(results)
-
-    with open(args.out, "w") as f:
-        json.dump(results, f, indent=2, default=str)
-    print(f"\nSaved JSON → {args.out}")
-
-    md_path = args.out.replace(".json", "_report.md")
-    render_markdown(results, md_path, all_slice_paths)
+    results["slice_paths"] = {k: os.path.abspath(v) for k, v in all_slice_paths.items()}
+    write_outputs(results, args.out)
 
 
 if __name__ == "__main__":

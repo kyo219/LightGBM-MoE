@@ -14,6 +14,8 @@ cannot silently regress:
      and vary across seeds; no global np.random state is mutated.
   4. Protocol helpers — the ES-tail split never trains on the scoring fold,
      and the chronological holdout split is disjoint and ordered.
+  5. Unified study — merging per-(dataset, seed) parts refuses mixed builds
+     or protocols, so the README table can only come from one build.
 
 Market-data tests use the cached CSVs under examples/data_cache and are
 skipped when the cache is absent (CI without network); the synthetic ones
@@ -192,3 +194,85 @@ def test_cv_gap_embargo(study):
     for tr, va in tscv.split(X):
         # at least a 1-row embargo between train end and valid start
         assert va.min() - tr.max() >= study.CV_GAP + 1
+
+
+# ---------------------------------------------------------------------------
+# 5. Unified study: merged parts must share one build and one protocol
+# ---------------------------------------------------------------------------
+def _fake_part(dataset, seed, commit="abc", lib="f00", trials=500, holdout=None):
+    holdout = holdout or {"naive-lightgbm": 2.0, "naive-ensemble": 1.9, "moe": 1.5}
+    run = {
+        "dataset": dataset,
+        "seed": seed,
+        "X_search_shape": [80, 5],
+        "n_holdout": 20,
+        "_variants": list(holdout),
+    }
+    for v, h in holdout.items():
+        run[v] = {
+            "rmse_best": h,
+            "n_finite": trials,
+            "n_trials": trials,
+            "train_s_median": 0.1,
+            "holdout": {"holdout_rmse": h},
+        }
+        run[f"{v}_trials"] = [{"rmse": h, "lgbm_params": {"mixture_gate_type": "gbdt", "mixture_refit_leaves": True}}]
+    return {
+        "config": {"trials": trials, "datasets": [dataset], "seeds": [seed], "moe_space": "wide"},
+        "provenance": {"git_commit": commit, "git_dirty": False, "lib_sha256": lib},
+        "runs": {f"{dataset}@s{seed}": run},
+    }
+
+
+def _write_parts(tmp_path, parts):
+    import json
+
+    paths = []
+    for i, part in enumerate(parts):
+        path = tmp_path / f"part{i}.json"
+        path.write_text(json.dumps(part))
+        paths.append(str(path))
+    return paths
+
+
+def test_merge_combines_grid_in_dataset_order(study, tmp_path):
+    paths = _write_parts(tmp_path, [_fake_part("vix", 43), _fake_part("synthetic", 42), _fake_part("vix", 42)])
+    merged = study.merge_parts(paths)
+    assert list(merged["runs"]) == ["synthetic@s42", "vix@s42", "vix@s43"]
+    assert merged["config"]["datasets"] == ["synthetic", "vix"]
+    assert merged["config"]["seeds"] == [42, 43]
+
+
+@pytest.mark.parametrize(
+    ("other", "match"),
+    [
+        ({"commit": "def"}, "git_commit"),
+        ({"lib": "bad"}, "lib_sha256"),
+        ({"trials": 100}, "trials"),
+    ],
+)
+def test_merge_rejects_mixed_builds_and_protocols(study, tmp_path, other, match):
+    paths = _write_parts(tmp_path, [_fake_part("synthetic", 42), _fake_part("vix", 42, **other)])
+    with pytest.raises(SystemExit, match=match):
+        study.merge_parts(paths)
+
+
+def test_merge_rejects_dirty_and_duplicate_parts(study, tmp_path):
+    dirty = _fake_part("vix", 42)
+    dirty["provenance"]["git_dirty"] = True
+    with pytest.raises(SystemExit, match="dirty"):
+        study.merge_parts(_write_parts(tmp_path, [_fake_part("synthetic", 42), dirty]))
+    with pytest.raises(SystemExit, match="more than one part"):
+        study.merge_parts(_write_parts(tmp_path, [_fake_part("vix", 42), _fake_part("vix", 42)]))
+
+
+def test_readme_tables_come_from_the_merged_summary(study, tmp_path):
+    merged = study.merge_parts(_write_parts(tmp_path, [_fake_part("synthetic", 42), _fake_part("synthetic", 43)]))
+    merged["summary"] = study.summarize_across_seeds(merged)
+    tables = study.render_readme_tables(merged)
+    # MoE 1.5 vs naive 2.0 → −25.0 %, vs ensemble 1.9 → −21.1 %; best cell bolded
+    assert (
+        "| `synthetic` | 100 × 5 | 2.000 ± 0.000 | 1.900 ± 0.000 | **1.500 ± 0.000** | −25.0 % | **−21.1 %** |"
+        in tables
+    )
+    assert "| `mixture_refit_leaves` ON (effective, i.e. not `leaf_reuse`) | 2 / 2 |" in tables
