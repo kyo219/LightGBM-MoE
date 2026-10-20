@@ -1185,6 +1185,7 @@ def write_outputs(results: dict, out_path: str):
     print(f"\nSaved JSON → {out_path}")
     with open(out_path.replace(".json", "_summary.json"), "w") as f:
         json.dump(_slim(results), f, indent=2, default=str)
+        f.write("\n")  # committed file; keep end-of-file-fixer happy
     render_markdown(results, out_path.replace(".json", "_report.md"), results.get("slice_paths", {}))
 
 
