@@ -98,7 +98,7 @@ Three pathology guards worth knowing about:
 - **Diversity regularizer sign** was inverted in earlier code (pushed experts *together*). Sign + Huber clip + Hessian damping fix in [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) — the empirical "`mixture_diversity_lambda` is the only universal MoE knob" finding ([Settings that won](#settings-that-won--search-every-knob)) only became real after this.
 - **ELBO is logged every 10 iters** (`Σ_i log Σ_k π_k p(y_i | f_k, σ_k²)`). Approximate M-step makes small dips normal; persistent / >5% drops have historically meant high expert dropout, adaptive-LR decoupling experts from EM, or a recent gradient/Hessian regression — flagged loudly so we don't miss it.
 
-A v0.7 opt-in (`mixture_refit_leaves=true`, [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)) makes the M-step refit every existing tree's leaves in closed form against the current `r_ik` before the next tree is appended — recovering classical EM's "free-parameter M-step" within each tree's existing partition. v0.8 ([#41](https://github.com/kyo219/LightGBM-MoE/issues/41)) goes one step further with `mixture_regrow_oldest_trees=true` — discards the oldest trees' splits entirely and rebuilds them via the LightGBM tree learner against current `r`, extending the M-step to the (split, leaf) pair. Both are opt-in; both help bad-init recovery and don't help tuned configs (Optuna with v0.8 features in scope explicitly picks them OFF on 5/6 datasets — see [Limitations § v0.7 leaf-value refit](#v07-leaf-value-refit--opt-in-safety-net-for-bad-inits) and [§ v0.8 partition re-grow](#v08-partition-re-grow--same-safety-net-story-one-level-deeper)).
+A v0.7 opt-in (`mixture_refit_leaves=true`, [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)) makes the M-step refit every existing tree's leaves in closed form against the current `r_ik` before the next tree is appended — recovering classical EM's "free-parameter M-step" within each tree's existing partition. v0.8 ([#41](https://github.com/kyo219/LightGBM-MoE/issues/41)) goes one step further with `mixture_regrow_oldest_trees=true` — discards the oldest trees' splits entirely and rebuilds them via the LightGBM tree learner against current `r`, extending the M-step to the (split, leaf) pair. Both are opt-in; in the current holdout study leaf refit is ON in 15 / 24 winning configs, so search them like any other knob (see [Limitations § v0.7 leaf-value refit](#v07-leaf-value-refit--opt-in) and [§ v0.8 partition re-grow](#v08-partition-re-grow--one-level-deeper)).
 
 Full deep dive with code refs: [docs/moe/architecture.md](docs/moe/architecture.md).
 
@@ -123,7 +123,7 @@ Two consequences worth being honest about:
 - **Large regime re-assignments don't happen mid-training.** Some refinement happens — that's why the [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) diversity term and the [#36](https://github.com/kyo219/LightGBM-MoE/pull/36) symmetry breaker matter — but you don't see the "EM flipped two components" behavior of free-parameter EM. Snapshotting `model.get_responsibilities()` from a per-iter callback (see the docstring in `python-package/lightgbm_moe/basic.py:4994`) shows `r` smoothing toward its fixed point, not bouncing between modes.
 - **This compounds init dependence above** — the basin set by `r_init` is sticky because the model cannot take big jumps in `r` to escape it.
 
-### v0.7 leaf-value refit — opt-in safety net for bad inits
+### v0.7 leaf-value refit — opt-in
 
 The root-cause fix — **leaf-value refit-on-r-update**, which restores the closed-form M-step on each tree's existing partition structure — landed in v0.7 ([#37](https://github.com/kyo219/LightGBM-MoE/issues/37) / [PR #40](https://github.com/kyo219/LightGBM-MoE/pull/40)). Enable with `mixture_refit_leaves=true` (default `false`); the M-step then rewrites every existing tree's leaves against the current `r_ik` before appending the next tree, instead of leaving them frozen at the `r` of their construction round.
 
@@ -137,16 +137,15 @@ params = {
 }
 ```
 
-**Empirical position (verified by [`bench_results/v0_7_acceptance_FINAL.md`](bench_results/v0_7_acceptance_FINAL.md))**:
+**Empirical position**: in the current holdout study, `mixture_refit_leaves` is **ON in 15 / 24 winning configs** — after the v0.8.1 stale-score fix it is an ordinary knob to search, not only a bad-init safety net (see [Settings that won](#settings-that-won--search-every-knob)). The pre-v0.8.1 acceptance benches that concluded otherwise ran on the stale-score build and have been removed.
 
-- **Refit is a safety net for bad inits, not a free improvement on Optuna-tuned configs.** On the 6-dataset 500-trial study with v0.6 winning configs held fixed (per-config ablation), refit on `decay=0.0`/`every_n=10` slightly *degrades* RMSE on 5/6 datasets (+0.4–7.6%) — those configs were tuned to work well *under* append-only EM, and refit breaks the invariants they relied on. Tiny improvement on `fred_gdp` (−0.21%) is within one std.
-- **The strongest case is genuinely bad init.** On synthetic two-regime data with `mixture_init=random`, refit recovers from RMSE 1.015 → 0.634 (**−37%**) and `||r_t − r_init||_F` climbs to 0.99 (escapes the bad basin). On the same data with `mixture_init=gmm`, refit *hurts* (0.885 → 1.002, +13%) because the gmm init was already near the right mode and refit drifts away from it. See [`examples/em_refit_regime_evolution.py`](examples/em_refit_regime_evolution.py) for the four-config side-by-side regime tape plots.
-- **`elbo` trigger is bit-identical to off** when EM is well-behaved — the trigger condition (>5% ELBO drop) doesn't fire for monotone-converging configs. So `trigger=elbo` is the safe opt-in: zero cost when nothing's wrong, leaf-refit kicks in when it is.
-- **`gate_type="leaf_reuse"` is incompatible with refit and is auto-force-disabled at Init** with a one-time warning (refit rewrites expert leaves, but leaf_reuse's gate GBDT stays frozen, producing an asymmetric update — empirically +7% RMSE on `vix`).
+- **`trigger=elbo` is the safe opt-in**: it fires only on an ELBO drop or plateau, so well-behaved EM runs are left alone.
+- **`gate_type="leaf_reuse"` is incompatible with refit and is auto-force-disabled at Init** with a one-time warning (refit rewrites expert leaves, but leaf_reuse's gate GBDT stays frozen, producing an asymmetric update).
+- [`examples/em_refit_regime_evolution.py`](examples/em_refit_regime_evolution.py) plots refit on/off under `random` vs `gmm` init side by side.
 
 Track regime evolution mid-training with `model.get_responsibilities()` from a per-iter callback — `RegimeEvolutionRecorder` in `python-package/lightgbm_moe/viz.py` does this with a 4-panel diagnostic plot.
 
-### v0.8 partition re-grow — same safety-net story, one level deeper
+### v0.8 partition re-grow — one level deeper
 
 v0.7's leaf refit only updates leaf *values*; the split *structures* chosen against `r_init` stay frozen. v0.8 ([#41](https://github.com/kyo219/LightGBM-MoE/issues/41) / [PR #42](https://github.com/kyo219/LightGBM-MoE/pull/42) for the ELBO trigger fix, [PR #43](https://github.com/kyo219/LightGBM-MoE/pull/43) for partition re-grow) extends the M-step to discard old splits and rebuild trees against current `r_ik` via the LightGBM tree learner — block coordinate ascent on the (split, leaf) pair. Enable on top of `mixture_refit_leaves=true`:
 
@@ -161,14 +160,12 @@ params = {
 }
 ```
 
-**Empirical position (verified by [`bench_results/v0_8_acceptance_FINAL.md`](bench_results/v0_8_acceptance_FINAL.md) and [`bench_results/v0_8_search_FINAL.md`](bench_results/v0_8_search_FINAL.md))** — the same "bad init helps, tuned init doesn't" pattern as v0.7, just one level deeper:
+Partition re-build does what leaf refit can't: when the early-iter splits encode `r_init`'s wrong partition, no leaf-value optimization rescues that — splits have to be re-chosen.
 
-- **Bad-init recovery**: on synthetic + `mixture_init=random`, regrow with `per_fire=3` reaches RMSE 5.11, **−13.0% vs the off baseline (5.87)** — beating v0.7's leaf-refit-alone (5.53, −5.8%) by ~7 percentage points. Partition re-build does what leaf refit can't: when the early-iter splits encode `r_init`'s wrong partition, no leaf-value optimization rescues that — splits have to be re-chosen.
-- **Tuned configs gain nothing**: on the 6-dataset per-config bench with v0.6 winning configs held fixed, regrow at the safe `elbo` trigger fires 0/6 (correctly inert — these trajectories don't plateau). At forced `always` trigger, regrow degrades 4/6 by +0.2-7.1%, same shape as v0.7's "refit-always-degrades-tuned-configs" finding. The mechanism is sound; the regime is wrong.
-- **The 500-trial Optuna search independently confirms**: with `mixture_refit_leaves` and `mixture_regrow_oldest_trees` added to the search space (and `uniform` added to `mixture_init`), Optuna picked **`refit_leaves=False` on 5/6 datasets** and **`regrow=False` on 6/6 datasets** for the winning configs. fANOVA importance of `refit_leaves` is 0.000-0.008 across all datasets — near-zero variance-explanatory power. **Optuna with budget independently agrees: don't use refit/regrow when tuning is the goal.** Headline numbers drift slightly worse vs v0.6 baseline (5/6 small losses, search-space dilution effect — see `v0_8_search_FINAL.md` for the full breakdown).
+- **Search it like any other knob**: `mixture_regrow_oldest_trees` is part of the `--moe-space wide` search in the [benchmark](#benchmark--holdout-first-study-naive-vs-naive-ensemble-vs-moe). The pre-v0.8.1 acceptance benches ("Optuna declines refit/regrow") ran on the stale-score build and have been removed.
 - **`gate_type="leaf_reuse"` is auto-disabled** when `mixture_regrow_oldest_trees=true` for the same reason as v0.7 leaf refit (asymmetric update against the frozen leaf-reuse gate GBDT). One-time warning at Init.
 
-Bottom line: v0.7 and v0.8 features are **opt-in safety nets for bad-init recovery, not improvements to dial in for tuned configs**. The 500-trial search makes this an empirical fact, not just our claim. If your problem genuinely needs mode-discovery (unsupervised regime detection where regime structure is unknown a priori), this implementation still under-delivers versus a free-parameter EM with K random restarts even with v0.8 regrow on — partition re-build helps but K restarts is structurally stronger because each restart escapes the entire init basin, not just a few oldest trees within one run.
+If your problem genuinely needs mode-discovery (unsupervised regime detection where regime structure is unknown a priori), a free-parameter EM with K random restarts is still structurally stronger: each restart escapes the entire init basin, while regrow only rebuilds a few of the oldest trees within one run.
 
 ## When to use MoE
 
@@ -182,8 +179,7 @@ MoE's gating mechanism wins on regime-structured data — but the **honest basel
 > rewards larger search spaces; (2) early stopping validated on the scoring fold; (3) the
 > `vix` features leaked the full-sample mean (lookahead for a mean-reverting series — and a
 > regime proxy, precisely the signal a gate exploits); (4) `sp500`/`vix` targets were
-> misaligned by one step. All four are fixed; the old report remains at
-> [`bench_results/study_500_report.md`](bench_results/study_500_report.md) for archaeology.
+> misaligned by one step. All four are fixed and the old results have been removed.
 > The old `vix` −6.9 % win was retracted as a leak artifact, then re-established honestly
 > under the fixed protocol (−5.0 % below); the old `fred_gdp` loss flipped to a win once a
 > holdout containing the COVID quarters was actually evaluated.
@@ -344,7 +340,6 @@ LGBM_MOE_PACKAGE_DIR=/path/to/other/python-package \
 |---|---|
 | Full parameter reference (MoE core, Gate, Smoothing, Prediction APIs) | [docs/moe/parameters.md](docs/moe/parameters.md) |
 | Optuna search templates | [docs/moe/optuna-recipes.md](docs/moe/optuna-recipes.md) |
-| 500-trial / 5-dataset benchmark methodology & per-dataset recommendations | [docs/moe/benchmark.md](docs/moe/benchmark.md) |
 | Per-expert hyperparameters & role-based recipe | [docs/moe/per-expert-hp.md](docs/moe/per-expert-hp.md) |
 | Expert Choice routing | [docs/moe/advanced-routing.md](docs/moe/advanced-routing.md) |
 | Progressive training (EvoMoE) & gate temperature annealing | [docs/moe/advanced-progressive.md](docs/moe/advanced-progressive.md) |
@@ -353,9 +348,6 @@ LGBM_MOE_PACKAGE_DIR=/path/to/other/python-package \
 | `int8` & `use_quantized_grad` compatibility (8-axis matrix) | [docs/moe/int8-compat.md](docs/moe/int8-compat.md) |
 | Architecture & EM-loop deep dive (incl. v0.7 leaf-refit §2.7) | [docs/moe/architecture.md](docs/moe/architecture.md) |
 | v0.8 partition re-grow design (math + impl plan) | [docs/v0.8/partition_regrow_design.md](docs/v0.8/partition_regrow_design.md) |
-| v0.7 leaf-refit acceptance bench | [bench_results/v0_7_acceptance_FINAL.md](bench_results/v0_7_acceptance_FINAL.md) |
-| v0.8 acceptance bench (per-config + bad-init recovery) | [bench_results/v0_8_acceptance_FINAL.md](bench_results/v0_8_acceptance_FINAL.md) |
-| v0.8 500-trial search (Optuna picks refit/regrow OFF for tuned configs) | [bench_results/v0_8_search_FINAL.md](bench_results/v0_8_search_FINAL.md) |
 
 ## License
 
