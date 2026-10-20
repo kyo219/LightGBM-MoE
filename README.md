@@ -47,8 +47,8 @@ import lightgbm_moe as lgb
 params = {
     'boosting': 'mixture',           # Enable MoE mode
     'mixture_num_experts': 3,        # Number of experts (search 2-6 for your data)
-    'mixture_gate_type': 'gbdt',     # Most common winner (11/24); search 'leaf_reuse'/'none' too
-    'mixture_routing_mode': 'token_choice',  # Most common winner (14/24); search 'expert_choice' too
+    'mixture_gate_type': 'gbdt',     # Most common winner (14/30); search 'leaf_reuse'/'none' too
+    'mixture_routing_mode': 'token_choice',  # Most common winner (19/30); search 'expert_choice' too
     'objective': 'regression',
     'metric': 'rmse',
     'verbose': -1,
@@ -98,7 +98,7 @@ Three pathology guards worth knowing about:
 - **Diversity regularizer sign** was inverted in earlier code (pushed experts *together*). Sign + Huber clip + Hessian damping fix in [#26](https://github.com/kyo219/LightGBM-MoE/pull/26) — the empirical "`mixture_diversity_lambda` is the only universal MoE knob" finding ([Settings that won](#settings-that-won--search-every-knob)) only became real after this.
 - **ELBO is logged every 10 iters** (`Σ_i log Σ_k π_k p(y_i | f_k, σ_k²)`). Approximate M-step makes small dips normal; persistent / >5% drops have historically meant high expert dropout, adaptive-LR decoupling experts from EM, or a recent gradient/Hessian regression — flagged loudly so we don't miss it.
 
-A v0.7 opt-in (`mixture_refit_leaves=true`, [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)) makes the M-step refit every existing tree's leaves in closed form against the current `r_ik` before the next tree is appended — recovering classical EM's "free-parameter M-step" within each tree's existing partition. v0.8 ([#41](https://github.com/kyo219/LightGBM-MoE/issues/41)) goes one step further with `mixture_regrow_oldest_trees=true` — discards the oldest trees' splits entirely and rebuilds them via the LightGBM tree learner against current `r`, extending the M-step to the (split, leaf) pair. Both are opt-in; in the current holdout study leaf refit is ON in 15 / 24 winning configs, so search them like any other knob (see [Limitations § v0.7 leaf-value refit](#v07-leaf-value-refit--opt-in) and [§ v0.8 partition re-grow](#v08-partition-re-grow--one-level-deeper)).
+A v0.7 opt-in (`mixture_refit_leaves=true`, [#37](https://github.com/kyo219/LightGBM-MoE/issues/37)) makes the M-step refit every existing tree's leaves in closed form against the current `r_ik` before the next tree is appended — recovering classical EM's "free-parameter M-step" within each tree's existing partition. v0.8 ([#41](https://github.com/kyo219/LightGBM-MoE/issues/41)) goes one step further with `mixture_regrow_oldest_trees=true` — discards the oldest trees' splits entirely and rebuilds them via the LightGBM tree learner against current `r`, extending the M-step to the (split, leaf) pair. Both are opt-in; in the current holdout study leaf refit is effectively ON in 11 / 30 winning configs, so search them like any other knob (see [Limitations § v0.7 leaf-value refit](#v07-leaf-value-refit--opt-in) and [§ v0.8 partition re-grow](#v08-partition-re-grow--one-level-deeper)).
 
 Full deep dive with code refs: [docs/moe/architecture.md](docs/moe/architecture.md).
 
@@ -137,7 +137,7 @@ params = {
 }
 ```
 
-**Empirical position**: in the current holdout study, `mixture_refit_leaves` is **ON in 15 / 24 winning configs** — after the v0.8.1 stale-score fix it is an ordinary knob to search, not only a bad-init safety net (see [Settings that won](#settings-that-won--search-every-knob)). The pre-v0.8.1 acceptance benches that concluded otherwise ran on the stale-score build and have been removed.
+**Empirical position**: in the current holdout study, `mixture_refit_leaves` is **effectively ON in 11 / 30 winning configs** (counting only winners where it actually runs, i.e. not `leaf_reuse`) — after the v0.8.1 stale-score fix it is an ordinary knob to search, not only a bad-init safety net (see [Settings that won](#settings-that-won--search-every-knob)). The pre-v0.8.1 acceptance benches that concluded otherwise ran on the stale-score build and have been removed.
 
 - **`trigger=elbo` is the safe opt-in**: it fires only on an ELBO drop or plateau, so well-behaved EM runs are left alone.
 - **`gate_type="leaf_reuse"` is incompatible with refit and is auto-force-disabled at Init** with a one-time warning (refit rewrites expert leaves, but leaf_reuse's gate GBDT stays frozen, producing an asymmetric update).
@@ -169,7 +169,7 @@ If your problem genuinely needs mode-discovery (unsupervised regime detection wh
 
 ## When to use MoE
 
-MoE's gating mechanism wins on regime-structured data — but the **honest baseline is not single-model naive LightGBM, it's a K-way ensemble of LightGBMs** with the same total tree budget. Simply averaging K independent models with different seeds gives variance reduction "for free"; the question is whether MoE's learned routing beats that. The study below answers it: **MoE clearly wins on `synthetic` (−19.7 % vs the ensemble) — the case where the regime is a deterministic function of `X` —, on `vix` (−5.0 %), and on `fred_gdp` (−2.4 %), where the holdout window contains a genuine regime shock (COVID quarters). It ties or loses everywhere there is no regime structure to route on.** Compute trade-off: MoE costs roughly **4–10 ×** naive single-model time and **4–5 ×** naive-ensemble time per trial. Net rule: try MoE when (a) you believe the regime is observable from your features or your evaluation window contains regime shifts, and (b) your wall time has 5–10 × headroom over single-model LightGBM.
+MoE's gating mechanism wins on regime-structured data — but the **honest baseline is not single-model naive LightGBM, it's a K-way ensemble of LightGBMs** with the same total tree budget. Simply averaging K independent models with different seeds gives variance reduction "for free"; the question is whether MoE's learned routing beats that. The study below answers it: **MoE clearly wins on `synthetic` (−20.2 % vs the ensemble) — the case where the regime is a deterministic function of `X` — and on `fred_gdp` (−2.3 %, every seed), where the holdout window contains a genuine regime shock (COVID quarters). On `vix` and `hmm` it wins some seeds and loses others (+2.1 % / +2.3 % on the mean), and on data without regime structure it ties the ensemble (−1.3 % to +1.6 %).** Compute trade-off: MoE costs roughly **3–13 ×** naive single-model time and **1–4 ×** naive-ensemble time per fold (up to 31 × / 8 × on `houses`). Net rule: try MoE when (a) you believe the regime is observable from your features or your evaluation window contains regime shifts, and (b) your wall time has ~10 × headroom over single-model LightGBM — and search it over several seeds, because a single CV winner can generalize badly.
 
 ## Benchmark — holdout-first study (naive vs naive-ensemble vs MoE)
 
@@ -180,9 +180,16 @@ MoE's gating mechanism wins on regime-structured data — but the **honest basel
 > `vix` features leaked the full-sample mean (lookahead for a mean-reverting series — and a
 > regime proxy, precisely the signal a gate exploits); (4) `sp500`/`vix` targets were
 > misaligned by one step. All four are fixed and the old results have been removed.
-> The old `vix` −6.9 % win was retracted as a leak artifact, then re-established honestly
-> under the fixed protocol (−5.0 % below); the old `fred_gdp` loss flipped to a win once a
-> holdout containing the COVID quarters was actually evaluated.
+> The old `vix` −6.9 % win was retracted as a leak artifact; the old `fred_gdp` loss flipped
+> to a win once a holdout containing the COVID quarters was actually evaluated.
+>
+> **Re-measured on v0.8.4 (October 2026).** The v0.8.1 table had one more defect, in the
+> library rather than the protocol: `mixture_gate_type="leaf_reuse"` routed samples through
+> stateful sparse-bin iterators shared across OpenMP threads, so the gate misrouted samples
+> nondeterministically ([PR #61](https://github.com/kyo219/LightGBM-MoE/pull/61)). Every
+> `leaf_reuse` measurement before that fix is invalid — including the v0.8.1 `vix` −5.0 %
+> win, whose winners leaned on `leaf_reuse`. The table below is the fixed build, with
+> `deterministic=true` on every variant so each (dataset, seed) cell reproduces bit-for-bit.
 
 Protocol: the final 20 % of every series is a **chronological holdout never seen by Optuna**.
 Hyperparameters are selected by expanding-window time-series CV (5 folds, 1-step embargo,
@@ -192,8 +199,13 @@ fold) over the first 80 %; the CV winner is retrained once and scored once on th
 (`--moe-space wide`: all inits including `gmm_features`/`kmeans_features`, K ∈ 2–6, gate
 temperature annealing, entropy λ, expert dropout, load-balance α, refit/regrow), 3 seeds
 (synthetic/hmm redraw data, TPE + models reseed), reported as holdout RMSE mean ± std.
-Deterministic per seed (`--n-jobs 1`); build provenance (git commit, lib sha256, dataset
-sha256s) is recorded in the output JSON. Raw outputs: [`bench_results/wide_v081/`](bench_results/wide_v081/).
+Every (dataset, seed) cell runs in its own process (`--parallel 6`, `num_threads=4` per
+trial) with `deterministic=true` and sequential Optuna (`--n-jobs 1`), so a cell reproduces
+bit-for-bit; the merge refuses parts from a dirty tree or from different builds. Build
+provenance (git commit, lib sha256, dataset sha256s) is recorded in the output. Results:
+[`bench_results/headline_v084/`](bench_results/headline_v084/) (`study_summary.json` +
+`study_report.md`; the 99 MB per-trial JSON and the 33 MB of per-cell slice plots are
+regenerated by the run and not committed).
 
 The third variant — **`naive-ensemble`** — is a K-way (K ∈ {2, 3, 4}) seed-ensemble of
 standard LightGBMs that share hyperparameters but diverge per-member via the `seed`
@@ -205,12 +217,12 @@ search space as `naive-lightgbm` plus K, same 500-trial budget. It is the fair a
 
 **Regime datasets** — where the gating hypothesis is tested:
 
-| Dataset | Shape | naive | ensemble | MoE | MoE vs naive | **MoE vs ensemble** *(the fair test)* |
+| Dataset | Shape | naive | ensemble | MoE | MoE vs naive | **MoE vs ensemble** |
 |---|---|---|---|---|---|---|
-| `synthetic` | 2000 × 5 | 4.840 ± 0.311 | 4.723 ± 0.327 | **3.792 ± 0.249** | −21.7 % | **−19.7 %** 🎯 |
-| `vix` | 3763 × 13 | 1.768 ± 0.091 | 1.739 ± 0.051 | **1.653 ± 0.030** | −6.5 % | **−5.0 %** 🎯 |
-| `fred_gdp` | 311 × 12 | 1.542 ± 0.026 | 1.530 ± 0.008 | **1.494 ± 0.010** | −3.1 % | **−2.4 %** 🎯 |
-| `hmm` | 2000 × 5 | 2.216 ± 0.244 | 2.208 ± 0.242 | 2.255 ± 0.229 | +1.8 % | +2.1 % *(ensemble wins)* |
+| `synthetic` | 2000 × 5 | 4.840 ± 0.311 | 4.723 ± 0.327 | **3.770 ± 0.222** | −22.1 % | **−20.2 %** |
+| `vix` | 3763 × 13 | 1.768 ± 0.091 | **1.739 ± 0.051** | 1.776 ± 0.219 | +0.4 % | **+2.1 %** |
+| `fred_gdp` | 311 × 12 | 1.553 ± 0.011 | 1.540 ± 0.017 | **1.504 ± 0.003** | −3.1 % | **−2.3 %** |
+| `hmm` | 2000 × 5 | 2.216 ± 0.244 | **2.208 ± 0.242** | 2.258 ± 0.308 | +1.9 % | **+2.3 %** |
 
 **Non-regime control datasets** (Grinsztajn et al. 2022 regression track) — standard i.i.d.
 tabular regression with **no regime structure**. The control group: if MoE beat the
@@ -218,37 +230,48 @@ ensemble here too, the "regime routing" story would be confounded with generic c
 
 | Dataset | Shape | naive | ensemble | MoE | MoE vs naive | **MoE vs ensemble** |
 |---|---|---|---|---|---|---|
-| `houses` | 10000 × 8 | 50109 ± 902 | 48816 ± 1005 | 48623 ± 683 | −3.0 % | **-0.4 %** |
-| `cpu_act` | 8192 × 21 | 2.498 ± 0.30 | 2.4485 ± 0.336 | 2.431 ± 0.33 | −2.7 % | **-0.7 %** |
-| `elevators` | 10000 × 18 | 0.002357 | 0.002296 | 0.002299 | −2.5 % | **+0.1 %** |
-| `wine_quality` | 6497 × 11 | 0.6146 ± 0.014 | 0.6065 ± 0.013 | 0.6119 ± 0.016 | −0.4 % | **+0.9 %** |
+| `houses` | 10000 × 8 | 50109 ± 902 | 48816 ± 1005 | **48668 ± 533** | −2.9 % | **−0.3 %** |
+| `cpu_act` | 8192 × 21 | 2.498 ± 0.297 | 2.448 ± 0.336 | **2.416 ± 0.332** | −3.3 % | **−1.3 %** |
+| `elevators` | 10000 × 18 | 0.002357 ± 0.000080 | **0.002296 ± 0.000060** | 0.002332 ± 0.000099 | −1.1 % | **+1.6 %** |
+| `wine_quality` | 6497 × 11 | 0.6146 ± 0.0141 | 0.6065 ± 0.0126 | **0.6034 ± 0.0120** | −1.8 % | **−0.5 %** |
 
-Read the two tables together. On regime data MoE beats the **capacity-matched** ensemble
-wherever the regime is strongly observable (`synthetic`), a volatility regime is present
-(`vix`), or the holdout crosses a regime break (`fred_gdp`); it loses `hmm`, where the
-regime is only weakly observable through two noisy proxy columns — the honest limitation.
-On the controls MoE beats *naive* by 2–3 % — **but it merely matches the ensemble,
-within ±1 % on all four**: on i.i.d. data MoE's gain over naive is fully explained by
-generic K-way capacity, and learned routing adds nothing without structure to route on.
-That is the attribution result the regime wins need.
+**Noise-floor datasets** (next-day S&P 500 returns) — a sanity check, not a test: every
+variant sits at the irreducible noise floor (all differences ≤ 0.4 %), so MoE invents no
+structure where there is none.
 
-*(The two `sp500` next-day-return datasets from earlier reports sit at the irreducible
-noise floor for every variant under this protocol — all differences < 0.4 % — and are kept
-out of the headline table; generators and measurements remain in the repo
-([`bench_results/meth2_v081/`](bench_results/meth2_v081/)).)*
+| Dataset | Shape | naive | ensemble | MoE | MoE vs naive | **MoE vs ensemble** |
+|---|---|---|---|---|---|---|
+| `sp500_basic` | 3762 × 13 | **0.01102 ± 0.00001** | 0.01103 ± 0.00002 | 0.01103 ± 0.00001 | +0.1 % | **+0.0 %** |
+| `sp500` | 3711 × 28 | 0.01109 ± 0.00003 | **0.01104 ± 0.00001** | 0.01105 ± 0.00001 | −0.4 % | **+0.0 %** |
 
-### Compute cost (median train s/fold across trials)
+Read the tables together. On regime data MoE beats the **capacity-matched** ensemble where
+the regime is strongly observable from `X` (`synthetic`, −20 %, every seed) or the holdout
+crosses a regime break (`fred_gdp`, −2.3 %, every seed, with a 5 × tighter seed spread than
+the ensemble). `vix` and `hmm` are mixed: on `vix` MoE wins the CV on every seed and the
+holdout on two of three (−3 % to −7 %), but the third seed's winner generalizes badly
+(+15 %) and drags the mean to +2.1 %; on `hmm`, where the regime is only weakly observable
+through two noisy proxy columns, MoE ties two seeds and loses one. On the controls MoE
+beats *naive* by 1–3 % **but merely matches the ensemble (−1.3 % to +1.6 %)**: on i.i.d.
+data MoE's gain over naive is explained by generic K-way capacity, and learned routing adds
+nothing without structure to route on. That is the attribution result the regime wins need.
+
+### Compute cost (median train s/fold across trials, mean over seeds)
+
+Measured with six cells running concurrently at `num_threads=4` each, so absolute seconds
+are not comparable to earlier tables; the ratios are the point.
 
 | Dataset | naive | ensemble | MoE | MoE / naive | MoE / ensemble |
 |---|---|---|---|---|---|
-| `synthetic` | 0.124 | 0.294 | 1.180 | 9.5 × | 4.0 × |
-| `vix` | 0.066 | 0.124 | 0.490 | 7.4 × | 4.0 × |
-| `fred_gdp` | 0.016 | 0.019 | 0.541 | 34 × *(tiny data, fixed overhead)* | 28 × |
-| `hmm` | 0.044 | 0.078 | 0.365 | 8.3 × | 4.7 × |
-| `houses` | 0.251 | 0.633 | 2.503 | 10.0 × | 4.0 × |
-| `cpu_act` | 0.159 | 0.386 | 1.166 | 7.3 × | 3.0 × |
-| `elevators` | 0.151 | 0.269 | 1.394 | 9.2 × | 5.2 × |
-| `wine_quality` | 0.354 | 0.868 | 1.471 | 4.2 × | 1.7 × |
+| `synthetic` | 0.041 | 0.210 | 0.311 | 7.5 × | 1.5 × |
+| `fred_gdp` | 0.013 | 0.108 | 0.098 | 7.3 × | 0.9 × |
+| `sp500_basic` | 0.018 | 0.086 | 0.109 | 6.0 × | 1.3 × |
+| `sp500` | 0.026 | 0.189 | 0.200 | 7.5 × | 1.1 × |
+| `vix` | 0.038 | 0.146 | 0.406 | 10.7 × | 2.8 × |
+| `hmm` | 0.032 | 0.184 | 0.163 | 5.0 × | 0.9 × |
+| `houses` | 0.136 | 0.512 | 4.189 | 30.8 × | 8.2 × |
+| `cpu_act` | 0.074 | 0.309 | 0.638 | 8.6 × | 2.1 × |
+| `elevators` | 0.064 | 0.203 | 0.845 | 13.1 × | 4.2 × |
+| `wine_quality` | 0.149 | 0.598 | 0.505 | 3.4 × | 0.8 × |
 
 ### Datasets
 
@@ -275,7 +298,7 @@ target is the value at t + 1** (verified by `tests/python_package_test/test_benc
 
 - **Source**: Yahoo Finance, symbol [`^VIX`](https://finance.yahoo.com/quote/%5EVIX/history), `2010-01-01` to `2024-12-31`.
 - **Index methodology**: [CBOE VIX](https://www.cboe.com/tradable_products/vix/).
-- **Construction**: target is next-day VIX level. Features: lagged VIX at lags {1, 2, 3, 5, 10} plus MA / rolling-volatility features computed on a **causally demeaned** series (expanding past-only mean — the pre-v0.8.1 version demeaned with the full-sample mean, which leaked "above/below the all-time mean" into the features; the current win is measured leak-free). Generator: `generate_vix_data`.
+- **Construction**: target is next-day VIX level. Features: lagged VIX at lags {1, 2, 3, 5, 10} plus MA / rolling-volatility features computed on a **causally demeaned** series (expanding past-only mean — the pre-v0.8.1 version demeaned with the full-sample mean, which leaked "above/below the all-time mean" into the features; the current numbers are measured leak-free). Generator: `generate_vix_data`.
 
 #### `fred_gdp` — US Real GDP, Hamilton-style MS-AR(4) (~310 × 12)
 
@@ -303,26 +326,26 @@ subsequent runs are offline.
 
 ### Settings that won — search every knob
 
-From the 24 winning MoE configs (8 datasets × 3 seeds). The headline: the knobs that were
-**frozen at their defaults before v0.8.1** are doing real work — the `vix` win in
-particular is driven by gate temperature annealing (T ≈ 2.4–2.9 → annealed down), expert
-dropout 0.1–0.2 and the soft M-step, not by any init choice.
+From the 30 winning MoE configs (10 datasets × 3 seeds). The knobs that were **frozen at
+their defaults before v0.8.1** are active in nearly every winner; the structural choices
+(init, gate type, routing, K) have no universal winner.
 
 | Knob | Finding |
 |---|---|
-| `mixture_diversity_lambda` | active (> 0.02) in **23 / 24** winners — still the one near-universal knob |
-| `mixture_expert_dropout_rate` | active in **21 / 24** (typically 0.05–0.2) — was frozen at 0 pre-v0.8.1 |
-| `mixture_load_balance_alpha` | active in **22 / 24** — was frozen at 0 |
-| `mixture_gate_entropy_lambda` | active in **17 / 19** gate-equipped winners — was frozen at 0 |
-| gate temperature | `T_init > 1.5` in **12 / 19** — the old fixed `T = 1.0` was leaving accuracy on the table |
-| `mixture_refit_leaves` | **ON in 15 / 24 winners** — updates the v0.8 finding ("Optuna declines refit on 5/6 datasets"): after the v0.8.1 stale-score fix and ELBO-trigger cooldown, leaf refit is an ordinary useful knob rather than a bad-init-only safety net |
-| `mixture_hard_m_step` | soft (False) in 16 / 24 — the hard-M-step default is *not* a universal winner |
-| `mixture_init` / `mixture_gate_type` / `mixture_routing_mode` / K | no universal winner (gmm 8, uniform 6, random 5, feature-space inits 4, tree 1 / gbdt 11, leaf_reuse 8, none 5 / token 14, expert 10 / K spread 2–6) — **search them** |
+| `mixture_diversity_lambda` | active (> 0.02) in **28 / 30** winners |
+| `mixture_expert_dropout_rate` | active in **26 / 30** — was frozen at 0 pre-v0.8.1 |
+| `mixture_load_balance_alpha` | active in **29 / 30** — was frozen at 0 |
+| `mixture_gate_entropy_lambda` | active in **21 / 25** gate-equipped winners — was frozen at 0 |
+| gate temperature | `T_init > 1.5` in **12 / 25** gate-equipped winners — search it, don't fix `T = 1.0` |
+| `mixture_refit_leaves` | **effectively ON in 11 / 30** (it is force-disabled under `leaf_reuse`, so only gbdt/none winners count) — an ordinary knob to search, not a default |
+| `mixture_regrow_oldest_trees` | effectively ON in **6 / 30** |
+| `mixture_hard_m_step` | soft (False) in 15 / 30 — a coin flip; search it |
+| `mixture_init` / `mixture_gate_type` / `mixture_routing_mode` / K | no universal winner (random 9, gmm 6, gmm_features 5, uniform 5, tree_hierarchical 3, kmeans_features 2 / gbdt 14, leaf_reuse 11, none 5 / token 19, expert 11 / K spread 2–6) — **search them** |
 
 ```bash
-# Full headline study (holdout protocol, wide MoE space, 3 seeds; deterministic per seed)
-python examples/comparative_study.py --trials 500 --seeds 42,43,44 \
-    --moe-space wide --out bench_results/study_wide.json
+# Full headline study: 10 datasets × 3 seeds × 3 variants, 500 trials, wide MoE space.
+# ~5 h on 12 cores. Finished cells are reused, so rerunning the command resumes.
+python examples/comparative_study.py --parallel 6 --out bench_results/headline_v084/study.json
 
 # Smoke test (~2 min)
 python examples/comparative_study.py --trials 10 --seeds 42 \
